@@ -1,0 +1,6 @@
+image,similarity,recognized
+photo_01.jpg,1.0000,YES
+photo_02.jpg,-0.0026,NO
+photo_03.jpg,-0.0270,NO
+photo_04.jpg,0.0158,NO
+photo_05.jpg,-0.0674,NO

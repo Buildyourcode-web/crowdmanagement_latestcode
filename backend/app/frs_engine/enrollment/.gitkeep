@@ -1,0 +1,7 @@
+# Enrollment images go here.
+# Example: data/enrollment/person_001_front.jpg
+#
+# Naming convention (recommended for R&D):
+#   {person_name}_{pose_angle}.jpg
+#   e.g. person_001_front.jpg
+#        person_001_left45.jpg

@@ -1,0 +1,16 @@
+# Test images for R0 evaluation.
+#
+# For our pose benchmark, organise like:
+#   data/test/{person_name}/
+#       front.jpg       (0°)
+#       left15.jpg      (15° left)
+#       left30.jpg      (30° left)
+#       left45.jpg      (45° left)
+#       left60.jpg      (60° left)
+#       left75.jpg      (75° left)
+#       profile.jpg     (90°)
+#
+# This structure will be used to compute:
+#   - Genuine similarity at each pose angle
+#   - TAR @ FAR per pose
+#   - The R0 baseline table

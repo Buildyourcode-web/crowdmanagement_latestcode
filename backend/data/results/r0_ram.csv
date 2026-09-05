@@ -1,0 +1,2 @@
+image,ground_truth,similarity,recognized,correct,det_score,note,threshold,identity,experiment
+ram_2.jpg,genuine,1.0000,YES,YES,0.8094,,0.5,ram,R0

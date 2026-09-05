@@ -1,0 +1,166 @@
+/* BYC AI Command Center — CSS Variables & Design Tokens */
+
+:root,
+[data-theme="dark"] {
+  /* --- Backgrounds --- */
+  --cc-bg-root: #080b0e;
+  --cc-bg-primary: #0a0d10;
+  --cc-bg-secondary: #0f1318;
+  --cc-bg-panel: #141920;
+  --cc-bg-card: #191f27;
+  --cc-bg-card-hover: #1e2530;
+  --cc-bg-input: #111620;
+  --cc-bg-sidebar: #0c1017;
+  --cc-bg-topbar: #0a0d10;
+
+  /* --- Borders --- */
+  --cc-border: #252d38;
+  --cc-border-light: #1e2730;
+  --cc-border-strong: #303d4d;
+
+  /* --- Typography --- */
+  --cc-text-primary: #dce8f0;
+  --cc-text-secondary: #7a919e;
+  --cc-text-muted: #4a6070;
+  --cc-text-accent: #58a6ff;
+  --cc-text-label: #8faec0;
+
+  /* --- Status Colors --- */
+  --cc-green: #3fb950;
+  --cc-green-dim: rgba(63, 185, 80, 0.15);
+  --cc-green-border: rgba(63, 185, 80, 0.3);
+
+  --cc-yellow: #e3b341;
+  --cc-yellow-dim: rgba(227, 179, 65, 0.15);
+  --cc-yellow-border: rgba(227, 179, 65, 0.3);
+
+  --cc-orange: #f0883e;
+  --cc-orange-dim: rgba(240, 136, 62, 0.15);
+  --cc-orange-border: rgba(240, 136, 62, 0.3);
+
+  --cc-red: #f85149;
+  --cc-red-dim: rgba(248, 81, 73, 0.15);
+  --cc-red-border: rgba(248, 81, 73, 0.3);
+
+  --cc-blue: #58a6ff;
+  --cc-blue-dim: rgba(88, 166, 255, 0.12);
+  --cc-blue-border: rgba(88, 166, 255, 0.3);
+
+  /* --- Accent / Brand --- */
+  --cc-accent: #1f6feb;
+  --cc-accent-hover: #388bfd;
+  --cc-accent-dim: rgba(31, 111, 235, 0.15);
+
+  /* --- Map / Charts specific --- */
+  --cc-chart-axis: #252d38;
+  --cc-chart-split: #1e2730;
+  --cc-chart-label: #4a6070;
+  --cc-chart-tooltip-bg: #141920;
+  --cc-chart-tooltip-border: #252d38;
+  --cc-chart-tooltip-text: #dce8f0;
+
+  /* --- Sidebar --- */
+  --cc-sidebar-width: 220px;
+  --cc-sidebar-collapsed-width: 56px;
+  --cc-topbar-height: 52px;
+
+  /* --- Fonts --- */
+  --cc-font-mono: "JetBrains Mono", "Fira Code", "Courier New", monospace;
+  --cc-font-sans: "Inter", "Segoe UI", sans-serif;
+  --cc-font-label: "Inter", sans-serif;
+
+  /* --- Misc --- */
+  --cc-radius: 3px;
+  --cc-radius-sm: 2px;
+  --cc-radius-md: 4px;
+  --cc-shadow: 0 2px 8px rgba(0, 0, 0, 0.5);
+  --cc-shadow-strong: 0 4px 20px rgba(0, 0, 0, 0.7);
+  --cc-transition: 150ms ease;
+
+  /* Bootstrap overrides */
+  --bs-body-bg: var(--cc-bg-primary);
+  --bs-body-color: var(--cc-text-primary);
+  --bs-border-color: var(--cc-border);
+  --bs-primary: #1f6feb;
+  --bs-danger: #f85149;
+  --bs-warning: #e3b341;
+  --bs-success: #3fb950;
+  --bs-info: #58a6ff;
+}
+
+/* ==========================================================================
+   LIGHT MODE DESIGN SYSTEM
+   Professional, high-contrast, clean operational aesthetic for bright rooms
+   ========================================================================== */
+[data-theme="light"] {
+  /* --- Backgrounds --- */
+  --cc-bg-root: #e9edf2;
+  --cc-bg-primary: #f2f5f8;
+  --cc-bg-secondary: #e4e9f0;
+  --cc-bg-panel: #ffffff;
+  --cc-bg-card: #ffffff;
+  --cc-bg-card-hover: #f5f8fc;
+  --cc-bg-input: #ffffff;
+  --cc-bg-sidebar: #ebf0f5;
+  --cc-bg-topbar: #ffffff;
+
+  /* --- Borders --- */
+  --cc-border: #cbd5e1;
+  --cc-border-light: #e2e8f0;
+  --cc-border-strong: #94a3b8;
+
+  /* --- Typography --- */
+  --cc-text-primary: #0f172a;
+  --cc-text-secondary: #334155;
+  --cc-text-muted: #64748b;
+  --cc-text-accent: #0284c7;
+  --cc-text-label: #475569;
+
+  /* --- Status Colors --- */
+  --cc-green: #16a34a;
+  --cc-green-dim: rgba(22, 163, 74, 0.12);
+  --cc-green-border: rgba(22, 163, 74, 0.35);
+
+  --cc-yellow: #ca8a04;
+  --cc-yellow-dim: rgba(202, 138, 4, 0.12);
+  --cc-yellow-border: rgba(202, 138, 4, 0.35);
+
+  --cc-orange: #ea580c;
+  --cc-orange-dim: rgba(234, 88, 12, 0.12);
+  --cc-orange-border: rgba(234, 88, 12, 0.35);
+
+  --cc-red: #dc2626;
+  --cc-red-dim: rgba(220, 38, 38, 0.12);
+  --cc-red-border: rgba(220, 38, 38, 0.35);
+
+  --cc-blue: #0284c7;
+  --cc-blue-dim: rgba(2, 132, 199, 0.12);
+  --cc-blue-border: rgba(2, 132, 199, 0.35);
+
+  /* --- Accent / Brand --- */
+  --cc-accent: #0284c7;
+  --cc-accent-hover: #0369a1;
+  --cc-accent-dim: rgba(2, 132, 199, 0.12);
+
+  /* --- Map / Charts specific --- */
+  --cc-chart-axis: #cbd5e1;
+  --cc-chart-split: #e2e8f0;
+  --cc-chart-label: #64748b;
+  --cc-chart-tooltip-bg: #ffffff;
+  --cc-chart-tooltip-border: #cbd5e1;
+  --cc-chart-tooltip-text: #0f172a;
+
+  /* --- Shadows --- */
+  --cc-shadow: 0 1px 3px rgba(0, 0, 0, 0.08), 0 1px 2px rgba(0, 0, 0, 0.04);
+  --cc-shadow-strong: 0 4px 12px rgba(0, 0, 0, 0.1);
+
+  /* Bootstrap overrides for light theme */
+  --bs-body-bg: var(--cc-bg-primary);
+  --bs-body-color: var(--cc-text-primary);
+  --bs-border-color: var(--cc-border);
+  --bs-primary: #0284c7;
+  --bs-danger: #dc2626;
+  --bs-warning: #ca8a04;
+  --bs-success: #16a34a;
+  --bs-info: #0284c7;
+}

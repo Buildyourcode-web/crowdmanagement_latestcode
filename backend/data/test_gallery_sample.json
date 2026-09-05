@@ -1,0 +1,17 @@
+[
+  {
+    "person_id": "person_001",
+    "name": "Alice",
+    "embeddings": [
+      [0.044, 0.012, 0.051],
+      [0.042, 0.015, 0.048]
+    ]
+  },
+  {
+    "person_id": "person_002",
+    "name": "Bob",
+    "embeddings": [
+      [-0.031, 0.082, -0.012]
+    ]
+  }
+]

@@ -1,0 +1,73 @@
+version: "3.8"
+
+services:
+  # FastAPI Application
+  backend:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: byc_backend
+    restart: unless-stopped
+    ports:
+      - "8000:8000"
+    environment:
+      - DATABASE_URL=postgresql+asyncpg://postgres:postgres@db:5432/main_crowd_ai
+      - REDIS_URL=redis://redis:6379/0
+      - APP_ENV=production
+      - DEBUG=false
+      - JWT_SECRET_KEY=byc_super_secret_jwt_key_khairatabad_2026_production_change_me
+    depends_on:
+      db:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    volumes:
+      - ./media:/app/media
+    networks:
+      - byc_network
+
+  # PostgreSQL with PostGIS
+  db:
+    image: postgis/postgis:16-3.4-alpine
+    container_name: byc_postgres
+    restart: unless-stopped
+    ports:
+      - "5432:5432"
+    environment:
+      - POSTGRES_USER=postgres
+      - POSTGRES_PASSWORD=postgres
+      - POSTGRES_DB=main_crowd_ai
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres -d main_crowd_ai"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    networks:
+      - byc_network
+
+  # Redis for Pub/Sub and Caching
+  redis:
+    image: redis:7-alpine
+    container_name: byc_redis
+    restart: unless-stopped
+    ports:
+      - "6379:6379"
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    volumes:
+      - redis_data:/data
+    networks:
+      - byc_network
+
+networks:
+  byc_network:
+    driver: bridge
+
+volumes:
+  postgres_data:
+  redis_data:
