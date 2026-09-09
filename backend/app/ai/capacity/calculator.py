@@ -348,8 +348,15 @@ class CapacityCalculator:
         gpu_info: Dict[str, Any],
         cfg: Optional[CapacitySafetyConfig] = None,
     ) -> Dict[str, ProfileCapacityItem]:
-        """Calculates capacity for all 5 standard profiles."""
-        profiles = ["CROWD_STANDARD", "CROWD_HIGH_DENSITY", "QUEUE_STANDARD", "FRS_STANDARD", "VIDEO_SAFETY"]
+        profiles = [
+            "CROWD_STANDARD",
+            "CROWD_HIGH_DENSITY",
+            "CROWD_YOLO11X",
+            "QUEUE_STANDARD",
+            "QUEUE_YOLO11X",
+            "FRS_STANDARD",
+            "VIDEO_SAFETY",
+        ]
         results = {}
         for p in profiles:
             results[p] = cls.calculate_single_profile_capacity(p, cpu_info, ram_info, gpu_info, cfg)

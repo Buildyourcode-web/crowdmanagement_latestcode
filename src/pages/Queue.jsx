@@ -1,5 +1,5 @@
 // Queue Intelligence Dashboard — Real-time queue headcount, wait times, and bottleneck detection
-import { useEffect, useState, useCallback } from "react";
+import { useEffect, useState, useCallback, useRef } from "react";
 import KpiCard from "../components/common/KpiCard.jsx";
 import StatusBadge from "../components/common/StatusBadge.jsx";
 import { getQueueStatus } from "../services/queueService.js";
@@ -13,12 +13,19 @@ export default function Queue() {
   const [dbQueues, setDbQueues] = useState([]);
   const [loading, setLoading] = useState(true);
 
+  const inFlightRef = useRef(false);
+  const timerRef = useRef(null);
+  const isMountedRef = useRef(true);
+
   const fetchStatus = useCallback(async () => {
+    if (inFlightRef.current) return;
+    inFlightRef.current = true;
     try {
       const [pRes, qRes] = await Promise.allSettled([
         getQueueStatus(),
         getQueueData(),
       ]);
+      if (!isMountedRef.current) return;
       if (pRes.status === "fulfilled") {
         setPipelineStatus(pRes.value?.data || pRes.value);
       }
@@ -29,14 +36,43 @@ export default function Queue() {
     } catch {
       // ignore
     } finally {
-      setLoading(false);
+      if (isMountedRef.current) setLoading(false);
+      inFlightRef.current = false;
     }
   }, []);
 
   useEffect(() => {
+    isMountedRef.current = true;
     fetchStatus();
-    const timer = setInterval(fetchStatus, 5000);
-    return () => clearInterval(timer);
+
+    const scheduleNext = () => {
+      clearTimeout(timerRef.current);
+      if (typeof document !== "undefined" && document.visibilityState === "hidden") return;
+      timerRef.current = setTimeout(async () => {
+        if (isMountedRef.current && document.visibilityState === "visible") {
+          await fetchStatus();
+          scheduleNext();
+        }
+      }, 5000);
+    };
+
+    scheduleNext();
+
+    const handleVis = () => {
+      if (document.visibilityState === "visible") {
+        fetchStatus();
+        scheduleNext();
+      } else {
+        clearTimeout(timerRef.current);
+      }
+    };
+    document.addEventListener("visibilitychange", handleVis);
+
+    return () => {
+      isMountedRef.current = false;
+      clearTimeout(timerRef.current);
+      document.removeEventListener("visibilitychange", handleVis);
+    };
   }, [fetchStatus]);
 
   if (loading) return <LoadingState />;

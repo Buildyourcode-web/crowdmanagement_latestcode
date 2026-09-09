@@ -12,46 +12,19 @@ export default function AppShell() {
   const setCrowdFromAPI = useCrowdStore((s) => s.setCrowdFromAPI);
 
   useEffect(() => {
-    // Initial fetch immediately on mount
+    // Background poll every 30s for top-bar/global state
     const fetchCrowd = async () => {
       try {
         const res = await getCrowdSummary();
         const d = res?.data ?? res ?? {};
         setCrowdFromAPI(d);
       } catch (e) {
-        // Network error — leave store values as-is (zeros)
-        console.warn("[AppShell] Crowd poll failed:", e.message);
+        // Network error — leave store values as-is
+        console.warn("[AppShell] Crowd poll notice:", e.message);
       }
     };
 
-    fetchCrowd();
     const timer = setInterval(fetchCrowd, POLL_MS);
-
-    // Background pre-warm common categories so opening them is 0ms instant
-    const prewarm = async () => {
-      try {
-        const [
-          { getCameraStats, getCameras },
-          { getZoneCrowdData },
-          { getAlerts },
-        ] = await Promise.all([
-          import("../../services/cameraService.js"),
-          import("../../services/crowdService.js"),
-          import("../../services/alertService.js"),
-        ]);
-        // Fire and populate client cache in parallel
-        Promise.allSettled([
-          getCameraStats(),
-          getCameras({ page_size: 12 }),
-          getZoneCrowdData(),
-          getAlerts({ page_size: 50 }),
-        ]);
-      } catch (e) {
-        // Non-fatal pre-warm
-      }
-    };
-    prewarm();
-
     return () => clearInterval(timer);
   }, [setCrowdFromAPI]);
 

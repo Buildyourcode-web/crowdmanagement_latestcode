@@ -5,7 +5,7 @@
 //    individual pipeline Start/Stop/Restart, fault diagnostics, auto-reconnect telemetry.
 // 2. Hardware Capacity & Runtime Engine: hardware inspection, per-profile capacity, system health check.
 
-import { useState, useEffect, useCallback } from 'react';
+import { useState, useEffect, useCallback, useRef } from 'react';
 import {
   getAICapabilities,
   getAICapacity,
@@ -147,7 +147,13 @@ export default function AIDeployment() {
   const theme = useAppStore(s => s.theme);
   const isLight = theme === 'light';
 
+  const inFlightRef = useRef(false);
+  const timerRef = useRef(null);
+  const isMountedRef = useRef(true);
+
   const fetchData = useCallback(async () => {
+    if (inFlightRef.current) return;
+    inFlightRef.current = true;
     setLoading(true);
     setError(null);
     try {
@@ -157,22 +163,54 @@ export default function AIDeployment() {
         listAIDeployments().catch(() => []),
         getAIOrchestratorStatus().catch(() => null),
       ]);
+      if (!isMountedRef.current) return;
       if (capsData) setCaps(capsData);
       if (capData) setCapacity(capData);
       setDeployments(depsData || []);
       setOrchStatus(statusData);
       setLastRefresh(new Date().toLocaleTimeString());
     } catch (e) {
-      setError(e.response?.data?.message || e.message || 'Failed to fetch orchestrator data.');
+      if (isMountedRef.current) {
+        setError(e.response?.data?.message || e.message || 'Failed to fetch orchestrator data.');
+      }
     } finally {
-      setLoading(false);
+      if (isMountedRef.current) setLoading(false);
+      inFlightRef.current = false;
     }
   }, []);
 
   useEffect(() => {
+    isMountedRef.current = true;
     fetchData();
-    const interval = setInterval(fetchData, 8000); // Polling every 8s
-    return () => clearInterval(interval);
+
+    const scheduleNext = () => {
+      clearTimeout(timerRef.current);
+      if (typeof document !== "undefined" && document.visibilityState === "hidden") return;
+      timerRef.current = setTimeout(async () => {
+        if (isMountedRef.current && document.visibilityState === "visible") {
+          await fetchData();
+          scheduleNext();
+        }
+      }, 8000);
+    };
+
+    scheduleNext();
+
+    const handleVis = () => {
+      if (document.visibilityState === "visible") {
+        fetchData();
+        scheduleNext();
+      } else {
+        clearTimeout(timerRef.current);
+      }
+    };
+    document.addEventListener("visibilitychange", handleVis);
+
+    return () => {
+      isMountedRef.current = false;
+      clearTimeout(timerRef.current);
+      document.removeEventListener("visibilitychange", handleVis);
+    };
   }, [fetchData]);
 
   // ── Action Handlers ──────────────────────────────────────────────────────────

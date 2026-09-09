@@ -38,16 +38,30 @@ from app.schemas.camera_roi import (
 
 
 # Profile-to-ROI compatibility matrix
+CROWD_ROIS = {
+    ROIType.CROWD_ROI,
+    ROIType.EXCLUSION_ZONE,
+    ROIType.COUNTING_LINE,
+    ROIType.ENTRY_LINE,
+    ROIType.EXIT_LINE,
+    ROIType.DIRECTION_LINE,
+}
+
+QUEUE_ROIS = {
+    ROIType.QUEUE_ROI,
+    ROIType.EXCLUSION_ZONE,
+    ROIType.COUNTING_LINE,
+    ROIType.ENTRY_LINE,
+    ROIType.EXIT_LINE,
+    ROIType.DIRECTION_LINE,
+}
+
 PROFILE_ALLOWED_ROIS = {
-    "CROWD_STANDARD": {ROIType.CROWD_ROI, ROIType.EXCLUSION_ZONE, ROIType.COUNTING_LINE},
-    "CROWD_HIGH_DENSITY": {ROIType.CROWD_ROI, ROIType.EXCLUSION_ZONE, ROIType.COUNTING_LINE},
-    "QUEUE_STANDARD": {
-        ROIType.QUEUE_ROI,
-        ROIType.ENTRY_LINE,
-        ROIType.EXIT_LINE,
-        ROIType.DIRECTION_LINE,
-        ROIType.EXCLUSION_ZONE,
-    },
+    "CROWD_STANDARD": CROWD_ROIS,
+    "CROWD_HIGH_DENSITY": CROWD_ROIS,
+    "CROWD_YOLO11X": CROWD_ROIS,
+    "QUEUE_STANDARD": QUEUE_ROIS,
+    "QUEUE_YOLO11X": QUEUE_ROIS,
     "VIDEO_SAFETY": {ROIType.EXCLUSION_ZONE, ROIType.ZONE_BOUNDARY, ROIType.COUNTING_LINE},
     "FRS_STANDARD": set(),  # FRS strictly isolated: no crowd or queue analytics
 }
@@ -94,10 +108,10 @@ class CameraROIService:
                 if not (0.0 <= x <= 1.0 and 0.0 <= y <= 1.0):
                     return False, f"Endpoint '{key}' ({x}, {y}) is outside valid range [0.0, 1.0]."
 
-            # Ensure start and end are distinct
+            # Ensure start and end are distinct (auto-nudge if clicked at exact same spot)
             s, e = geometry_json["start"], geometry_json["end"]
             if abs(s["x"] - e["x"]) < 1e-4 and abs(s["y"] - e["y"]) < 1e-4:
-                return False, "Start and end points of a counting or boundary line must be distinct."
+                e["x"] = min(1.0, s["x"] + 0.05) if s["x"] < 0.95 else max(0.0, s["x"] - 0.05)
 
             return True, None
 
@@ -129,9 +143,10 @@ class CameraROIService:
         elif roi_type in line_types:
             if "start" not in geometry_json or "end" not in geometry_json:
                 return False, "COUNTING_LINE_INVALID", "Line geometry must contain both 'start' and 'end' points."
-            direction = geometry_json.get("direction", "BOTH")
+            direction = (geometry_json.get("direction") or "BOTH").upper()
             if direction not in ("IN", "OUT", "BOTH"):
-                return False, "COUNTING_LINE_INVALID", "Line direction must be 'IN', 'OUT', or 'BOTH'."
+                direction = "BOTH"
+            geometry_json["direction"] = direction
 
         coord_valid, coord_err = CameraROIService.validate_coordinates(geometry_json)
         if not coord_valid:
@@ -177,25 +192,31 @@ class CameraROIService:
                 message="No active ROIs configured for this profile.",
             )
 
-        if profile_id in ("CROWD_STANDARD", "CROWD_HIGH_DENSITY"):
-            if ROIType.CROWD_ROI.value in types_present:
+        if profile_id in ("CROWD_STANDARD", "CROWD_HIGH_DENSITY", "CROWD_YOLO11X"):
+            crowd_valid_types = {
+                ROIType.CROWD_ROI.value,
+                ROIType.COUNTING_LINE.value,
+                ROIType.ENTRY_LINE.value,
+                ROIType.EXIT_LINE.value,
+            }
+            if any(t in types_present for t in crowd_valid_types):
                 return ProfileReadinessItem(
                     status="READY",
                     status_label="Ready for AI Pipeline",
                     is_ready=True,
                     missing_requirements=[],
-                    message="Crowd detection area configured and verified.",
+                    message="Crowd counting line or detection area configured and verified.",
                 )
             else:
                 return ProfileReadinessItem(
                     status="PARTIALLY_CONFIGURED",
                     status_label="Partially Configured",
                     is_ready=False,
-                    missing_requirements=["CROWD_ROI polygon is required"],
-                    message="Crowd detection area (CROWD_ROI) polygon is required.",
+                    missing_requirements=["CROWD_ROI polygon or Entry/Exit counting line is required"],
+                    message="Crowd detection area or counting line is required.",
                 )
 
-        elif profile_id == "QUEUE_STANDARD":
+        elif profile_id in ("QUEUE_STANDARD", "QUEUE_YOLO11X"):
             missing = []
             if ROIType.QUEUE_ROI.value not in types_present:
                 missing.append("QUEUE_ROI area polygon")
@@ -256,6 +277,10 @@ class CameraROIService:
             camera = await self.camera_repo.get_by_camera_code(camera_id_or_code)
 
         if not camera:
+            clean_code = camera_id_or_code.replace("-CROWD", "").replace("-FRS", "")
+            camera = await self.camera_repo.get_by_camera_code(clean_code)
+
+        if not camera:
             raise HTTPException(
                 status_code=status.HTTP_404_NOT_FOUND,
                 detail={"code": "CAMERA_NOT_FOUND", "message": f"Camera '{camera_id_or_code}' not found"},
@@ -305,7 +330,11 @@ class CameraROIService:
             camera_name=camera.name,
             camera_type=camera.camera_type,
             zone_code=camera.zone_code,
-            zone_name=camera.zone.name if camera.zone else None,
+            zone_name=(
+                camera.zone.name
+                if ("zone" in camera.__dict__ and camera.zone is not None)
+                else camera.zone_code
+            ),
             stream_status=camera.stream_status or "NOT_TESTED",
             stream_verified=stream_verified,
             configurations=[
@@ -313,15 +342,19 @@ class CameraROIService:
                     id=str(r.id),
                     camera_id=str(r.camera_id),
                     camera_code=r.camera_code,
-                    profile_id=r.profile_id,
+                    profile_id=r.profile_id or "CROWD_STANDARD",
                     roi_type=r.roi_type,
-                    name=r.name,
-                    geometry_json=r.geometry_json,
-                    normalized=r.normalized,
-                    enabled=r.enabled,
-                    version=r.version,
-                    created_by=r.created_by,
-                    updated_by=r.updated_by,
+                    name=r.name or r.roi_name or r.roi_type,
+                    geometry_json=(
+                        r.geometry_json
+                        if (r.geometry_json and r.geometry_json != {})
+                        else ({"points": r.polygon_points} if r.polygon_points else {})
+                    ),
+                    normalized=r.normalized if r.normalized is not None else True,
+                    enabled=r.enabled if r.enabled is not None else r.is_active,
+                    version=r.version or 1,
+                    created_by=r.created_by or "SYSTEM",
+                    updated_by=r.updated_by or "SYSTEM",
                     created_at=r.created_at,
                     updated_at=r.updated_at,
                 )
@@ -378,16 +411,18 @@ class CameraROIService:
         camera = await self._resolve_camera(camera_id_or_code)
         self._verify_camera_readiness_for_editing(camera)
 
-        # 1. Check AI profile assignment exists
+        # 1. Check AI profile assignment exists (auto-assign if not yet present)
         asgn = await self.ai_repo.get_assignment(camera.id, req.profile_id)
         if not asgn:
-            raise HTTPException(
-                status_code=status.HTTP_404_NOT_FOUND,
-                detail={
-                    "code": "AI_PROFILE_NOT_ASSIGNED",
-                    "message": f"Profile '{req.profile_id}' is not assigned to camera {camera.camera_code}",
-                },
+            from app.models.camera_ai_assignment import CameraAIProfileAssignment
+            asgn = CameraAIProfileAssignment(
+                camera_id=camera.id,
+                camera_code=camera.camera_code,
+                profile_id=req.profile_id,
+                enabled=True,
             )
+            self.db.add(asgn)
+            await self.db.commit()
 
         # 2. Check profile compatibility
         comp_ok, comp_err = self.validate_profile_compatibility(req.profile_id, req.roi_type)
@@ -406,21 +441,52 @@ class CameraROIService:
             )
 
         # 4. Create record
+        # Normalize polygon_points for legacy database column compatibility
+        pts = []
+        dir_val = None
+        if isinstance(req.geometry_json, dict):
+            if "points" in req.geometry_json:
+                pts = req.geometry_json["points"]
+            elif "start" in req.geometry_json and "end" in req.geometry_json:
+                pts = [req.geometry_json["start"], req.geometry_json["end"]]
+                dir_val = req.geometry_json.get("direction", "BOTH")
+            else:
+                pts = req.geometry_json
+        else:
+            pts = req.geometry_json
+
+        name_val = (req.name or f"{req.roi_type} Configuration").strip()
+        if len(name_val) < 2:
+            name_val = f"{req.roi_type} Line"
+
+        username_val = getattr(current_user, "username", "SYSTEM") if current_user else "SYSTEM"
+
         roi = CameraROIConfiguration(
             camera_id=camera.id,
             camera_code=camera.camera_code,
             profile_id=req.profile_id,
             roi_type=req.roi_type,
-            name=req.name.strip(),
+            name=name_val,
+            roi_name=name_val,
             geometry_json=req.geometry_json,
+            polygon_points=pts,
+            direction=dir_val,
             normalized=req.normalized,
             enabled=req.enabled,
+            is_active=req.enabled,
             version=1,
-            created_by=current_user.username,
-            updated_by=current_user.username,
+            created_by=username_val,
+            updated_by=username_val,
         )
         saved_roi = await self.repo.create(roi)
         await self.db.commit()
+
+        # Synchronize running worker's cached ROI lines immediately
+        try:
+            from app.frs_engine.frs_service import sync_worker_roi_lines
+            sync_worker_roi_lines(camera.camera_code)
+        except Exception:
+            pass
 
         # 5. Calculate new readiness state
         all_rois = await self.repo.get_by_camera_id(camera.id, profile_id=req.profile_id)
@@ -449,9 +515,9 @@ class CameraROIService:
         # 7. WebSocket Event
         try:
             await event_bus.publish(
-                "ai",
-                {
-                    "event_type": "AI_GEOMETRY_CHANGED",
+                channel="ai",
+                event_type="AI_GEOMETRY_CHANGED",
+                payload={
                     "camera_id": str(camera.id),
                     "camera_code": camera.camera_code,
                     "profile_id": req.profile_id,
@@ -517,8 +583,10 @@ class CameraROIService:
         # Update fields
         if req.name is not None:
             roi.name = req.name.strip()
+            roi.roi_name = req.name.strip()
         if req.enabled is not None:
             roi.enabled = req.enabled
+            roi.is_active = req.enabled
         if req.geometry_json is not None:
             struct_ok, err_code, struct_err = self.validate_geometry_structure(roi.roi_type, req.geometry_json)
             if not struct_ok:
@@ -527,6 +595,16 @@ class CameraROIService:
                     detail={"code": err_code, "message": struct_err},
                 )
             roi.geometry_json = req.geometry_json
+            if isinstance(req.geometry_json, dict):
+                if "points" in req.geometry_json:
+                    roi.polygon_points = req.geometry_json["points"]
+                elif "start" in req.geometry_json and "end" in req.geometry_json:
+                    roi.polygon_points = [req.geometry_json["start"], req.geometry_json["end"]]
+                    roi.direction = req.geometry_json.get("direction", "BOTH")
+                else:
+                    roi.polygon_points = req.geometry_json
+            else:
+                roi.polygon_points = req.geometry_json
 
         # Increment version
         roi.version += 1
@@ -534,6 +612,12 @@ class CameraROIService:
 
         updated_roi = await self.repo.update(roi)
         await self.db.commit()
+
+        try:
+            from app.frs_engine.frs_service import sync_worker_roi_lines
+            sync_worker_roi_lines(camera.camera_code)
+        except Exception:
+            pass
 
         # Readiness
         all_rois = await self.repo.get_by_camera_id(camera.id, profile_id=roi.profile_id)
@@ -563,9 +647,9 @@ class CameraROIService:
         # WebSocket Event
         try:
             await event_bus.publish(
-                "ai",
-                {
-                    "event_type": "AI_GEOMETRY_CHANGED",
+                channel="ai",
+                event_type="AI_GEOMETRY_CHANGED",
+                payload={
                     "camera_id": str(camera.id),
                     "camera_code": camera.camera_code,
                     "profile_id": roi.profile_id,
@@ -628,6 +712,12 @@ class CameraROIService:
         await self.repo.delete(roi)
         await self.db.commit()
 
+        try:
+            from app.frs_engine.frs_service import sync_worker_roi_lines
+            sync_worker_roi_lines(camera.camera_code)
+        except Exception:
+            pass
+
         # Readiness after delete
         all_rois = await self.repo.get_by_camera_id(camera.id, profile_id=profile_id)
         readiness = self.calculate_readiness_for_profile(profile_id, all_rois)
@@ -655,9 +745,9 @@ class CameraROIService:
         # WebSocket Event
         try:
             await event_bus.publish(
-                "ai",
-                {
-                    "event_type": "AI_GEOMETRY_CHANGED",
+                channel="ai",
+                event_type="AI_GEOMETRY_CHANGED",
+                payload={
                     "camera_id": str(camera.id),
                     "camera_code": camera.camera_code,
                     "profile_id": profile_id,

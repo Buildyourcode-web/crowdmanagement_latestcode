@@ -188,6 +188,7 @@ h1, h2, h3, h4, h5, h6 {
 .cc-badge.online { color: var(--cc-green); background: var(--cc-green-dim); border-color: var(--cc-green-border); }
 .cc-badge.offline { color: var(--cc-red); background: var(--cc-red-dim); border-color: var(--cc-red-border); }
 .cc-badge.degraded { color: var(--cc-yellow); background: var(--cc-yellow-dim); border-color: var(--cc-yellow-border); }
+.cc-badge.stopped, .cc-badge.disconnected { color: var(--cc-text-muted); background: rgba(255,255,255,0.06); border-color: rgba(255,255,255,0.12); }
 
 /* Section headers */
 .cc-section-header {

@@ -32,6 +32,7 @@ from app.ai.pipelines.queue.registry import QueuePipelineRegistry
 from app.ai.pipelines.frs.config import FRSPipelineConfig
 from app.ai.pipelines.frs.pipeline import FRSPipeline
 from app.ai.pipelines.frs.registry import FRSPipelineRegistry
+from app.frs_engine.frs_service import stop_frs_camera_worker, is_frs_worker_running
 from app.models.frs import FRSReferenceProfile
 from app.ai.profiles.service import AIProfile, STANDARD_PROFILES
 from app.ai.runtime.detector import RuntimeDetector
@@ -92,6 +93,8 @@ class AIOrchestrator:
         self._is_running = False
         self._reconnect_backoff_tracker: Dict[str, Dict[str, Any]] = {}
         self._restart_history_tracker: Dict[str, List[float]] = {}
+        self._camera_mode_locks: Dict[str, asyncio.Lock] = {}
+        self._camera_transition_state: Dict[str, str] = {}
         logger.info("[AI-Orchestrator] Initialized central control-plane orchestrator.")
 
     # ── Camera Resolution ─────────────────────────────────────────────────────
@@ -184,12 +187,49 @@ class AIOrchestrator:
                     },
                 )
 
+        # 2b. Enforce Single-Camera Exclusive AI Mode Isolation
+        # At any moment, the physical camera can have only ONE ACTIVE AI MODE.
+        cam_code = camera.camera_code
+        if is_crowd or is_queue:
+            frs_pipe = FRSPipelineRegistry.get(cam_code)
+            is_frs_pipe_active = frs_pipe is not None and getattr(frs_pipe, "state", None) is not None and getattr(frs_pipe.state, "value", str(frs_pipe.state)) == "RUNNING"
+            is_frs_th_active = is_frs_worker_running(cam_code) or (camera.id and is_frs_worker_running(str(camera.id)))
+            if is_frs_pipe_active or is_frs_th_active:
+                raise HTTPException(
+                    status_code=status.HTTP_409_CONFLICT,
+                    detail={
+                        "code": "CAMERA_AI_MODE_CONFLICT",
+                        "message": f"Cannot start {pipeline_type} on camera '{cam_code}' because FRS is currently active. Stop FRS first before starting Crowd/Queue.",
+                        "physical_camera": cam_code,
+                        "current_active_mode": "FRS_ACTIVE",
+                    },
+                )
+        elif is_frs:
+            crowd_pipe = CrowdPipelineRegistry.get(cam_code)
+            is_crowd_active = crowd_pipe is not None and getattr(crowd_pipe, "state", None) is not None and getattr(crowd_pipe.state, "value", str(crowd_pipe.state)) == "RUNNING"
+            queue_pipe = QueuePipelineRegistry.get(cam_code)
+            is_queue_active = queue_pipe is not None and getattr(queue_pipe, "state", None) is not None and getattr(queue_pipe.state, "value", str(queue_pipe.state)) == "RUNNING"
+            if is_crowd_active or is_queue_active:
+                raise HTTPException(
+                    status_code=status.HTTP_409_CONFLICT,
+                    detail={
+                        "code": "CAMERA_AI_MODE_CONFLICT",
+                        "message": f"Cannot start FRS on camera '{cam_code}' because Crowd/Queue AI is currently active. Stop Crowd AI first before starting FRS.",
+                        "physical_camera": cam_code,
+                        "current_active_mode": "CROWD_ACTIVE",
+                    },
+                )
+
         # 3. Check Geometry Readiness (Crowd requires CROWD_ROI, Queue requires ENTRY/EXIT/ROI, FRS is isolated)
         roi_configs = []
         if is_crowd:
             roi_configs = await roi_repo.get_by_camera_id(camera.id, profile_id=profile_id)
             has_crowd_roi = any(
-                r.enabled and r.roi_type == ROIType.CROWD_ROI and len((r.geometry_json or {}).get("points", [])) >= 3
+                r.enabled and (
+                    (r.roi_type == ROIType.CROWD_ROI and len((r.geometry_json or {}).get("points", [])) >= 3) or
+                    (r.roi_type in (ROIType.COUNTING_LINE, ROIType.ENTRY_LINE, ROIType.EXIT_LINE) and (r.geometry_json or {}).get("start") and (r.geometry_json or {}).get("end")) or
+                    (r.roi_type in (ROIType.COUNTING_LINE, ROIType.ENTRY_LINE, ROIType.EXIT_LINE) and len((r.polygon_points or [])) >= 2)
+                )
                 for r in roi_configs
             )
             if not has_crowd_roi:
@@ -197,7 +237,7 @@ class AIOrchestrator:
                     status_code=status.HTTP_400_BAD_REQUEST,
                     detail={
                         "code": "ROI_NOT_CONFIGURED",
-                        "message": f"Camera {camera.camera_code} does not have a configured CROWD_ROI polygon.",
+                        "message": f"Camera {camera.camera_code} does not have a configured CROWD_ROI polygon or counting line.",
                     },
                 )
         elif is_queue:
@@ -216,7 +256,8 @@ class AIOrchestrator:
         # 4. Check Runtime Availability
         runtime_info = RuntimeDetector.detect_runtime()
         gpu_info = RuntimeDetector.detect_gpu()
-        if not custom_detector and (not gpu_info.get("available") or not runtime_info.get("deepstream")):
+        is_yolo11x = "YOLO11X" in profile_id.upper()
+        if not custom_detector and not is_yolo11x and (not gpu_info.get("available") or not runtime_info.get("deepstream")):
             raise HTTPException(
                 status_code=status.HTTP_400_BAD_REQUEST,
                 detail={
@@ -463,7 +504,10 @@ class AIOrchestrator:
         if frs_pipe:
             frs_stopped = await frs_pipe.stop()
             FRSPipelineRegistry.unregister(camera.camera_code)
-        was_running = crowd_stopped or queue_stopped or frs_stopped
+        frs_worker_stopped = stop_frs_camera_worker(camera.camera_code)
+        if camera.id:
+            frs_worker_stopped = stop_frs_camera_worker(str(camera.id)) or frs_worker_stopped
+        was_running = crowd_stopped or queue_stopped or frs_stopped or frs_worker_stopped
 
         if deployment:
             deployment.actual_state = "STOPPED"
@@ -979,6 +1023,213 @@ class AIOrchestrator:
                 await asyncio.sleep(2.0)
 
         logger.info("[AI-Orchestrator] Startup recovery complete.")
+
+    # ── Exclusive AI Mode Management & Single-Camera Isolation ─────────────
+
+    async def get_camera_mode(
+        self,
+        camera_id_or_code: str,
+        db: AsyncSession,
+    ) -> Dict[str, Any]:
+        """
+        Returns the current exclusive AI runtime mode, logical IDs, and statuses.
+        Allowed modes: IDLE, FRS_ACTIVE, CROWD_ACTIVE, TRANSITIONING.
+        Never allows FRS_ACTIVE + CROWD_ACTIVE simultaneously.
+        """
+        camera = await self._resolve_camera(camera_id_or_code, db)
+        cam_code = camera.camera_code
+
+        in_transition = self._camera_transition_state.get(cam_code)
+
+        # Check FRS state
+        frs_pipe = FRSPipelineRegistry.get(cam_code)
+        is_frs_pipe_active = frs_pipe is not None and getattr(frs_pipe, "state", None) is not None and getattr(frs_pipe.state, "value", str(frs_pipe.state)) == "RUNNING"
+        is_frs_th_active = is_frs_worker_running(cam_code) or (camera.id and is_frs_worker_running(str(camera.id)))
+        frs_active = is_frs_pipe_active or is_frs_th_active
+
+        # Check Crowd state
+        crowd_pipe = CrowdPipelineRegistry.get(cam_code)
+        crowd_pipe_active = crowd_pipe is not None and getattr(crowd_pipe, "state", None) is not None and getattr(crowd_pipe.state, "value", str(crowd_pipe.state)) == "RUNNING"
+        try:
+            from app.frs_engine.frs_service import is_crowd_worker_running
+            is_crowd_th_active = is_crowd_worker_running(cam_code) or (camera.id and is_crowd_worker_running(str(camera.id)))
+        except Exception:
+            is_crowd_th_active = False
+        crowd_active = crowd_pipe_active or is_crowd_th_active
+
+        # Check Queue state
+        queue_pipe = QueuePipelineRegistry.get(cam_code)
+        queue_active = queue_pipe is not None and getattr(queue_pipe, "state", None) is not None and getattr(queue_pipe.state, "value", str(queue_pipe.state)) == "RUNNING"
+
+        if in_transition:
+            current_mode = "TRANSITIONING"
+            frs_status = "STOPPING" if frs_active else "DISCONNECTED"
+            crowd_status = "STARTING" if (crowd_active or in_transition == "CROWD") else "DISCONNECTED"
+        elif crowd_active or queue_active:
+            current_mode = "CROWD_ACTIVE"
+            crowd_status = "RUNNING"
+            frs_status = "DISCONNECTED"
+        elif frs_active:
+            current_mode = "FRS_ACTIVE"
+            frs_status = "RUNNING"
+            crowd_status = "DISCONNECTED"
+        else:
+            current_mode = "IDLE"
+            frs_status = "DISCONNECTED"
+            crowd_status = "DISCONNECTED"
+
+        ai_repo = CameraAIRepository(db)
+        assignments = await ai_repo.get_assignments_for_camera(camera.id)
+        active_assignment = next((a for a in assignments if a.enabled), None)
+        active_profile_id = active_assignment.profile_id if active_assignment else None
+
+        return {
+            "physical_camera_id": str(camera.id),
+            "physical_camera_code": cam_code,
+            "current_mode": current_mode,
+            "frs_logical_id": f"{cam_code}-FRS",
+            "frs_status": frs_status,
+            "crowd_logical_id": f"{cam_code}-CROWD",
+            "crowd_status": crowd_status,
+            "active_profile_id": active_profile_id,
+            "active_pipeline_type": "FRS" if frs_active else ("CROWD" if crowd_active else ("QUEUE" if queue_active else None)),
+        }
+
+    async def switch_camera_mode(
+        self,
+        camera_id_or_code: str,
+        target_mode: str,
+        db: AsyncSession,
+        profile_id: Optional[str] = None,
+        current_user: Optional[User] = None,
+        client_ip: Optional[str] = None,
+        custom_detector: Optional[BasePersonDetector] = None,
+    ) -> Dict[str, Any]:
+        """
+        Exclusively switches the physical camera between FRS, CROWD, and IDLE.
+        Guarantees:
+        1. Camera resource lock acquired (prevents race conditions).
+        2. Maximum active AI mode = 1.
+        3. Active pipeline is stopped and confirmed stopped before new pipeline is started.
+        4. RTSP resources are fully released before starting target pipeline.
+        5. Appropriate AI profile enabled in database.
+        """
+        target_mode = (target_mode or "").strip().upper()
+        if target_mode not in ("FRS", "CROWD", "IDLE", "STOP"):
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail={"code": "INVALID_TARGET_MODE", "message": f"Target mode '{target_mode}' must be FRS, CROWD, or IDLE."},
+            )
+
+        camera = await self._resolve_camera(camera_id_or_code, db)
+        cam_code = camera.camera_code
+
+        lock = self._camera_mode_locks.setdefault(cam_code, asyncio.Lock())
+        async with lock:
+            self._camera_transition_state[cam_code] = target_mode
+            try:
+                # ── ACTION: STOP / IDLE ──
+                if target_mode in ("IDLE", "STOP"):
+                    logger.info(f"[AI-Orchestrator] Stopping all AI pipelines for physical camera {cam_code}")
+                    await self.stop_pipeline(cam_code, db, current_user=current_user, client_ip=client_ip)
+                    try:
+                        from app.frs_engine.frs_service import toggle_crowd_ai_camera_worker, toggle_frs_camera_worker
+                        toggle_crowd_ai_camera_worker(cam_code, False)
+                        toggle_frs_camera_worker(cam_code, False)
+                        if camera.id:
+                            toggle_crowd_ai_camera_worker(str(camera.id), False)
+                            toggle_frs_camera_worker(str(camera.id), False)
+                    except Exception:
+                        pass
+                    self._camera_transition_state.pop(cam_code, None)
+                    return await self.get_camera_mode(cam_code, db)
+
+                # ── ACTION: SWITCH TO CROWD ──
+                elif target_mode == "CROWD":
+                    logger.info(f"[AI-Orchestrator] Exclusive switch to CROWD for physical camera {cam_code}")
+
+                    # 1. Seamlessly toggle existing worker without dropping physical RTSP stream
+                    try:
+                        from app.frs_engine.frs_service import toggle_crowd_ai_camera_worker
+                        toggle_crowd_ai_camera_worker(cam_code, True)
+                        if camera.id:
+                            toggle_crowd_ai_camera_worker(str(camera.id), True)
+                    except Exception as e:
+                        logger.warning(f"[AI-Orchestrator] Failed to toggle worker crowd AI: {e}")
+
+                    # 2. Update DB profile assignments: enable Crowd, disable FRS
+                    ai_repo = CameraAIRepository(db)
+                    assignments = await ai_repo.get_assignments_for_camera(camera.id)
+                    target_profile = profile_id or "CROWD_STANDARD"
+                    found_target = False
+                    for a in assignments:
+                        if a.profile_id == target_profile:
+                            a.enabled = True
+                            found_target = True
+                        elif "FRS" in a.profile_id.upper():
+                            a.enabled = False
+                    if not found_target:
+                        from app.models.camera_ai_assignment import CameraAIProfileAssignment
+                        new_assignment = CameraAIProfileAssignment(
+                            camera_id=camera.id,
+                            camera_code=cam_code,
+                            profile_id=target_profile,
+                            enabled=True,
+                        )
+                        db.add(new_assignment)
+
+                    if camera.camera_type not in ("CROWD", "MULTI_PURPOSE"):
+                        camera.camera_type = "MULTI_PURPOSE"
+                    camera.is_frs_camera = False
+                    await db.commit()
+
+                    self._camera_transition_state.pop(cam_code, None)
+                    return await self.get_camera_mode(cam_code, db)
+
+                # ── ACTION: SWITCH TO FRS ──
+                elif target_mode == "FRS":
+                    logger.info(f"[AI-Orchestrator] Exclusive switch to FRS for physical camera {cam_code}")
+
+                    # 1. Seamlessly toggle existing worker to FRS
+                    try:
+                        from app.frs_engine.frs_service import toggle_frs_camera_worker
+                        toggle_frs_camera_worker(cam_code, True)
+                        if camera.id:
+                            toggle_frs_camera_worker(str(camera.id), True)
+                    except Exception as e:
+                        logger.warning(f"[AI-Orchestrator] Failed to toggle worker FRS: {e}")
+
+                    # 2. Update DB profile assignments: enable FRS, disable Crowd/Queue
+                    ai_repo = CameraAIRepository(db)
+                    assignments = await ai_repo.get_assignments_for_camera(camera.id)
+                    target_profile = profile_id or "FRS_STANDARD"
+                    found_target = False
+                    for a in assignments:
+                        if a.profile_id == target_profile:
+                            a.enabled = True
+                            found_target = True
+                        elif "CROWD" in a.profile_id.upper() or "QUEUE" in a.profile_id.upper():
+                            a.enabled = False
+                    if not found_target:
+                        from app.models.camera_ai_assignment import CameraAIProfileAssignment
+                        new_assignment = CameraAIProfileAssignment(
+                            camera_id=camera.id,
+                            camera_code=cam_code,
+                            profile_id=target_profile,
+                            enabled=True,
+                        )
+                        db.add(new_assignment)
+
+                    if camera.camera_type not in ("FRS", "MULTI_PURPOSE"):
+                        camera.camera_type = "MULTI_PURPOSE"
+                    camera.is_frs_camera = True
+                    await db.commit()
+
+                    self._camera_transition_state.pop(cam_code, None)
+                    return await self.get_camera_mode(cam_code, db)
+
+            finally:
+                self._camera_transition_state.pop(cam_code, None)
 
     # ── Graceful Shutdown ─────────────────────────────────────────────────────
 

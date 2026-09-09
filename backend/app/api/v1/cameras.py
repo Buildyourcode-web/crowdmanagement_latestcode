@@ -1,6 +1,7 @@
 from typing import List, Optional
 from fastapi import APIRouter, Depends, Query, Request, Response, status
 from sqlalchemy.ext.asyncio import AsyncSession
+from loguru import logger
 
 from app.dependencies import get_current_user, get_db, require_permission
 from app.models.user import User
@@ -371,20 +372,9 @@ async def get_camera_ai_config(
     Returns camera AI configuration, compatible AI profiles, and current deployment capacity.
     Requires AI_READ permission.
     """
-    try:
-        service = CameraAIService(db)
-        config = await service.get_camera_ai_config(id, current_user)
-        return success_response(config)
-    except Exception as e:
-        logger.warning(f"Could not load AI config for {id}: {e}")
-        return success_response(CameraAIConfigResponse(
-            camera_id=id,
-            camera_name=id,
-            camera_purpose="FRS",
-            available_profiles=[],
-            assignments=[],
-            deployment_projection={},
-        ))
+    service = CameraAIService(db)
+    config = await service.get_camera_ai_config(id, current_user)
+    return success_response(config)
 
 
 @router.post("/{id}/ai-config/validate", response_model=StandardResponse[CameraAIValidateResponse])

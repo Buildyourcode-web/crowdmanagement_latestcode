@@ -13,6 +13,7 @@ from sqlalchemy.pool import StaticPool
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
 
 from app.config import settings
+settings.APP_ENV = "testing"
 from app.db.base import Base
 from app.dependencies import get_db
 from app.main import app

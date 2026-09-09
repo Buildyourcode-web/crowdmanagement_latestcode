@@ -5,6 +5,7 @@ from app.api.v1.analytics import router as analytics_router
 from app.api.v1.auth import router as auth_router
 from app.api.v1.cameras import router as cameras_router
 from app.api.v1.crowd import router as crowd_router
+from app.api.v1.crowd_management import router as crowd_management_router
 from app.api.v1.queue import router as queue_router
 from app.api.v1.frs import router as frs_router
 from app.api.v1.health import router as health_router
@@ -27,6 +28,7 @@ api_router.include_router(users_router)
 api_router.include_router(cameras_router)
 api_router.include_router(zones_router)
 api_router.include_router(crowd_router)
+api_router.include_router(crowd_management_router)
 api_router.include_router(queue_router)
 api_router.include_router(frs_router)
 api_router.include_router(missing_persons_router)

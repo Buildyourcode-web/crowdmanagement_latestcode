@@ -1,3 +1,4 @@
+import asyncio
 import time
 import uuid
 from typing import Dict, Optional
@@ -26,30 +27,29 @@ async def lifespan(app: FastAPI):
     logger.info(f"Starting {settings.APP_NAME} in {settings.APP_ENV} mode")
     await get_redis_connection()
 
-    # Auto-start FRS engine main camera only if RTSP_ENABLED
-    if settings.RTSP_ENABLED:
-        try:
-            import asyncio
-            from app.frs_engine.frs_service import auto_start_main_camera, set_main_event_loop
-            set_main_event_loop(asyncio.get_running_loop())
-            import threading
-            t = threading.Thread(target=auto_start_main_camera, daemon=True, name="FRS-AutoStart")
-            t.start()
-            logger.info("FRS Engine: auto-start initiated")
-        except Exception as e:
-            logger.warning(f"FRS Engine auto-start skipped: {e}")
-    else:
-        logger.info("RTSP_ENABLED is False: skipping automatic RTSP stream connection (PoE camera can be started on demand)")
+    # Initialize FRS engine event loop, but NEVER auto-start FRS pipelines.
+    # Strict Isolation Rule: opening pages or starting server must NOT start AI inference.
+    try:
+        from app.frs_engine.frs_service import set_main_event_loop
+        set_main_event_loop(asyncio.get_running_loop())
+    except Exception as e:
+        logger.warning(f"FRS Engine event loop setup skipped: {e}")
 
     # Start AI Orchestrator Background Supervision Loop & Startup Recovery
     try:
-        import asyncio
         from app.ai.orchestrator.service import ai_orchestrator
         await ai_orchestrator.start_supervision_loop()
         asyncio.create_task(ai_orchestrator.recover_on_startup())
         logger.info("AI Orchestrator: supervision loop and startup recovery initiated")
     except Exception as e:
         logger.warning(f"AI Orchestrator startup skipped: {e}")
+
+    try:
+        from app.frs_engine.frs_service import auto_start_main_camera
+        auto_start_main_camera()
+        logger.info("FRS Engine: Auto-started main physical camera worker")
+    except Exception as e:
+        logger.warning(f"FRS Engine camera auto-start skipped: {e}")
 
     # Pre-warm DB connection pool and cache in background (avoids blocking startup)
     async def _warm_db_and_cache():

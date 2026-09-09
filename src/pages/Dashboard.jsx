@@ -11,44 +11,8 @@ import { getAlerts } from "../services/alertService.js";
 import { getMissingPersons } from "../services/frsService.js";
 import { LoadingState } from "../components/common/States.jsx";
 
-// --- Simulated CCTV noise overlay via canvas ---------------------------------
+// --- CCTV overlay with zero-overhead GPU-accelerated CSS scanlines -----------
 function ScanlineFeed({ cameraId, label, zone, people, aiLabel, severity, status, fps, ptzActive, onClick }) {
-  const canvasRef = useRef(null);
-  const [tick, setTick] = useState(0);
-
-  useEffect(() => {
-    if (status !== "online") return;
-    const iv = setInterval(() => setTick((t) => t + 1), 2000);
-    return () => clearInterval(iv);
-  }, [status]);
-
-  const peopleDrift = status === "online" ? (people || 0) + Math.floor(Math.sin(tick * 0.8) * 7) : 0;
-
-  useEffect(() => {
-    if (status !== "online") return;
-    const canvas = canvasRef.current;
-    if (!canvas) return;
-    const ctx = canvas.getContext("2d");
-    let frameId;
-    const draw = () => {
-      canvas.width = canvas.offsetWidth;
-      canvas.height = canvas.offsetHeight;
-      ctx.clearRect(0, 0, canvas.width, canvas.height);
-      for (let y = 0; y < canvas.height; y += 4) {
-        ctx.fillStyle = `rgba(0,0,0,${Math.random() * 0.04})`;
-        ctx.fillRect(0, y, canvas.width, 2);
-      }
-      if (Math.random() < 0.04) {
-        const lineY = Math.floor(Math.random() * canvas.height);
-        ctx.fillStyle = `rgba(255,255,255,0.04)`;
-        ctx.fillRect(0, lineY, canvas.width, 1);
-      }
-      frameId = requestAnimationFrame(draw);
-    };
-    draw();
-    return () => cancelAnimationFrame(frameId);
-  }, [status]);
-
   const borderColor = {
     critical: "var(--cc-red)",
     high: "var(--cc-orange)",
@@ -82,9 +46,15 @@ function ScanlineFeed({ cameraId, label, zone, people, aiLabel, severity, status
       }}
     >
       {status === "online" && (
-        <canvas
-          ref={canvasRef}
-          style={{ position: "absolute", top: 0, left: 0, width: "100%", height: "100%", pointerEvents: "none", zIndex: 2 }}
+        <div
+          style={{
+            position: "absolute",
+            inset: 0,
+            pointerEvents: "none",
+            zIndex: 2,
+            background: "repeating-linear-gradient(0deg, rgba(0,0,0,0.18) 0px, rgba(0,0,0,0.18) 1px, transparent 1px, transparent 4px)",
+            opacity: 0.7,
+          }}
         />
       )}
 
@@ -134,7 +104,7 @@ function ScanlineFeed({ cameraId, label, zone, people, aiLabel, severity, status
               textShadow: `0 0 8px ${borderColor}`,
               letterSpacing: "0.08em",
             }}>
-              {peopleDrift.toLocaleString()}
+              {(people || 0).toLocaleString()}
               <span style={{ fontSize: 10, color: "var(--cc-text-muted)", marginLeft: 4 }}>pax</span>
             </div>
             <div style={{

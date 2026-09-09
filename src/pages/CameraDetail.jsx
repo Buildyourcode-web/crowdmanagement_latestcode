@@ -16,6 +16,8 @@ import {
   updateCameraAIProfile,
   removeCameraAIProfile,
   getCameraROIConfig,
+  getCameraAIMode,
+  switchCameraAIMode,
 } from "../services/aiService.js";
 import {
   getCameraCrowdMetrics,
@@ -219,6 +221,11 @@ export default function CameraDetail() {
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState(null);
 
+  const camCode = camera?.camera_code || camera?.id || id;
+  const streamSrc = camera?.stream_url
+    ? (camera.stream_url.startsWith("http") ? camera.stream_url : `${BACKEND}${camera.stream_url}`)
+    : `${BACKEND}/api/v1/frs-engine/cameras/${camCode || "CAM-KHB-001"}/stream`;
+
   // Stream Testing state
   const [testing, setTesting] = useState(false);
   const [testResultMsg, setTestResultMsg] = useState(null);
@@ -349,23 +356,100 @@ export default function CameraDetail() {
     }
   }, [id]);
 
+  // Step 8: Exclusive AI Mode & Logical IDs state
+  const [aiModeInfo, setAIModeInfo] = useState(null);
+  const [switchingMode, setSwitchingMode] = useState(false);
+  const [modeError, setModeError] = useState(null);
+
+  const fetchAIMode = useCallback(async () => {
+    if (!id) return;
+    try {
+      const data = await getCameraAIMode(id);
+      setAIModeInfo(data);
+    } catch (err) {
+      console.warn("Could not load camera AI mode:", err);
+    }
+  }, [id]);
+
+  const handleSwitchMode = async (targetMode) => {
+    setSwitchingMode(true);
+    setModeError(null);
+    try {
+      const res = await switchCameraAIMode(id, targetMode);
+      setAIModeInfo(res);
+      await fetchCamera();
+      await fetchAIConfig();
+      await fetchCrowdMetrics();
+      await fetchQueueMetrics();
+      setConfigFeedback({
+        type: "success",
+        text: `Camera AI Mode successfully switched to ${targetMode}. Single-camera exclusive resource isolation enforced.`,
+      });
+    } catch (err) {
+      const detail = err.response?.data?.detail;
+      const msg = typeof detail === "object" ? detail.message : (detail || err.message || "Failed to switch AI mode");
+      setModeError(msg);
+    } finally {
+      setSwitchingMode(false);
+    }
+  };
+
+  const metricsInFlightRef = useRef(false);
+  const metricsTimerRef = useRef(null);
+  const isMountedRef = useRef(true);
+
   useEffect(() => {
+    isMountedRef.current = true;
     fetchCamera();
     fetchAIConfig();
     fetchROIConfig();
     fetchCrowdMetrics();
     fetchQueueMetrics();
+    fetchAIMode();
     getZones().then((res) => {
       const list = Array.isArray(res) ? res : res?.data || [];
-      setZones(list);
+      if (isMountedRef.current) setZones(list);
     }).catch(() => {});
 
-    // Poll live crowd and queue metrics every 4s
-    const timer = setInterval(() => {
-      fetchCrowdMetrics();
-      fetchQueueMetrics();
-    }, 4000);
-    return () => clearInterval(timer);
+    // Adaptive request-aware metrics polling (5s)
+    const pollMetrics = async () => {
+      if (metricsInFlightRef.current) return;
+      metricsInFlightRef.current = true;
+      try {
+        await Promise.allSettled([fetchCrowdMetrics(), fetchQueueMetrics()]);
+      } finally {
+        metricsInFlightRef.current = false;
+      }
+    };
+
+    const scheduleNext = () => {
+      clearTimeout(metricsTimerRef.current);
+      if (typeof document !== "undefined" && document.visibilityState === "hidden") return;
+      metricsTimerRef.current = setTimeout(async () => {
+        if (isMountedRef.current && document.visibilityState === "visible") {
+          await pollMetrics();
+          scheduleNext();
+        }
+      }, 5000);
+    };
+
+    scheduleNext();
+
+    const handleVis = () => {
+      if (document.visibilityState === "visible") {
+        pollMetrics();
+        scheduleNext();
+      } else {
+        clearTimeout(metricsTimerRef.current);
+      }
+    };
+    document.addEventListener("visibilitychange", handleVis);
+
+    return () => {
+      isMountedRef.current = false;
+      clearTimeout(metricsTimerRef.current);
+      document.removeEventListener("visibilitychange", handleVis);
+    };
   }, [fetchCamera, fetchAIConfig, fetchROIConfig, fetchCrowdMetrics, fetchQueueMetrics]);
 
   const handleStartCrowdPipeline = async () => {
@@ -677,6 +761,148 @@ export default function CameraDetail() {
             </div>
           </div>
 
+          {/* Exclusive AI Mode Switching & Single-Camera Isolation Card */}
+          <div className="cc-card" style={{ border: "1px solid var(--cc-border-accent, #30363d)" }}>
+            <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 12 }}>
+              <div className="cc-section-title" style={{ margin: 0 }}>
+                <i className="bi bi-toggles2" style={{ marginRight: 6, color: "var(--cc-accent, #58a6ff)" }} />
+                Camera Exclusive AI Mode Control
+              </div>
+              <span style={{
+                fontSize: 10,
+                fontWeight: 700,
+                padding: "3px 8px",
+                borderRadius: 4,
+                fontFamily: "var(--cc-font-mono)",
+                background: (aiModeInfo?.current_mode || camera?.ai_mode) === "CROWD_ACTIVE" ? "rgba(63,185,80,0.15)" : (aiModeInfo?.current_mode || camera?.ai_mode) === "FRS_ACTIVE" ? "rgba(88,166,255,0.15)" : "rgba(139,148,158,0.15)",
+                color: (aiModeInfo?.current_mode || camera?.ai_mode) === "CROWD_ACTIVE" ? "var(--cc-green)" : (aiModeInfo?.current_mode || camera?.ai_mode) === "FRS_ACTIVE" ? "var(--cc-blue)" : "var(--cc-text-muted)",
+                border: `1px solid ${(aiModeInfo?.current_mode || camera?.ai_mode) === "CROWD_ACTIVE" ? "rgba(63,185,80,0.3)" : (aiModeInfo?.current_mode || camera?.ai_mode) === "FRS_ACTIVE" ? "rgba(88,166,255,0.3)" : "rgba(139,148,158,0.3)"}`
+              }}>
+                CURRENT MODE: {aiModeInfo?.current_mode || camera?.ai_mode || "IDLE"}
+              </span>
+            </div>
+
+            {modeError && (
+              <div style={{
+                marginBottom: 10,
+                padding: "8px 12px",
+                borderRadius: 4,
+                fontSize: 11,
+                background: "rgba(248,81,73,0.1)",
+                border: "1px solid var(--cc-red)",
+                color: "var(--cc-red)",
+                display: "flex",
+                alignItems: "center",
+                justifyContent: "space-between"
+              }}>
+                <span><i className="bi bi-exclamation-triangle-fill" style={{ marginRight: 6 }} />{modeError}</span>
+                <button onClick={() => setModeError(null)} style={{ background: "none", border: "none", color: "inherit", cursor: "pointer" }}>✕</button>
+              </div>
+            )}
+
+            {/* Camera Logical Identities Grid */}
+            <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr 1fr", gap: 10, marginBottom: 14 }}>
+              <div style={{ background: "var(--cc-bg-primary)", padding: "8px 10px", borderRadius: 4, border: "1px solid var(--cc-border)" }}>
+                <div style={{ fontSize: 10, color: "var(--cc-text-muted)" }}>PHYSICAL CAMERA</div>
+                <div style={{ fontFamily: "var(--cc-font-mono)", fontSize: 12, fontWeight: 700, color: "var(--cc-text-primary)", marginTop: 2 }}>
+                  {camera.camera_code || camera.id}
+                </div>
+                <div style={{ fontSize: 9, color: "var(--cc-text-muted)", marginTop: 2 }}>Hardware Sensor</div>
+              </div>
+
+              <div style={{ background: "var(--cc-bg-primary)", padding: "8px 10px", borderRadius: 4, border: "1px solid var(--cc-border)" }}>
+                <div style={{ fontSize: 10, color: "var(--cc-text-muted)" }}>FRS LOGICAL ID</div>
+                <div style={{ fontFamily: "var(--cc-font-mono)", fontSize: 12, fontWeight: 700, color: "var(--cc-blue)", marginTop: 2 }}>
+                  {aiModeInfo?.frs_logical_id || camera?.logical_id_frs || `${camera.camera_code || camera.id}-FRS`}
+                </div>
+                <div style={{ fontSize: 9, marginTop: 2, fontWeight: 700, color: (aiModeInfo?.frs_status || camera?.frs_status) === "RUNNING" ? "var(--cc-green)" : "var(--cc-text-muted)" }}>
+                  Status: {aiModeInfo?.frs_status || camera?.frs_status || "DISCONNECTED"}
+                </div>
+              </div>
+
+              <div style={{ background: "var(--cc-bg-primary)", padding: "8px 10px", borderRadius: 4, border: "1px solid var(--cc-border)" }}>
+                <div style={{ fontSize: 10, color: "var(--cc-text-muted)" }}>CROWD LOGICAL ID</div>
+                <div style={{ fontFamily: "var(--cc-font-mono)", fontSize: 12, fontWeight: 700, color: "var(--cc-green)", marginTop: 2 }}>
+                  {aiModeInfo?.crowd_logical_id || camera?.logical_id_crowd || `${camera.camera_code || camera.id}-CROWD`}
+                </div>
+                <div style={{ fontSize: 9, marginTop: 2, fontWeight: 700, color: (aiModeInfo?.crowd_status || camera?.crowd_status) === "RUNNING" ? "var(--cc-green)" : "var(--cc-text-muted)" }}>
+                  Status: {aiModeInfo?.crowd_status || camera?.crowd_status || "DISCONNECTED"}
+                </div>
+              </div>
+            </div>
+
+            {/* Exclusive Mode Action Buttons */}
+            <div style={{ display: "flex", gap: 10, alignItems: "center", flexWrap: "wrap" }}>
+              {(aiModeInfo?.current_mode || camera?.ai_mode) === "CROWD_ACTIVE" ? (
+                <>
+                  <button
+                    className="cc-btn cc-btn-primary"
+                    onClick={() => handleSwitchMode("FRS")}
+                    disabled={switchingMode}
+                    style={{ fontSize: 11, display: "flex", alignItems: "center", gap: 6 }}
+                  >
+                    {switchingMode ? <span className="spinner-border spinner-border-sm" /> : <i className="bi bi-person-badge" />}
+                    {switchingMode ? "SWITCHING MODE..." : "SWITCH TO FRS"}
+                  </button>
+                  <button
+                    className="cc-btn cc-btn-secondary"
+                    onClick={() => handleSwitchMode("IDLE")}
+                    disabled={switchingMode}
+                    style={{ fontSize: 11, display: "flex", alignItems: "center", gap: 6, color: "var(--cc-red)", borderColor: "rgba(248,81,73,0.3)" }}
+                  >
+                    <i className="bi bi-stop-circle" />
+                    STOP AI
+                  </button>
+                </>
+              ) : (aiModeInfo?.current_mode || camera?.ai_mode) === "FRS_ACTIVE" ? (
+                <>
+                  <button
+                    className="cc-btn cc-btn-primary"
+                    onClick={() => handleSwitchMode("CROWD")}
+                    disabled={switchingMode}
+                    style={{ fontSize: 11, display: "flex", alignItems: "center", gap: 6 }}
+                  >
+                    {switchingMode ? <span className="spinner-border spinner-border-sm" /> : <i className="bi bi-people-fill" />}
+                    {switchingMode ? "SWITCHING MODE..." : "SWITCH TO CROWD"}
+                  </button>
+                  <button
+                    className="cc-btn cc-btn-secondary"
+                    onClick={() => handleSwitchMode("IDLE")}
+                    disabled={switchingMode}
+                    style={{ fontSize: 11, display: "flex", alignItems: "center", gap: 6, color: "var(--cc-red)", borderColor: "rgba(248,81,73,0.3)" }}
+                  >
+                    <i className="bi bi-stop-circle" />
+                    STOP AI
+                  </button>
+                </>
+              ) : (
+                <>
+                  <button
+                    className="cc-btn cc-btn-primary"
+                    onClick={() => handleSwitchMode("CROWD")}
+                    disabled={switchingMode}
+                    style={{ fontSize: 11, display: "flex", alignItems: "center", gap: 6 }}
+                  >
+                    {switchingMode ? <span className="spinner-border spinner-border-sm" /> : <i className="bi bi-people-fill" />}
+                    {switchingMode ? "SWITCHING MODE..." : "START CROWD"}
+                  </button>
+                  <button
+                    className="cc-btn cc-btn-secondary"
+                    onClick={() => handleSwitchMode("FRS")}
+                    disabled={switchingMode}
+                    style={{ fontSize: 11, display: "flex", alignItems: "center", gap: 6, borderColor: "var(--cc-blue)", color: "var(--cc-blue)" }}
+                  >
+                    {switchingMode ? <span className="spinner-border spinner-border-sm" /> : <i className="bi bi-person-badge" />}
+                    {switchingMode ? "SWITCHING MODE..." : "START FRS"}
+                  </button>
+                </>
+              )}
+              <span style={{ fontSize: 11, color: "var(--cc-text-muted)", marginLeft: "auto" }}>
+                Maximum active AI mode: <strong>1</strong> (Strict Mutex)
+              </span>
+            </div>
+          </div>
+
           {/* AI Configuration & Profile Assignment Card */}
           <div className="cc-card">
             <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 12 }}>
@@ -684,9 +910,43 @@ export default function CameraDetail() {
                 <i className="bi bi-cpu" style={{ marginRight: 6, color: "var(--cc-blue)" }} />
                 AI Profile Configuration
               </div>
-              <span style={{ fontSize: 11, color: "var(--cc-text-muted)" }}>
-                Camera Purpose: <strong style={{ color: "var(--cc-blue)" }}>{camera.camera_type || "CROWD"}</strong>
-              </span>
+              <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
+                <span style={{ fontSize: 11, color: "var(--cc-text-muted)" }}>Camera Purpose:</span>
+                <select
+                  className="cc-input"
+                  value={camera?.camera_type || "CROWD"}
+                  onChange={async (e) => {
+                    const newType = e.target.value;
+                    try {
+                      await updateCamera(id, { camera_type: newType });
+                      await fetchCamera();
+                      await fetchAIConfig();
+                      setConfigFeedback({
+                        type: "success",
+                        text: `Camera purpose updated to ${newType}. Compatible profiles refreshed.`,
+                      });
+                    } catch (err) {
+                      alert("Failed to update camera purpose: " + (err.response?.data?.detail?.message || err.message));
+                    }
+                  }}
+                  style={{
+                    fontSize: 11,
+                    padding: "3px 8px",
+                    fontWeight: 700,
+                    background: "var(--cc-bg-primary)",
+                    color: "var(--cc-blue)",
+                    borderColor: "var(--cc-border)",
+                    cursor: "pointer",
+                    borderRadius: 4,
+                  }}
+                >
+                  <option value="CROWD">CROWD (Entry/Exit & Zone)</option>
+                  <option value="QUEUE">QUEUE (Queue Length & Wait Time)</option>
+                  <option value="MULTI_PURPOSE">MULTI_PURPOSE (All: Entry/Exit + Queue + Zone)</option>
+                  <option value="FRS">FRS (Face Recognition)</option>
+                  <option value="GENERAL">GENERAL (Video Safety)</option>
+                </select>
+              </div>
             </div>
 
             <div style={{ fontSize: 11, color: "var(--cc-text-secondary)", marginBottom: 12, background: "var(--cc-bg-primary)", padding: "8px 12px", borderRadius: 4, border: "1px solid var(--cc-border)" }}>
@@ -750,15 +1010,73 @@ export default function CameraDetail() {
                             Assigned by <strong>{asgn.assigned_by}</strong> on {new Date(asgn.assigned_at).toLocaleDateString()}
                           </div>
                         </div>
-                        <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
+                        <div style={{ display: "flex", flexWrap: "wrap", alignItems: "center", gap: 6 }}>
                           {asgn.profile_id !== "FRS_STANDARD" && (
-                            <button
-                              className="cc-btn cc-btn-secondary"
-                              style={{ fontSize: 11, padding: "4px 8px", borderColor: "var(--cc-accent)", color: "var(--cc-accent)" }}
-                              onClick={() => setActiveROIEditor({ profile_id: asgn.profile_id, profile_name: asgn.profile_name })}
-                            >
-                              {asgn.profile_id.includes("QUEUE") ? "Configure Queue" : "Configure ROI"}
-                            </button>
+                            <>
+                              {/* Entry / Exit Counting button */}
+                              <button
+                                className="cc-btn cc-btn-secondary"
+                                style={{ fontSize: 11, padding: "4px 8px", borderColor: "#bc8cff", color: "#bc8cff", display: "flex", alignItems: "center", gap: 4 }}
+                                onClick={() => setActiveROIEditor({
+                                  profile_id: asgn.profile_id,
+                                  profile_name: asgn.profile_name,
+                                  initial_tool: asgn.profile_id.includes("QUEUE") ? "ENTRY_LINE" : "COUNTING_LINE",
+                                  initial_objective: "ENTRY_EXIT"
+                                })}
+                                title="Configure Entry/Exit Counting Line"
+                              >
+                                <i className="bi bi-arrow-left-right" />
+                                Entry/Exit Line
+                              </button>
+
+                              {/* Zone Area button */}
+                              <button
+                                className="cc-btn cc-btn-secondary"
+                                style={{ fontSize: 11, padding: "4px 8px", borderColor: "#3fb950", color: "#3fb950", display: "flex", alignItems: "center", gap: 4 }}
+                                onClick={() => setActiveROIEditor({
+                                  profile_id: asgn.profile_id,
+                                  profile_name: asgn.profile_name,
+                                  initial_tool: "CROWD_ROI",
+                                  initial_objective: "ZONE"
+                                })}
+                                title="Configure Zone / Crowd Area Polygon"
+                              >
+                                <i className="bi bi-bounding-box" />
+                                Zone Area
+                              </button>
+
+                              {/* Queue Area button */}
+                              <button
+                                className="cc-btn cc-btn-secondary"
+                                style={{ fontSize: 11, padding: "4px 8px", borderColor: "#d29922", color: "#d29922", display: "flex", alignItems: "center", gap: 4 }}
+                                onClick={() => setActiveROIEditor({
+                                  profile_id: asgn.profile_id,
+                                  profile_name: asgn.profile_name,
+                                  initial_tool: "QUEUE_ROI",
+                                  initial_objective: "QUEUE"
+                                })}
+                                title="Configure Waiting Queue Area Polygon"
+                              >
+                                <i className="bi bi-people" />
+                                Queue Area
+                              </button>
+
+                              {/* All Tools */}
+                              <button
+                                className="cc-btn cc-btn-secondary"
+                                style={{ fontSize: 11, padding: "4px 8px", borderColor: "var(--cc-accent)", color: "var(--cc-accent)", display: "flex", alignItems: "center", gap: 4 }}
+                                onClick={() => setActiveROIEditor({
+                                  profile_id: asgn.profile_id,
+                                  profile_name: asgn.profile_name,
+                                  initial_tool: "COUNTING_LINE",
+                                  initial_objective: "ALL"
+                                })}
+                                title="Open ROI Editor with all tools"
+                              >
+                                <i className="bi bi-sliders" />
+                                All ROIs
+                              </button>
+                            </>
                           )}
                           <button
                             className="cc-btn cc-btn-secondary"
@@ -1332,6 +1650,9 @@ export default function CameraDetail() {
           camera={camera}
           profileId={activeROIEditor.profile_id}
           profileName={activeROIEditor.profile_name}
+          initialTool={activeROIEditor.initial_tool}
+          initialObjective={activeROIEditor.initial_objective}
+          streamUrl={streamSrc}
           onClose={() => setActiveROIEditor(null)}
           onSaved={() => {
             fetchROIConfig();

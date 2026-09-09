@@ -33,6 +33,10 @@ from app.security.encryption import (
 )
 import asyncio
 import time
+from app.ai.pipelines.crowd.registry import CrowdPipelineRegistry
+from app.ai.pipelines.queue.registry import QueuePipelineRegistry
+from app.ai.pipelines.frs.registry import FRSPipelineRegistry
+from app.frs_engine.frs_service import is_frs_worker_running
 
 _stats_cache: Optional[CameraStatsResponse] = None
 _stats_cache_time: float = 0.0
@@ -65,6 +69,29 @@ class CameraService:
         sanitized_rtsp = sanitize_rtsp_url(raw_rtsp) if raw_rtsp else None
 
         coords = c.coordinates if isinstance(c.coordinates, list) and len(c.coordinates) >= 2 else [78.4635, 17.4175]
+
+        # Determine exclusive AI runtime mode and logical IDs
+        cam_code = c.camera_code
+        crowd_pipe = CrowdPipelineRegistry.get(cam_code)
+        is_crowd_running = crowd_pipe is not None and getattr(crowd_pipe, "state", None) is not None and getattr(crowd_pipe.state, "value", str(crowd_pipe.state)) == "RUNNING"
+        queue_pipe = QueuePipelineRegistry.get(cam_code)
+        is_queue_running = queue_pipe is not None and getattr(queue_pipe, "state", None) is not None and getattr(queue_pipe.state, "value", str(queue_pipe.state)) == "RUNNING"
+        frs_pipe = FRSPipelineRegistry.get(cam_code)
+        is_frs_pipe_running = frs_pipe is not None and getattr(frs_pipe, "state", None) is not None and getattr(frs_pipe.state, "value", str(frs_pipe.state)) == "RUNNING"
+        is_frs_running = is_frs_pipe_running or is_frs_worker_running(cam_code) or (c.id and is_frs_worker_running(str(c.id)))
+
+        if is_crowd_running or is_queue_running:
+            ai_mode = "CROWD_ACTIVE"
+            crowd_status = "RUNNING"
+            frs_status = "DISCONNECTED"
+        elif is_frs_running:
+            ai_mode = "FRS_ACTIVE"
+            frs_status = "RUNNING"
+            crowd_status = "DISCONNECTED"
+        else:
+            ai_mode = "IDLE"
+            frs_status = "DISCONNECTED"
+            crowd_status = "DISCONNECTED"
 
         return CameraRead(
             id=c.camera_code,
@@ -102,6 +129,11 @@ class CameraService:
             gpu_id=c.gpu_id or "GPU-01",
             last_seen_at=c.last_seen_at,
             last_tested_at=c.last_tested_at,
+            logical_id_frs=f"{c.camera_code}-FRS",
+            logical_id_crowd=f"{c.camera_code}-CROWD",
+            ai_mode=ai_mode,
+            frs_status=frs_status,
+            crowd_status=crowd_status,
         )
 
     async def get_cameras(

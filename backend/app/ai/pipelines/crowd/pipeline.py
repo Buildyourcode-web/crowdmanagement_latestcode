@@ -22,6 +22,7 @@ from app.ai.pipelines.crowd.detector import (
     BasePersonDetector,
     DeepStreamPersonDetector,
     DetectedPerson,
+    YOLO11xPersonDetector,
 )
 from app.ai.pipelines.crowd.events import CrowdEventEngine
 from app.ai.pipelines.crowd.health import PipelineHealthMonitor, PipelineHealthStatus
@@ -47,10 +48,19 @@ class CrowdPipeline:
         self.profile_id = config.profile_id
 
         # Sub-components
-        self.detector = detector or DeepStreamPersonDetector(
-            model=config.model,
-            confidence_threshold=config.confidence_threshold,
-        )
+        if detector:
+            self.detector = detector
+        elif "YOLO11X" in self.profile_id.upper() or "yolo11" in config.model.model_id.lower():
+            self.detector = YOLO11xPersonDetector(
+                model=config.model,
+                confidence_threshold=config.confidence_threshold,
+                camera_code=self.camera_code,
+            )
+        else:
+            self.detector = DeepStreamPersonDetector(
+                model=config.model,
+                confidence_threshold=config.confidence_threshold,
+            )
         self.tracker = PersonTracker(
             max_age_frames=30,
             min_hits=1,
@@ -99,12 +109,21 @@ class CrowdPipeline:
         if not init_ok:
             self.state = PipelineState.FAILED
             self.health_monitor.pipeline_state = self.state
-            self.health_monitor.record_error("Detector initialization failed / runtime unavailable")
+            status_desc = getattr(self.detector, "status", "RUNTIME_UNAVAILABLE")
+            is_yolo = "yolo11" in self.config.model.model_id.lower() or "yolo11" in self.profile_id.lower()
+            err_code = "YOLO11X_UNAVAILABLE" if is_yolo else "RUNTIME_UNAVAILABLE"
+            err_msg = (
+                f"YOLO11x detection runtime unavailable ({status_desc}). Ensure model weights/engine are configured."
+                if is_yolo
+                else "NVIDIA DeepStream runtime unavailable on this host."
+            )
+            self.health_monitor.record_error(err_msg)
             raise HTTPException(
                 status_code=status.HTTP_400_BAD_REQUEST,
                 detail={
-                    "code": "RUNTIME_UNAVAILABLE",
-                    "message": "NVIDIA DeepStream runtime unavailable on this host.",
+                    "code": err_code,
+                    "message": err_msg,
+                    "detector_status": status_desc,
                 },
             )
 
@@ -221,6 +240,11 @@ class CrowdPipeline:
                 "tracking_ms": round(t_trk, 1),
                 "total_ms": round((time.time() - t0) * 1000.0, 1),
             },
+            "model_info": self.detector.get_model_info() if hasattr(self.detector, "get_model_info") else {
+                "model_id": self.config.model.model_id,
+                "name": self.config.model.name,
+                "version": self.config.model.version,
+            },
         }
         self._latest_metrics = result_payload
 
@@ -290,6 +314,11 @@ class CrowdPipeline:
             "risk_factors": [],
             "events_fired": [],
             "fps": 0.0,
+            "model_info": self.detector.get_model_info() if hasattr(self.detector, "get_model_info") else {
+                "model_id": self.config.model.model_id,
+                "name": self.config.model.name,
+                "version": self.config.model.version,
+            },
         }
 
     def get_health(self) -> PipelineHealthStatus:

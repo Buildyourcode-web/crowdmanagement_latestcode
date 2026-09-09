@@ -689,11 +689,11 @@ async def test_websocket_event_emitted_on_roi_change(client: AsyncClient, supera
         assert res.status_code == 201
 
         mock_pub.assert_called_once()
-        args, kwargs = mock_pub.call_args
-        assert args[0] == "ai"
-        assert args[1]["event_type"] == "AI_GEOMETRY_CHANGED"
-        assert args[1]["camera_code"] == "CAM-ROI-CROWD-01"
-        assert args[1]["action"] == "ROI_CREATED"
+        _, kwargs = mock_pub.call_args
+        assert kwargs["channel"] == "ai"
+        assert kwargs["event_type"] == "AI_GEOMETRY_CHANGED"
+        assert kwargs["payload"]["camera_code"] == "CAM-ROI-CROWD-01"
+        assert kwargs["payload"]["action"] == "ROI_CREATED"
 
 
 @pytest.mark.asyncio

@@ -195,3 +195,22 @@ export async function getAIOrchestratorStatus() {
   return res.data?.data || res.data || res;
 }
 
+/**
+ * Retrieves exclusive AI mode (IDLE, FRS_ACTIVE, CROWD_ACTIVE, TRANSITIONING) and logical IDs
+ */
+export async function getCameraAIMode(cameraCodeOrId) {
+  const res = await apiClient.get(`/api/v1/ai/orchestrator/cameras/${cameraCodeOrId}/mode`);
+  return res.data?.data || res.data || res;
+}
+
+/**
+ * Exclusively switches physical camera between FRS, CROWD, and IDLE
+ */
+export async function switchCameraAIMode(cameraCodeOrId, targetMode, profileId = null) {
+  const res = await apiClient.post(`/api/v1/ai/orchestrator/cameras/${cameraCodeOrId}/switch-mode`, {
+    target_mode: targetMode,
+    profile_id: profileId,
+  });
+  return res.data?.data || res.data || res;
+}
+

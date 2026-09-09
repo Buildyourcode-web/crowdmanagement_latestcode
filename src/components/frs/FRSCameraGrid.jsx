@@ -59,6 +59,7 @@ export default function FRSCameraGrid({ cameras = [] }) {
     <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fill, minmax(280px, 1fr))", gap: 10 }}>
       {allCams.map((cam) => {
         const isOnline = cam.status === "online" || cam.status === "starting";
+        const displayId = cam.logical_id_frs || (cam.id?.endsWith("-FRS") ? cam.id : (cam.id?.startsWith("CAM-") ? `${cam.id}-FRS` : cam.id));
         return (
           <div
             key={cam.id}
@@ -76,7 +77,7 @@ export default function FRSCameraGrid({ cameras = [] }) {
               <div style={{ position: "relative", background: "#000", height: 160, overflow: "hidden" }}>
                 <img
                   src={`${BACKEND}${cam.stream_url}`}
-                  alt={`FRS Live: ${cam.id}`}
+                  alt={`FRS Live: ${displayId}`}
                   style={{ width: "100%", height: "100%", objectFit: "cover", display: "block" }}
                   onError={(e) => {
                     e.target.style.display = "none";
@@ -90,7 +91,7 @@ export default function FRSCameraGrid({ cameras = [] }) {
                 </div>
                 {/* Live overlay badges */}
                 <div style={{ position: "absolute", top: 6, left: 8, fontFamily: "var(--cc-font-mono)", fontSize: 8, color: "rgba(88,166,255,0.9)", background: "rgba(0,0,0,0.6)", padding: "1px 5px", borderRadius: 2 }}>
-                  {cam.id}
+                  {displayId}
                 </div>
                 <div style={{ position: "absolute", top: 6, right: 8, fontSize: 8, color: "var(--cc-green)", fontWeight: 700, background: "rgba(0,0,0,0.6)", padding: "1px 5px", borderRadius: 2 }}>
                   ● LIVE FRS
@@ -114,7 +115,7 @@ export default function FRSCameraGrid({ cameras = [] }) {
             <div style={{ padding: "8px 10px" }}>
               <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", marginBottom: 4 }}>
                 <span style={{ fontFamily: "var(--cc-font-mono)", fontSize: 11, fontWeight: 700, color: "var(--cc-text-primary)" }}>
-                  {cam.id}
+                  {displayId}
                 </span>
                 <span
                   className="cc-badge"

@@ -17,6 +17,8 @@ from typing import Any, Dict, List, Optional
 from fastapi import APIRouter, Depends, HTTPException, Request, status
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from pydantic import BaseModel, Field
+
 from app.ai.deployments.service import AIDeployment
 from app.ai.orchestrator.service import ai_orchestrator
 from app.dependencies import get_current_user, get_db, require_permission
@@ -26,6 +28,11 @@ from app.security.permissions import Permissions
 from app.utils.response import success_response
 
 router = APIRouter(prefix="/orchestrator", tags=["AI Orchestration & Multi-Camera Management"])
+
+
+class CameraModeSwitchRequest(BaseModel):
+    target_mode: str = Field(..., example="CROWD")  # "FRS", "CROWD", "IDLE", "STOP"
+    profile_id: Optional[str] = None
 
 
 @router.get("/deployments", response_model=StandardResponse[List[AIDeployment]])
@@ -160,3 +167,35 @@ async def get_orchestrator_health(
         "status": "HEALTHY" if ai_orchestrator._is_running else "IDLE",
         "supervision_loop_active": ai_orchestrator._is_running,
     })
+
+
+@router.get("/cameras/{camera_id_or_code}/mode", response_model=StandardResponse[Dict[str, Any]])
+async def get_camera_ai_mode(
+    camera_id_or_code: str,
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(require_permission(Permissions.AI_READ)),
+):
+    """Retrieves current exclusive AI mode (IDLE, FRS_ACTIVE, CROWD_ACTIVE) and logical IDs."""
+    res = await ai_orchestrator.get_camera_mode(camera_id_or_code, db)
+    return success_response(res)
+
+
+@router.post("/cameras/{camera_id_or_code}/switch-mode", response_model=StandardResponse[Dict[str, Any]])
+async def switch_camera_ai_mode(
+    camera_id_or_code: str,
+    payload: CameraModeSwitchRequest,
+    request: Request,
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(require_permission(Permissions.AI_MANAGE)),
+):
+    """Exclusively switches physical camera between FRS, CROWD, and IDLE."""
+    client_ip = request.client.host if request.client else None
+    res = await ai_orchestrator.switch_camera_mode(
+        camera_id_or_code=camera_id_or_code,
+        target_mode=payload.target_mode,
+        profile_id=payload.profile_id,
+        db=db,
+        current_user=current_user,
+        client_ip=client_ip,
+    )
+    return success_response(res)

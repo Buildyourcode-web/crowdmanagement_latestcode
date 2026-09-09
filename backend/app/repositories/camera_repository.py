@@ -18,6 +18,14 @@ class CameraRepository(BaseRepository[Camera]):
         if cam:
             return cam
 
+        if isinstance(camera_code, str) and ("-FRS" in camera_code or "-CROWD" in camera_code):
+            base_code = camera_code.replace("-FRS", "").replace("-CROWD", "")
+            stmt_base = select(Camera).where(Camera.camera_code == base_code)
+            res_base = await self.db.execute(stmt_base)
+            cam = res_base.scalars().first()
+            if cam:
+                return cam
+
         # Fallback: check if camera_code is a valid UUID
         try:
             val_uuid = uuid.UUID(camera_code)

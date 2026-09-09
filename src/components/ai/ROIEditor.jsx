@@ -5,44 +5,121 @@ import {
   saveCameraROI,
   deleteCameraROI,
   getCameraSnapshotUrl,
+  switchCameraAIMode,
 } from "../../services/aiService";
 
 const ROI_TYPE_META = {
-  CROWD_ROI: { label: "Crowd ROI Polygon", color: "#3fb950", isLine: false, hint: "Polygon (min 3 points) defining where crowd density is measured" },
-  QUEUE_ROI: { label: "Queue Area Polygon", color: "#d29922", isLine: false, hint: "Polygon defining waiting queue zone" },
-  ENTRY_LINE: { label: "Queue Entry Line", color: "#58a6ff", isLine: true, direction: "IN", hint: "Line with 2 points marking where people enter queue" },
-  EXIT_LINE: { label: "Queue Exit Line", color: "#f85149", isLine: true, direction: "OUT", hint: "Line with 2 points marking where people exit queue" },
-  COUNTING_LINE: { label: "Counting Line", color: "#bc8cff", isLine: true, direction: "BOTH", hint: "Line with 2 points for bi-directional counting" },
-  DIRECTION_LINE: { label: "Direction Line", color: "#388bfd", isLine: true, direction: "IN", hint: "Line vector indicating expected queue flow" },
-  EXCLUSION_ZONE: { label: "Exclusion Zone", color: "#8b949e", isLine: false, hint: "Ignored zone (roads, trees, structures)" },
+  COUNTING_LINE: {
+    label: "Entry / Exit Counting Line",
+    color: "#bc8cff",
+    isLine: true,
+    direction: "BOTH",
+    hint: "గేట్ వద్ద 2 పాయింట్లు క్లిక్ చేయండి. లోపలికి వచ్చే వారిని (Entry), బయటకు వెళ్ళే వారిని (Exit) గణిస్తుంది (Bi-directional gate counting).",
+  },
+  CROWD_ROI: {
+    label: "Zone / Crowd Area Polygon",
+    color: "#3fb950",
+    isLine: false,
+    hint: "హాల్ లేదా ఆవరణ చుట్టూ 3+ పాయింట్లు క్లిక్ చేసి పాలిగాన్ బాక్స్ గీయండి. జనం సాంద్రత (Density) మరియు ఆక్యుపెన్సీని లెక్కిస్తుంది.",
+  },
+  QUEUE_ROI: {
+    label: "Queue Waiting Area Polygon",
+    color: "#d29922",
+    isLine: false,
+    hint: "క్యూ బారికేడ్ల చుట్టూ పాలిగాన్ బాక్స్ గీయండి. క్యూ లో ఉన్నవారి సంఖ్య (Headcount) మరియు వెయిటింగ్ టైమ్ లెక్కిస్తుంది.",
+  },
+  ENTRY_LINE: {
+    label: "Queue Entry Line",
+    color: "#58a6ff",
+    isLine: true,
+    direction: "IN",
+    hint: "క్యూ లైన్ మొదలయ్యే చోట (Tail) 2 పాయింట్లు క్లిక్ చేయండి. క్యూ లోకి ప్రవేశించే వారిని గణిస్తుంది.",
+  },
+  EXIT_LINE: {
+    label: "Queue Exit Line",
+    color: "#f85149",
+    isLine: true,
+    direction: "OUT",
+    hint: "క్యూ పూర్తయ్యే కౌంటర్/దర్శనం వద్ద (Head) 2 పాయింట్లు క్లిక్ చేయండి. సర్వీస్ రేట్ లెక్కిస్తుంది.",
+  },
+  DIRECTION_LINE: {
+    label: "Queue Flow Direction Line",
+    color: "#388bfd",
+    isLine: true,
+    direction: "IN",
+    hint: "క్యూ ఏ దిశలో ముందుకు కదులుతుందో సూచించడానికి ఎంట్రీ నుండి ఎగ్జిట్ వైపు లైన్ గీయండి.",
+  },
+  EXCLUSION_ZONE: {
+    label: "Exclusion Zone (మినహాయింపు)",
+    color: "#8b949e",
+    isLine: false,
+    hint: "స్తంభాలు, గోడలు, లేదా చెట్ల చుట్టూ బాక్స్ గీస్తే AI వాటిని లెక్కింపు నుండి తొలగిస్తుంది.",
+  },
 };
 
-export default function ROIEditor({ camera, profileId, profileName, onClose, onSaved }) {
+export default function ROIEditor({
+  camera,
+  profileId,
+  profileName,
+  onClose,
+  onSaved,
+  streamUrl,
+  initialTool,
+  initialObjective,
+}) {
   const containerRef = useRef(null);
   const imageRef = useRef(null);
 
-  const [snapshotUrl, setSnapshotUrl] = useState("");
-  const [loadingSnapshot, setLoadingSnapshot] = useState(true);
-  const [snapshotError, setSnapshotError] = useState(null);
+  const BACKEND = `http://${window.location.hostname}:8000`;
+  const camCode = camera?.camera_code || camera?.id;
+  const effectiveStreamUrl =
+    streamUrl ||
+    (camera?.stream_url
+      ? (camera.stream_url.startsWith("http") ? camera.stream_url : `${BACKEND}${camera.stream_url}`)
+      : `${BACKEND}/api/v1/frs-engine/cameras/${camCode || "CAM-KHB-001"}/stream`);
+
+  const [streamLoading, setStreamLoading] = useState(true);
+  const [streamError, setStreamError] = useState(false);
 
   const [rois, setRois] = useState([]);
   const [readiness, setReadiness] = useState(null);
 
-  // Available tools for this profile
-  const availableTools = useMemo(() => {
-    if (profileId === "CROWD_STANDARD" || profileId === "CROWD_HIGH_DENSITY") {
-      return ["CROWD_ROI", "EXCLUSION_ZONE", "COUNTING_LINE"];
-    }
-    if (profileId === "QUEUE_STANDARD") {
-      return ["QUEUE_ROI", "ENTRY_LINE", "EXIT_LINE", "DIRECTION_LINE", "EXCLUSION_ZONE"];
-    }
-    if (profileId === "VIDEO_SAFETY") {
-      return ["EXCLUSION_ZONE", "COUNTING_LINE"];
-    }
-    return [];
-  }, [profileId]);
+  // Assigned purpose locked to camera profile: ENTRY_EXIT | ZONE | QUEUE
+  const assignedObjective = useMemo(() => {
+    if (initialObjective && initialObjective !== "ALL") return initialObjective;
+    if (camera?.ai_purposes && camera.ai_purposes.length > 0) return camera.ai_purposes[0];
+    if (profileId?.includes("QUEUE")) return "QUEUE";
+    if (profileId?.includes("ZONE")) return "ZONE";
+    return "ENTRY_EXIT";
+  }, [initialObjective, camera?.ai_purposes, profileId]);
 
-  const [activeTool, setActiveTool] = useState(availableTools[0] || "CROWD_ROI");
+  const [objective, setObjective] = useState(assignedObjective);
+
+  // Available tools strictly locked to assigned profile
+  const availableTools = useMemo(() => {
+    if (objective === "ENTRY_EXIT") {
+      return ["COUNTING_LINE", "ENTRY_LINE", "EXIT_LINE"];
+    }
+    if (objective === "ZONE") {
+      return ["CROWD_ROI", "EXCLUSION_ZONE"];
+    }
+    if (objective === "QUEUE") {
+      return ["QUEUE_ROI", "DIRECTION_LINE"];
+    }
+    return ["COUNTING_LINE", "ENTRY_LINE", "EXIT_LINE"];
+  }, [objective]);
+
+  const [activeTool, setActiveTool] = useState(initialTool || availableTools[0] || "COUNTING_LINE");
+
+  useEffect(() => {
+    setObjective(assignedObjective);
+  }, [assignedObjective]);
+
+  useEffect(() => {
+    if (!availableTools.includes(activeTool)) {
+      setActiveTool(availableTools[0] || "COUNTING_LINE");
+    }
+  }, [availableTools, activeTool]);
   const [currentPoints, setCurrentPoints] = useState([]); // [{x: 0..1, y: 0..1}]
   const [history, setHistory] = useState([]);
   const [redoStack, setRedoStack] = useState([]);
@@ -50,28 +127,26 @@ export default function ROIEditor({ camera, profileId, profileName, onClose, onS
 
   const [roiName, setRoiName] = useState("");
   const [direction, setDirection] = useState("BOTH");
+  const [warningThreshold, setWarningThreshold] = useState("50");
+  const [dangerThreshold, setDangerThreshold] = useState("80");
+  const [capacity, setCapacity] = useState("100");
 
   const [validationStatus, setValidationStatus] = useState(null); // { valid: bool, message: str }
   const [saving, setSaving] = useState(false);
   const [statusMessage, setStatusMessage] = useState("");
   const [mousePos, setMousePos] = useState({ x: 0, y: 0 });
 
-  // Stream status guard
-  const isStreamVerified =
-    camera?.enabled &&
-    camera?.stream_status &&
-    camera.stream_status.toUpperCase() !== "NOT_TESTED" &&
-    camera.stream_status.toUpperCase() !== "OFFLINE";
+  // Stream status guard — allow live drawing whenever camera is not offline
+  const isStreamVerified = camera?.enabled !== false && camera?.status !== "offline" && !streamError;
 
   const streamWarningMessage = useMemo(() => {
-    if (!camera?.enabled) return "Camera Offline — Camera is currently disabled";
-    const status = (camera?.stream_status || "").toUpperCase();
-    if (status === "NOT_TESTED") return "Camera stream not verified — Please perform RTSP test first";
-    if (status === "OFFLINE") return "Camera Offline — ROI editor unavailable";
+    if (camera?.enabled === false) return "Camera Offline — Camera is currently disabled";
+    if (camera?.status === "offline") return "Camera Offline — Stream is unreachable";
+    if (streamError) return "Stream Connection Error — Could not connect to live feed";
     return null;
-  }, [camera]);
+  }, [camera, streamError]);
 
-  // Load existing configurations and snapshot
+  // Load existing configurations
   const refreshData = async () => {
     if (!camera?.id) return;
     try {
@@ -85,15 +160,9 @@ export default function ROIEditor({ camera, profileId, profileName, onClose, onS
 
   useEffect(() => {
     refreshData();
-    if (isStreamVerified) {
-      setLoadingSnapshot(true);
-      const url = getCameraSnapshotUrl(camera.id);
-      setSnapshotUrl(url);
-    } else {
-      setLoadingSnapshot(false);
-      setSnapshotError(streamWarningMessage);
-    }
-  }, [camera?.id, isStreamVerified]);
+    setStreamLoading(true);
+    setStreamError(false);
+  }, [camera?.id, effectiveStreamUrl]);
 
   // Update default name when tool changes
   useEffect(() => {
@@ -134,6 +203,11 @@ export default function ROIEditor({ camera, profileId, profileName, onClose, onS
         pushHistory([...currentPoints]);
         setCurrentPoints([coords]);
       } else if (currentPoints.length === 1) {
+        const dist = Math.hypot(coords.x - currentPoints[0].x, coords.y - currentPoints[0].y);
+        if (dist < 0.02) {
+          setValidationStatus({ valid: false, message: "Line endpoints must be distinct. Click a second point across the gate or walkway." });
+          return;
+        }
         pushHistory([...currentPoints]);
         setCurrentPoints([...currentPoints, coords]);
         setValidationStatus(null);
@@ -192,7 +266,12 @@ export default function ROIEditor({ camera, profileId, profileName, onClose, onS
     let geom = {};
     if (meta?.isLine) {
       if (currentPoints.length !== 2) {
-        setValidationStatus({ valid: false, message: "Line requires exactly 2 endpoints" });
+        setValidationStatus({ valid: false, message: "Line requires exactly 2 endpoints across the entryway" });
+        return;
+      }
+      const dist = Math.hypot(currentPoints[1].x - currentPoints[0].x, currentPoints[1].y - currentPoints[0].y);
+      if (dist < 0.02) {
+        setValidationStatus({ valid: false, message: "Line endpoints must be distinct. Click two different points across the gate or walkway." });
         return;
       }
       geom = { start: currentPoints[0], end: currentPoints[1], direction };
@@ -216,7 +295,8 @@ export default function ROIEditor({ camera, profileId, profileName, onClose, onS
         setValidationStatus({ valid: false, message: `✕ ${res.error_message || "Validation failed"}` });
       }
     } catch (err) {
-      const msg = err.response?.data?.detail?.message || err.message;
+      const detail = err.response?.data?.detail;
+      const msg = (typeof detail === "object" && detail?.message) ? detail.message : (typeof detail === "string" ? detail : err.message);
       setValidationStatus({ valid: false, message: `✕ ${msg}` });
     }
   };
@@ -227,7 +307,12 @@ export default function ROIEditor({ camera, profileId, profileName, onClose, onS
     let geom = {};
     if (meta?.isLine) {
       if (currentPoints.length !== 2) {
-        setValidationStatus({ valid: false, message: "Line requires exactly 2 endpoints" });
+        setValidationStatus({ valid: false, message: "Line requires exactly 2 endpoints across the entryway" });
+        return;
+      }
+      const dist = Math.hypot(currentPoints[1].x - currentPoints[0].x, currentPoints[1].y - currentPoints[0].y);
+      if (dist < 0.02) {
+        setValidationStatus({ valid: false, message: "Line endpoints must be distinct. Click two different points across the gate or walkway." });
         return;
       }
       geom = { start: currentPoints[0], end: currentPoints[1], direction };
@@ -236,7 +321,13 @@ export default function ROIEditor({ camera, profileId, profileName, onClose, onS
         setValidationStatus({ valid: false, message: "Polygon requires at least 3 vertices" });
         return;
       }
-      geom = { points: currentPoints };
+      geom = {
+        points: currentPoints,
+        warning_threshold: parseInt(warningThreshold, 10) || 50,
+        danger_threshold: parseInt(dangerThreshold, 10) || 80,
+        capacity: parseInt(capacity, 10) || 100,
+        zone_name: roiName || `${meta?.label} ${rois.length + 1}`,
+      };
     }
 
     setSaving(true);
@@ -251,7 +342,15 @@ export default function ROIEditor({ camera, profileId, profileName, onClose, onS
         enabled: true,
       });
 
-      setStatusMessage("Configuration saved successfully. AI inference has not been started.");
+      // Automatically activate Crowd AI model (YOLO11x) so detection starts immediately
+      const camCode = camera.camera_code || camera.id;
+      try {
+        await switchCameraAIMode(camCode, "CROWD");
+      } catch (e) {
+        console.warn("Auto-start Crowd AI notice:", e);
+      }
+
+      setStatusMessage("Configuration saved successfully! YOLO11x Human Detection is active.");
       setCurrentPoints([]);
       setHistory([]);
       setRedoStack([]);
@@ -259,7 +358,8 @@ export default function ROIEditor({ camera, profileId, profileName, onClose, onS
       await refreshData();
       if (onSaved) onSaved();
     } catch (err) {
-      const msg = err.response?.data?.detail?.message || err.message;
+      const detail = err.response?.data?.detail;
+      const msg = (typeof detail === "object" && detail?.message) ? detail.message : (typeof detail === "string" ? detail : err.message);
       setValidationStatus({ valid: false, message: `✕ ${msg}` });
     } finally {
       setSaving(false);
@@ -273,7 +373,15 @@ export default function ROIEditor({ camera, profileId, profileName, onClose, onS
       await refreshData();
       if (onSaved) onSaved();
     } catch (err) {
-      alert("Failed to delete ROI: " + (err.response?.data?.detail?.message || err.message));
+      if (err.response?.status === 404) {
+        // Already deleted on server, refresh smoothly without intrusive alert
+        await refreshData();
+        if (onSaved) onSaved();
+      } else {
+        const detail = err.response?.data?.detail;
+        const msg = (typeof detail === "object" && detail?.message) ? detail.message : (typeof detail === "string" ? detail : err.message);
+        alert("Failed to delete ROI: " + msg);
+      }
     }
   };
 
@@ -361,6 +469,30 @@ export default function ROIEditor({ camera, profileId, profileName, onClose, onS
             gap: 16,
           }}
         >
+          {/* Locked Assigned Profile Header Banner */}
+          <div
+            style={{
+              background: objective === "ENTRY_EXIT" ? "rgba(188, 140, 255, 0.1)" : (objective === "QUEUE" ? "rgba(210, 153, 34, 0.1)" : "rgba(63, 185, 80, 0.1)"),
+              padding: "10px 12px",
+              borderRadius: 6,
+              border: `1px solid ${objective === "ENTRY_EXIT" ? "rgba(188, 140, 255, 0.3)" : (objective === "QUEUE" ? "rgba(210, 153, 34, 0.3)" : "rgba(63, 185, 80, 0.3)")}`,
+            }}
+          >
+            <div style={{ display: "flex", alignItems: "center", gap: 6, fontSize: 12, fontWeight: 700, color: objective === "ENTRY_EXIT" ? "#bc8cff" : (objective === "QUEUE" ? "#d29922" : "#3fb950") }}>
+              <i className={`bi ${objective === "ENTRY_EXIT" ? "bi-arrow-left-right" : (objective === "QUEUE" ? "bi-people" : "bi-bounding-box")}`} />
+              <span>
+                {objective === "ENTRY_EXIT" ? "Assigned: Entry / Exit Counting" : (objective === "QUEUE" ? "Assigned: Queue Management" : "Assigned: Zone Density Management")}
+              </span>
+            </div>
+            <div style={{ fontSize: 10, color: "var(--cc-text-muted)", marginTop: 4, lineHeight: 1.3 }}>
+              {objective === "ENTRY_EXIT"
+                ? "Showing only bidirectional line-crossing counting tools."
+                : (objective === "QUEUE"
+                  ? "Showing only waiting queue polygons and flow direction tools."
+                  : "Showing only crowd density perimeter and exclusion tools.")}
+            </div>
+          </div>
+
           {/* Tool Selector */}
           <div>
             <div style={{ fontSize: 11, fontWeight: 700, color: "var(--cc-text-muted)", textTransform: "uppercase", marginBottom: 8 }}>
@@ -381,7 +513,7 @@ export default function ROIEditor({ camera, profileId, profileName, onClose, onS
                       padding: "8px 12px",
                       borderRadius: 6,
                       background: isSelected ? "var(--cc-bg-root)" : "transparent",
-                      border: `1px solid ${isSelected ? meta.color : "var(--cc-border)"}`,
+                      border: `1px solid ${isSelected ? meta?.color || "var(--cc-accent)" : "var(--cc-border)"}`,
                       color: isSelected ? "var(--cc-text-primary)" : "var(--cc-text-muted)",
                       display: "flex",
                       alignItems: "center",
@@ -393,19 +525,33 @@ export default function ROIEditor({ camera, profileId, profileName, onClose, onS
                     }}
                   >
                     <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
-                      <div style={{ width: 10, height: 10, borderRadius: meta.isLine ? 2 : "50%", background: meta.color }} />
-                      <span>{meta.label}</span>
+                      <div style={{ width: 10, height: 10, borderRadius: meta?.isLine ? 2 : "50%", background: meta?.color || "var(--cc-accent)" }} />
+                      <span>{meta?.label || tool}</span>
                     </div>
                     <span style={{ fontSize: 10, color: "var(--cc-text-muted)", fontFamily: "var(--cc-font-mono)" }}>
-                      {meta.isLine ? "LINE" : "POLYGON"}
+                      {meta?.isLine ? "LINE" : "POLYGON"}
                     </span>
                   </button>
                 );
               })}
             </div>
-            <div style={{ fontSize: 11, color: "var(--cc-text-muted)", marginTop: 8, fontStyle: "italic" }}>
-              {ROI_TYPE_META[activeTool]?.hint}
-            </div>
+            {ROI_TYPE_META[activeTool] && (
+              <div
+                style={{
+                  fontSize: 11,
+                  color: "var(--cc-text-secondary)",
+                  marginTop: 10,
+                  background: "var(--cc-bg-root)",
+                  padding: "8px 10px",
+                  borderRadius: 4,
+                  borderLeft: `3px solid ${ROI_TYPE_META[activeTool]?.color || "var(--cc-accent)"}`,
+                  lineHeight: 1.4,
+                }}
+              >
+                <i className="bi bi-info-circle-fill" style={{ marginRight: 6, color: ROI_TYPE_META[activeTool]?.color }} />
+                {ROI_TYPE_META[activeTool]?.hint}
+              </div>
+            )}
           </div>
 
           {/* Geometry Properties */}
@@ -424,7 +570,7 @@ export default function ROIEditor({ camera, profileId, profileName, onClose, onS
               />
             </div>
 
-            {ROI_TYPE_META[activeTool]?.isLine && (
+            {ROI_TYPE_META[activeTool]?.isLine ? (
               <div>
                 <label style={{ fontSize: 11, fontWeight: 700, color: "var(--cc-text-muted)", display: "block", marginBottom: 4 }}>
                   Counting Direction
@@ -439,6 +585,72 @@ export default function ROIEditor({ camera, profileId, profileName, onClose, onS
                   <option value="OUT">OUT (Exit Direction)</option>
                   <option value="BOTH">BOTH (Bi-directional)</option>
                 </select>
+              </div>
+            ) : (
+              <div style={{ display: "flex", flexDirection: "column", gap: 8, background: "var(--cc-bg-root)", padding: 10, borderRadius: 6, border: "1px solid var(--cc-border)" }}>
+                <div style={{ fontSize: 11, fontWeight: 700, color: "var(--cc-accent)", textTransform: "uppercase" }}>
+                  Density Alert Thresholds
+                </div>
+
+                <div>
+                  <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 2 }}>
+                    <label style={{ fontSize: 11, fontWeight: 600, color: "#d29922" }}>
+                      Warning Threshold (Orange)
+                    </label>
+                    <span style={{ fontSize: 10, color: "var(--cc-text-muted)" }}>people</span>
+                  </div>
+                  <input
+                    type="number"
+                    min="1"
+                    value={warningThreshold}
+                    onChange={(e) => setWarningThreshold(e.target.value)}
+                    className="cc-input"
+                    style={{ width: "100%", padding: "4px 8px", fontSize: 12 }}
+                    placeholder="50"
+                  />
+                  <div style={{ fontSize: 10, color: "var(--cc-text-muted)", marginTop: 2 }}>
+                    Zone turns Orange above this count
+                  </div>
+                </div>
+
+                <div>
+                  <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 2 }}>
+                    <label style={{ fontSize: 11, fontWeight: 600, color: "#f85149" }}>
+                      Danger Threshold (Red)
+                    </label>
+                    <span style={{ fontSize: 10, color: "var(--cc-text-muted)" }}>people</span>
+                  </div>
+                  <input
+                    type="number"
+                    min="1"
+                    value={dangerThreshold}
+                    onChange={(e) => setDangerThreshold(e.target.value)}
+                    className="cc-input"
+                    style={{ width: "100%", padding: "4px 8px", fontSize: 12 }}
+                    placeholder="80"
+                  />
+                  <div style={{ fontSize: 10, color: "var(--cc-text-muted)", marginTop: 2 }}>
+                    Zone turns Red above this count
+                  </div>
+                </div>
+
+                <div>
+                  <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 2 }}>
+                    <label style={{ fontSize: 11, fontWeight: 600, color: "var(--cc-text-secondary)" }}>
+                      Max Capacity
+                    </label>
+                    <span style={{ fontSize: 10, color: "var(--cc-text-muted)" }}>people</span>
+                  </div>
+                  <input
+                    type="number"
+                    min="1"
+                    value={capacity}
+                    onChange={(e) => setCapacity(e.target.value)}
+                    className="cc-input"
+                    style={{ width: "100%", padding: "4px 8px", fontSize: 12 }}
+                    placeholder="100"
+                  />
+                </div>
               </div>
             )}
           </div>
@@ -573,6 +785,11 @@ export default function ROIEditor({ camera, profileId, profileName, onClose, onS
                       <span style={{ fontWeight: 600, color: "var(--cc-text-primary)", whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" }}>
                         {roi.name}
                       </span>
+                      {roi.geometry_json?.warning_threshold && (
+                        <span style={{ fontSize: 9, color: "#d29922", background: "rgba(210,153,34,0.15)", padding: "1px 4px", borderRadius: 3 }}>
+                          W:{roi.geometry_json.warning_threshold} D:{roi.geometry_json.danger_threshold}
+                        </span>
+                      )}
                       <span style={{ fontSize: 9, color: "var(--cc-text-muted)", fontFamily: "var(--cc-font-mono)" }}>
                         (v{roi.version})
                       </span>
@@ -672,19 +889,15 @@ export default function ROIEditor({ camera, profileId, profileName, onClose, onS
             Spatial geometry configuration only. No inference is running.
           </div>
 
-          {/* Snapshot Container with Interactive SVG */}
-          {loadingSnapshot ? (
-            <div style={{ color: "var(--cc-text-muted)", fontSize: 13 }}>
-              Loading verified camera snapshot...
-            </div>
-          ) : snapshotError ? (
+          {/* Live Feed Container with Interactive SVG */}
+          {streamError ? (
             <div style={{ textAlign: "center", color: "var(--cc-text-muted)", padding: 40 }}>
-              <div style={{ fontSize: 32, marginBottom: 8 }}>📷</div>
-              <div style={{ fontWeight: 600, color: "var(--cc-red)", marginBottom: 4 }}>
-                {snapshotError}
+              <div style={{ fontSize: 36, marginBottom: 12 }}>📹</div>
+              <div style={{ fontWeight: 700, color: "var(--cc-red)", fontSize: 14, marginBottom: 6 }}>
+                Live Stream Connection Failed
               </div>
-              <div style={{ fontSize: 12 }}>
-                Camera must pass RTSP stream testing before visual geometry can be configured.
+              <div style={{ fontSize: 12, maxWidth: 360, margin: "0 auto" }}>
+                Make sure the camera RTSP stream is online and reachable on the network.
               </div>
             </div>
           ) : (
@@ -698,23 +911,77 @@ export default function ROIEditor({ camera, profileId, profileName, onClose, onS
               }}
               onClick={handleCanvasClick}
             >
+              {streamLoading && (
+                <div
+                  style={{
+                    position: "absolute",
+                    inset: 0,
+                    display: "flex",
+                    alignItems: "center",
+                    justifyContent: "center",
+                    background: "rgba(10,13,16,0.85)",
+                    zIndex: 20,
+                    color: "var(--cc-text-muted)",
+                    fontSize: 12,
+                    gap: 8,
+                  }}
+                >
+                  <i className="bi bi-broadcast" style={{ color: "var(--cc-green)", animation: "pulse 1.5s infinite" }} />
+                  Connecting to live camera feed...
+                </div>
+              )}
               <img
                 ref={imageRef}
-                src={snapshotUrl}
-                alt="Camera Frame"
+                src={effectiveStreamUrl}
+                alt="Camera Live Feed"
                 style={{
                   display: "block",
                   maxWidth: "100%",
                   maxHeight: "82vh",
                   borderRadius: 4,
                   border: "1px solid var(--cc-border)",
+                  objectFit: "contain",
                 }}
                 onError={() => {
-                  setLoadingSnapshot(false);
-                  setSnapshotError("Failed to fetch verified frame from camera stream");
+                  setStreamLoading(false);
+                  setStreamError(true);
                 }}
-                onLoad={() => setLoadingSnapshot(false)}
+                onLoad={() => setStreamLoading(false)}
               />
+
+              {/* Real-time Live Badge */}
+              <div
+                style={{
+                  position: "absolute",
+                  top: 10,
+                  right: 10,
+                  zIndex: 35,
+                  fontSize: 10,
+                  fontWeight: 700,
+                  color: "var(--cc-green)",
+                  background: "rgba(0,0,0,0.8)",
+                  padding: "4px 8px",
+                  borderRadius: 3,
+                  backdropFilter: "blur(4px)",
+                  display: "flex",
+                  alignItems: "center",
+                  gap: 6,
+                  border: "1px solid rgba(63,185,80,0.4)",
+                  pointerEvents: "none",
+                  fontFamily: "var(--cc-font-mono)",
+                }}
+              >
+                <span
+                  style={{
+                    width: 7,
+                    height: 7,
+                    borderRadius: "50%",
+                    background: "var(--cc-green)",
+                    boxShadow: "0 0 6px var(--cc-green)",
+                  }}
+                />
+                LIVE FEED
+              </div>
 
               {/* Interactive SVG Overlay */}
               <svg

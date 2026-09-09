@@ -15,9 +15,7 @@ const NAV_GROUPS = [
     label: "AI Intelligence",
     items: [
       { path: "/cameras", icon: "bi-camera-video-fill", label: "Cameras", alertKey: "cameras" },
-      { path: "/crowd", icon: "bi-people-fill", label: "Crowd" },
-      { path: "/queue", icon: "bi-segmented-nav", label: "Queue" },
-      { path: "/zones", icon: "bi-hexagon-fill", label: "Zones" },
+      { path: "/crowd-management", icon: "bi-people-fill", label: "Crowd Management" },
       { path: "/predictions", icon: "bi-graph-up-arrow", label: "Predictions" },
     ],
   },

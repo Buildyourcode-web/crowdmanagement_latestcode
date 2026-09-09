@@ -9,6 +9,7 @@ const Dashboard = lazy(() => import("./pages/Dashboard.jsx"));
 // LiveMap removed — map module disabled
 const Cameras = lazy(() => import("./pages/Cameras.jsx"));
 const CameraDetail = lazy(() => import("./pages/CameraDetail.jsx"));
+const CrowdManagement = lazy(() => import("./pages/CrowdManagement.jsx"));
 const Crowd = lazy(() => import("./pages/Crowd.jsx"));
 const Queue = lazy(() => import("./pages/Queue.jsx"));
 const Zones = lazy(() => import("./pages/Zones.jsx"));
@@ -48,9 +49,10 @@ export const router = createBrowserRouter([
       { path: "cameras", element: <PageWrapper><Cameras /></PageWrapper> },
       { path: "cameras/add", element: <PageWrapper><AddCamera /></PageWrapper> },
       { path: "cameras/:id", element: <PageWrapper><CameraDetail /></PageWrapper> },
-      { path: "crowd", element: <PageWrapper><Crowd /></PageWrapper> },
-      { path: "queue", element: <PageWrapper><Queue /></PageWrapper> },
-      { path: "zones", element: <PageWrapper><Zones /></PageWrapper> },
+      { path: "crowd-management", element: <PageWrapper><CrowdManagement /></PageWrapper> },
+      { path: "crowd", element: <Navigate to="/crowd-management" replace /> },
+      { path: "queue", element: <Navigate to="/crowd-management" replace /> },
+      { path: "zones", element: <Navigate to="/crowd-management" replace /> },
       { path: "zones/:id", element: <PageWrapper><ZoneDetail /></PageWrapper> },
       { path: "frs", element: <PageWrapper><FRS /></PageWrapper> },
       { path: "frs/history", element: <PageWrapper><FRSHistory /></PageWrapper> },

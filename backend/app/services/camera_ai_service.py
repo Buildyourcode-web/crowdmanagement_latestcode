@@ -41,11 +41,26 @@ from app.security.permissions import Permissions
 # ── Purpose Compatibility Mapping ─────────────────────────────────────────────
 
 PURPOSE_COMPATIBLE_PROFILES: Dict[str, List[str]] = {
-    "CROWD": ["CROWD_STANDARD", "CROWD_HIGH_DENSITY"],
-    "QUEUE": ["QUEUE_STANDARD"],
+    "CROWD": [
+        "CROWD_STANDARD",
+        "CROWD_HIGH_DENSITY",
+        "CROWD_YOLO11X",
+    ],
+    "QUEUE": [
+        "QUEUE_STANDARD",
+        "QUEUE_YOLO11X",
+    ],
     "FRS": ["FRS_STANDARD"],
-    "GENERAL": ["VIDEO_SAFETY"],
-    "MULTI_PURPOSE": ["CROWD_STANDARD", "CROWD_HIGH_DENSITY", "QUEUE_STANDARD", "VIDEO_SAFETY", "FRS_STANDARD"],
+    "GENERAL": ["VIDEO_SAFETY", "CROWD_STANDARD", "CROWD_YOLO11X"],
+    "MULTI_PURPOSE": [
+        "CROWD_STANDARD",
+        "CROWD_HIGH_DENSITY",
+        "CROWD_YOLO11X",
+        "QUEUE_STANDARD",
+        "QUEUE_YOLO11X",
+        "VIDEO_SAFETY",
+        "FRS_STANDARD",
+    ],
 }
 
 

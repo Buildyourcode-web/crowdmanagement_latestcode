@@ -9,9 +9,15 @@ event emission with cooldown, and health monitoring into an asynchronous loop.
 import asyncio
 import time
 from typing import Any, Dict, List, Optional
+from fastapi import HTTPException, status
 from loguru import logger
 
-from app.ai.pipelines.crowd.detector import BasePersonDetector, DeepStreamPersonDetector, DetectedPerson
+from app.ai.pipelines.crowd.detector import (
+    BasePersonDetector,
+    DeepStreamPersonDetector,
+    DetectedPerson,
+    YOLO11xPersonDetector,
+)
 from app.ai.pipelines.crowd.health import PipelineHealthMonitor
 from app.ai.pipelines.crowd.pipeline import PipelineState
 from app.ai.pipelines.crowd.tracker import PersonTracker, TrackedPerson
@@ -38,11 +44,20 @@ class QueuePipeline:
         self._stop_event = asyncio.Event()
         self._runner_task: Optional[asyncio.Task] = None
 
-        # 1. Detector: Real DeepStream detector by default, or injected mock for tests
-        self.detector = detector or DeepStreamPersonDetector(
-            model=config.model,
-            confidence_threshold=config.confidence_threshold,
-        )
+        # 1. Detector: Custom, YOLO11x, or DeepStream detector
+        if detector:
+            self.detector = detector
+        elif "YOLO11X" in config.profile_id.upper() or "yolo11" in config.model.model_id.lower():
+            self.detector = YOLO11xPersonDetector(
+                model=config.model,
+                confidence_threshold=config.confidence_threshold,
+                camera_code=config.camera_code,
+            )
+        else:
+            self.detector = DeepStreamPersonDetector(
+                model=config.model,
+                confidence_threshold=config.confidence_threshold,
+            )
 
         # 2. Multi-Object Tracker (Transient IDs: TRK-xxxx)
         self.tracker = tracker or PersonTracker(
@@ -83,7 +98,30 @@ class QueuePipeline:
 
         # Initialize detector
         try:
-            self.detector.initialize()
+            if asyncio.iscoroutinefunction(self.detector.initialize):
+                init_ok = await self.detector.initialize()
+            else:
+                res = self.detector.initialize()
+                init_ok = await res if asyncio.iscoroutine(res) else res
+
+            if init_ok is False:
+                status_desc = getattr(self.detector, "status", "RUNTIME_UNAVAILABLE")
+                is_yolo = "yolo11" in self.config.model.model_id.lower() or "yolo11" in self.config.profile_id.lower()
+                err_code = "YOLO11X_UNAVAILABLE" if is_yolo else "RUNTIME_UNAVAILABLE"
+                err_msg = (
+                    f"Queue YOLO11x runtime unavailable ({status_desc}). Ensure model weights or GPU acceleration are configured."
+                    if is_yolo
+                    else "NVIDIA DeepStream runtime unavailable on this host."
+                )
+                self.state = PipelineState.FAILED
+                self.health_monitor.pipeline_state = PipelineState.FAILED
+                self.health_monitor.record_error(err_msg)
+                raise HTTPException(
+                    status_code=status.HTTP_400_BAD_REQUEST,
+                    detail={"code": err_code, "message": err_msg, "detector_status": status_desc},
+                )
+        except HTTPException:
+            raise
         except Exception as e:
             self.state = PipelineState.FAILED
             self.health_monitor.record_error(f"Detector init failed: {e}")
@@ -202,6 +240,11 @@ class QueuePipeline:
             "processing_fps": self.config.processing_fps,
             "is_geometry_configured": metrics_res.is_geometry_configured,
             "missing_requirements": metrics_res.missing_requirements,
+            "model_info": self.detector.get_model_info() if hasattr(self.detector, "get_model_info") else {
+                "model_id": self.config.model.model_id,
+                "name": self.config.model.name,
+                "version": self.config.model.version,
+            },
         }
 
         self._latest_metrics = payload
@@ -244,6 +287,11 @@ class QueuePipeline:
             "processing_fps": self.config.processing_fps,
             "is_geometry_configured": self.analytics.has_roi and self.analytics.has_entry and self.analytics.has_exit,
             "missing_requirements": [],
+            "model_info": self.detector.get_model_info() if hasattr(self.detector, "get_model_info") else {
+                "model_id": self.config.model.model_id,
+                "name": self.config.model.name,
+                "version": self.config.model.version,
+            },
         }
 
     def get_health(self) -> Dict[str, Any]:

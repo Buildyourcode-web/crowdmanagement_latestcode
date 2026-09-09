@@ -23,10 +23,12 @@ from __future__ import annotations
 
 import asyncio
 import base64
+import math
 import os
 import threading
 import time
 import uuid
+from collections import deque
 from datetime import datetime, timezone
 from typing import Dict, List, Optional
 
@@ -35,7 +37,34 @@ import numpy as np
 from fastapi import APIRouter, HTTPException, WebSocket, WebSocketDisconnect
 from fastapi.responses import StreamingResponse
 from loguru import logger
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
+
+
+def _bbox_iou(a, b) -> float:
+    a_arr = np.asarray(a, dtype=np.float32)
+    b_arr = np.asarray(b, dtype=np.float32)
+
+    ix1 = max(a_arr[0], b_arr[0])
+    iy1 = max(a_arr[1], b_arr[1])
+    ix2 = min(a_arr[2], b_arr[2])
+    iy2 = min(a_arr[3], b_arr[3])
+
+    iw = max(0.0, ix2 - ix1)
+    ih = max(0.0, iy2 - iy1)
+    inter = iw * ih
+
+    area_a = max(0.0, a_arr[2] - a_arr[0]) * max(0.0, a_arr[3] - a_arr[1])
+    area_b = max(0.0, b_arr[2] - b_arr[0]) * max(0.0, b_arr[3] - b_arr[1])
+
+    union = area_a + area_b - inter
+    return float(inter / union) if union > 0.0 else 0.0
+
+
+def _bbox_center_dist(a, b) -> float:
+    ca = np.array([(a[0] + a[2]) * 0.5, (a[1] + a[3]) * 0.5])
+    cb = np.array([(b[0] + b[2]) * 0.5, (b[1] + b[3]) * 0.5])
+    return float(np.linalg.norm(ca - cb))
+
 
 # ---------------------------------------------------------------------------
 # Lazy-import FRS engine components (so backend still starts even without GPU)
@@ -60,20 +89,30 @@ def _load_frs_components():
 # ---------------------------------------------------------------------------
 
 class CameraWorkerState:
-    def __init__(self, camera_id: str, rtsp_url: str, name: str, is_frs: bool = True, camera_type: str = "FRS"):
+    def __init__(self, camera_id: str, rtsp_url: str, name: str, is_frs: bool = True, camera_type: str = "FRS", ai_purposes: Optional[List[str]] = None):
         self.camera_id = camera_id
         self.rtsp_url = rtsp_url
         self.name = name
         self.is_frs = is_frs
         self.camera_type = camera_type
+        self.ai_purposes = ai_purposes or (["ENTRY_EXIT", "ZONE"] if camera_type == "CROWD" else ["FRS"])
         self.thread: Optional[threading.Thread] = None
         self.running = False
-        self.latest_frame: Optional[bytes] = None  # JPEG bytes for MJPEG
+        self.latest_frame: Optional[bytes] = None  # JPEG bytes for MJPEG (annotated if AI active)
+        self.latest_clean_frame: Optional[bytes] = None  # Pure clean JPEG bytes (zero AI annotations)
+        self.latest_crowd_frame: Optional[bytes] = None  # JPEG bytes with YOLO11x person & line counting overlays
         self.latest_rgb: Optional[np.ndarray] = None  # Raw RGB frame
         self.frame_lock = threading.Lock()
         self.started_at = datetime.now(timezone.utc).isoformat()
         self.detections_count = 0
         self.status = "starting"
+        # Crowd AI & Counting Line state
+        self.crowd_ai_active: bool = False
+        self.in_count: int = 0
+        self.out_count: int = 0
+        self.occupancy_count: int = 0
+        self.queue_movement_status: str = "STOPPED"
+        self.zone_data: List[dict] = []
 
 _camera_workers: Dict[str, CameraWorkerState] = {}
 _workers_lock = threading.Lock()
@@ -161,11 +200,72 @@ def reload_shared_gallery():
                     if embeddings:
                         _shared_matcher.threshold = MATCH_THRESHOLD
                         _shared_matcher.load_gallery(embeddings, ids, names)
-                        logger.info(f"[FRS-Engine] Gallery reloaded: {len(names)} identities ({set(names)}) [threshold={MATCH_THRESHOLD}]")
             except Exception as e:
                 logger.warning(f"[FRS-Engine] Gallery reload warning: {e}")
 
+_shared_yolo_model = None
+_shared_yolo_lock = threading.Lock()
 
+def get_shared_yolo_engine():
+    global _shared_yolo_model
+    with _shared_yolo_lock:
+        if _shared_yolo_model is None:
+            try:
+                import onnxruntime as ort
+                candidates = [
+                    "models/yolo11x.onnx",
+                    "models/yolo11x_crowd.onnx",
+                    os.path.join(os.getcwd(), "backend", "models", "yolo11x.onnx"),
+                    os.path.join(os.getcwd(), "models", "yolo11x.onnx"),
+                ]
+                valid_path = next((p for p in candidates if os.path.exists(p)), None)
+                if valid_path:
+                    avail = ort.get_available_providers()
+                    provs = []
+                    if "DmlExecutionProvider" in avail:
+                        provs.append("DmlExecutionProvider")
+                    provs.append("CPUExecutionProvider")
+                    _shared_yolo_model = ort.InferenceSession(valid_path, providers=provs)
+                    logger.info(f"[YOLO11x-Crowd] Loaded ONNX session from {valid_path} with providers {provs}")
+            except Exception as e:
+                logger.warning(f"[YOLO11x-Crowd] Failed to load YOLO11x ONNX model: {e}")
+        return _shared_yolo_model
+
+
+def _check_ccw(a, b, c):
+    return (c[1] - a[1]) * (b[0] - a[0]) > (b[1] - a[1]) * (c[0] - a[0])
+
+def _segments_cross(p1, p2, l1, l2):
+    return _check_ccw(p1, l1, l2) != _check_ccw(p2, l1, l2) and _check_ccw(p1, p2, l1) != _check_ccw(p1, p2, l2)
+
+def _point_in_polygon(pt: tuple[float, float], polygon_pts: list) -> bool:
+    """
+    Ray-casting algorithm to test if point pt (x, y) is inside polygon_pts.
+    Works for normalized [0, 1] coords or pixel coords.
+    """
+    if not polygon_pts or len(polygon_pts) < 3:
+        return False
+    x, y = pt
+    inside = False
+    n = len(polygon_pts)
+    p1 = polygon_pts[0]
+    p1x = p1["x"] if isinstance(p1, dict) else p1[0]
+    p1y = p1["y"] if isinstance(p1, dict) else p1[1]
+
+    for i in range(1, n + 1):
+        p2 = polygon_pts[i % n]
+        p2x = p2["x"] if isinstance(p2, dict) else p2[0]
+        p2y = p2["y"] if isinstance(p2, dict) else p2[1]
+
+        if y > min(p1y, p2y):
+            if y <= max(p1y, p2y):
+                if x <= max(p1x, p2x):
+                    if p1y != p2y:
+                        xinters = (y - p1y) * (p2x - p1x) / (p2y - p1y) + p1x
+                    if p1x == p2x or x <= xinters:
+                        inside = not inside
+        p1x, p1y = p2x, p2y
+    return inside
 
 class RTSPCameraWorker:
     """
@@ -176,23 +276,37 @@ class RTSPCameraWorker:
 
     def __init__(self, state: CameraWorkerState):
         self.state = state
+        self.state.worker = self
         self._cooldowns: Dict[str, float] = {}
         self._active_boxes: List[dict] = []
         self._boxes_lock = threading.Lock()
         self._latest_ai_rgb = None
         self._ai_lock = threading.Lock()
+        # Crowd AI & YOLO11x state
+        self._crowd_boxes: List[dict] = []
+        self._crowd_boxes_lock = threading.Lock()
+        self._cached_roi_lines: List[dict] = []
+        self._cached_roi_polygons: List[dict] = []
+        self._zone_stats: List[dict] = []
+        self._roi_lines_last_fetch: float = 0.0
+        self._prev_centroids: List[tuple] = []
+        self._prev_queue_centroids: List[tuple] = []
+        self._queue_displacement_history = deque(maxlen=8)
+        self._line_cross_cooldown: float = 0.0
 
-    def _ai_detection_loop(self, face_model, matcher):
+    def _ai_detection_loop(self, face_model, matcher, tracker):
         crop_dir = os.path.join(os.getcwd(), "backend", "data", "crops")
         os.makedirs(crop_dir, exist_ok=True)
         loop = asyncio.new_event_loop()
         asyncio.set_event_loop(loop)
+        frame_counter = 0
 
         while self.state.running:
             if not self.state.is_frs:
                 with self._boxes_lock:
                     self._active_boxes.clear()
-                time.sleep(0.4)
+                tracker.clear()
+                time.sleep(0.3)
                 continue
 
             with self._ai_lock:
@@ -202,260 +316,613 @@ class RTSPCameraWorker:
                     self._latest_ai_rgb = None
 
             if frame_to_process is None:
-                time.sleep(0.04)
+                time.sleep(0.03)
                 continue
 
             try:
-                with _onnx_inference_lock:
-                    faces = face_model.detect_faces(frame_to_process)
-            except Exception as e:
-                time.sleep(0.1)
-                continue
-
-            new_boxes = []
-            now_ts = time.time()
-
-            for face in faces:
-                x1, y1, x2, y2 = [int(v) for v in face.bbox]
-                # Skip tiny distant noise (min 30px) or low confidence detections
-                if (x2 - x1) < 30 or (y2 - y1) < 30 or face.det_score < 0.60:
-                    continue
-
-                # Pose quality gate: reject extreme profile shots (yaw > 35° or pitch > 30°)
-                is_extreme_pose = False
-                if getattr(face, "pose", None) is not None:
-                    try:
-                        pitch, yaw, roll = face.pose
-                        if abs(yaw) > 35.0 or abs(pitch) > 30.0:
-                            is_extreme_pose = True
-                    except Exception:
-                        pass
-
-                if is_extreme_pose:
-                    det_pct = round(face.det_score * 100)
-                    new_boxes.append({
-                        "bbox": [x1, y1, x2, y2],
-                        "label": f"FACE SCANNING {det_pct}%",
-                        "is_match": False,
-                        "expiry": now_ts + 1.0,
-                    })
-                    continue
-
+                frame_counter += 1
                 try:
-                    result = matcher.find_best_match(face.embedding)
-                except Exception:
-                    result = None
+                    with _onnx_inference_lock:
+                        faces = face_model.detect_faces(frame_to_process)
+                except Exception as e:
+                    time.sleep(0.05)
+                    continue
 
-                # Strict threshold: Must be known AND >= MATCH_THRESHOLD (0.70)
-                is_match = bool(result and result.is_known and result.similarity >= MATCH_THRESHOLD)
-                if is_match:
-                    person_clean = result.name.strip()
-                    match_pct = round(result.similarity * 100, 1)
-                    new_boxes.append({
-                        "bbox": [x1, y1, x2, y2],
-                        "label": f"{person_clean.upper()} {match_pct}%",
-                        "is_match": True,
-                        "expiry": now_ts + 1.2,
-                    })
+                # Update FaceTracker with detected faces for continuous, smooth tracking
+                active_tracks = tracker.update(faces, frame_counter)
+                new_boxes = []
+                now_ts = time.time()
+                rendered_bboxes = []
 
-                    # Cooldown check: 15s per recognized person
-                    last_alert = self._cooldowns.get(person_clean.lower(), 0.0)
-                    if (now_ts - last_alert) >= 15.0:
-                        self._cooldowns[person_clean.lower()] = now_ts
-                        self.state.detections_count += 1
+                for track in active_tracks:
+                    if track.misses > 6:
+                        continue
 
-                        # Clean portrait crop with 25% padding around detected face
-                        h, w = frame_to_process.shape[:2]
-                        fw, fh = x2 - x1, y2 - y1
-                        pad_x = int(fw * 0.25)
-                        pad_y = int(fh * 0.25)
-                        cx1, cy1 = max(0, x1 - pad_x), max(0, y1 - pad_y)
-                        cx2, cy2 = min(w, x2 + pad_x), min(h, y2 + pad_y)
-                        crop = frame_to_process[cy1:cy2, cx1:cx2]
+                    tx1, ty1, tx2, ty2 = [int(v) for v in track.bbox]
+                    # Allow distant faces down to 14px
+                    if (tx2 - tx1) < 14 or (ty2 - ty1) < 14:
+                        continue
 
-                        face_b64 = ""
-                        detected_image_url = ""
-                        crop_id = str(uuid.uuid4())[:8]
-                        cand_code = f"CAND-{crop_id.upper()}"
+                    # Find if any face detection corresponds to this track in current frame
+                    matched_face = None
+                    for face in faces:
+                        fx1, fy1, fx2, fy2 = face.bbox
+                        if _bbox_iou(track.bbox, face.bbox) > 0.20 or _bbox_center_dist(track.bbox, face.bbox) < 90.0:
+                            matched_face = face
+                            break
 
-                        if crop.size > 0:
-                            crop_bgr = cv2.cvtColor(crop, cv2.COLOR_RGB2BGR)
-                            _, crop_buf = cv2.imencode(".jpg", crop_bgr, [cv2.IMWRITE_JPEG_QUALITY, 88])
-                            face_b64 = base64.b64encode(crop_buf.tobytes()).decode("utf-8")
-                            crop_filename = f"crop_{person_clean.lower()}_{crop_id}.jpg"
-                            crop_filepath = os.path.join(crop_dir, crop_filename)
-                            cv2.imwrite(crop_filepath, crop_bgr)
-                            detected_image_url = f"/static/crops/{crop_filename}"
-
-                        if not detected_image_url:
-                            detected_image_url = f"data:image/jpeg;base64,{face_b64}"
-
-                        # Look up exact reference portrait photo for matched person
-                        ref_img_url = ""
+                    if matched_face is not None and matched_face.embedding is not None:
                         try:
-                            p_info = db.get_person_by_name(person_clean)
-                            if p_info:
-                                embs_for_p = db.get_embeddings_for_person(p_info["id"])
-                                if embs_for_p and embs_for_p[0].get("image_path"):
-                                    fname = os.path.basename(embs_for_p[0]["image_path"])
-                                    ref_img_url = f"/static/enrollment/{fname}"
+                            result = matcher.find_best_match(matched_face.embedding)
                         except Exception:
-                            pass
+                            result = None
 
-                        if not ref_img_url:
-                            enroll_dir = os.path.join(os.getcwd(), "backend", "data", "enrollment")
-                            if os.path.exists(enroll_dir):
-                                for fn in os.listdir(enroll_dir):
-                                    if fn.lower().startswith(person_clean.lower()):
-                                        ref_img_url = f"/static/enrollment/{fn}"
-                                        break
-                        if not ref_img_url:
-                            ref_img_url = f"/static/enrollment/{person_clean.lower()}_1.jpg"
+                        if result and result.is_known and result.similarity >= MATCH_THRESHOLD:
+                            track.candidate_name = result.name.strip()
+                            track.candidate_similarity = result.similarity
+                            track.candidate_id = result.person_id
+                        elif track.candidate_name == "Unknown":
+                            track.candidate_similarity = getattr(matched_face, "det_score", 0.85)
 
-                        ref_id_str = f"WL-{person_clean.upper()}-001"
-                        time_str = datetime.now().strftime("%H:%M:%S")
-                        date_str = datetime.now().strftime("%d %b %Y")
-                        iso_ts = datetime.now(timezone.utc).isoformat()
+                    is_known = bool(track.candidate_name and track.candidate_name != "Unknown" and track.candidate_similarity >= MATCH_THRESHOLD)
 
-                        payload = {
-                            "id": str(uuid.uuid4()),
-                            "candidateCode": cand_code,
-                            "candidate_code": cand_code,
-                            "cameraId": self.state.camera_id,
-                            "camera_id": self.state.camera_id,
-                            "cameraName": self.state.name,
-                            "camera_name": self.state.name,
-                            "personId": str(result.person_id),
-                            "person_id": str(result.person_id),
-                            "personName": person_clean,
-                            "person_name": person_clean,
-                            "referenceName": person_clean,
-                            "reference_name": person_clean,
-                            "referenceId": ref_id_str,
-                            "reference_id": ref_id_str,
-                            "matchScore": match_pct,
-                            "match_score": match_pct,
-                            "detectedImage": detected_image_url,
-                            "detected_image": detected_image_url,
-                            "referenceImage": ref_img_url,
-                            "reference_image": ref_img_url,
-                            "faceImageB64": face_b64,
-                            "face_image_b64": face_b64,
-                            "timestamp": iso_ts,
-                            "timeStr": time_str,
-                            "time_str": time_str,
-                            "dateStr": date_str,
-                            "date_str": date_str,
-                            "status": "PENDING_REVIEW",
-                            "location": "Khairatabad Main Entry",
-                            "category": "Authorized Watchlist",
-                            "priority": "HIGH",
-                            "imageQuality": "High (94%)",
-                            "image_quality": "High (94%)",
-                            "bbox": [x1, y1, x2, y2],
-                        }
+                    if is_known:
+                        person_clean = track.candidate_name
+                        match_pct = round(track.candidate_similarity * 100, 1)
+                        new_boxes.append({
+                            "bbox": [tx1, ty1, tx2, ty2],
+                            "label": f"{person_clean.upper()} {match_pct}%",
+                            "is_match": True,
+                            "expiry": now_ts + 1.2,
+                        })
+                        rendered_bboxes.append((tx1, ty1, tx2, ty2))
 
-                        logger.info(f"[FRS-Worker:{self.state.camera_id}] MATCH: {person_clean} ({match_pct}%) -> Broadcast & Save")
+                        # Cooldown check: 15s per recognized person
+                        last_alert = self._cooldowns.get(person_clean.lower(), 0.0)
+                        if (now_ts - last_alert) >= 15.0:
+                            self._cooldowns[person_clean.lower()] = now_ts
+                            self.state.detections_count += 1
 
-                        async def _persist():
+                            h, w = frame_to_process.shape[:2]
+                            fw, fh = tx2 - tx1, ty2 - ty1
+                            pad_x = int(fw * 0.25)
+                            pad_y = int(fh * 0.25)
+                            cx1, cy1 = max(0, tx1 - pad_x), max(0, ty1 - pad_y)
+                            cx2, cy2 = min(w, tx2 + pad_x), min(h, ty2 + pad_y)
+                            crop = frame_to_process[cy1:cy2, cx1:cx2]
+
+                            face_b64 = ""
+                            detected_image_url = ""
+                            crop_id = str(uuid.uuid4())[:8]
+                            cand_code = f"CAND-{crop_id.upper()}"
+
+                            if crop.size > 0:
+                                crop_bgr = cv2.cvtColor(crop, cv2.COLOR_RGB2BGR)
+                                _, crop_buf = cv2.imencode(".jpg", crop_bgr, [cv2.IMWRITE_JPEG_QUALITY, 88])
+                                face_b64 = base64.b64encode(crop_buf.tobytes()).decode("utf-8")
+                                crop_filename = f"crop_{person_clean.lower()}_{crop_id}.jpg"
+                                crop_filepath = os.path.join(crop_dir, crop_filename)
+                                cv2.imwrite(crop_filepath, crop_bgr)
+                                detected_image_url = f"/static/crops/{crop_filename}"
+
+                            if not detected_image_url:
+                                detected_image_url = f"data:image/jpeg;base64,{face_b64}"
+
+                            ref_img_url = ""
                             try:
-                                from app.db.session import AsyncSessionLocal
-                                from app.models.frs import FRSCandidate, FRSReferenceProfile
-                                from sqlalchemy import select
-                                async with AsyncSessionLocal() as pg_db:
-                                    prof_q = await pg_db.execute(
-                                        select(FRSReferenceProfile).where(
-                                            FRSReferenceProfile.display_name.ilike(person_clean)
-                                        ).limit(1)
-                                    )
-                                    prof = prof_q.scalars().first()
-                                    prof_id = prof.id if prof else None
+                                p_info = db.get_person_by_name(person_clean)
+                                if p_info:
+                                    embs_for_p = db.get_embeddings_for_person(p_info["id"])
+                                    if embs_for_p and embs_for_p[0].get("image_path"):
+                                        fname = os.path.basename(embs_for_p[0]["image_path"])
+                                        ref_img_url = f"/static/enrollment/{fname}"
+                            except Exception:
+                                pass
 
-                                    cand = FRSCandidate(
-                                        candidate_code=cand_code,
-                                        camera_code=self.state.camera_id,
-                                        camera_name=self.state.name,
-                                        zone_code="ZONE-A",
-                                        location="Khairatabad Main Entry",
-                                        reference_profile_id=prof_id,
-                                        detected_image_path=detected_image_url,
-                                        match_score=match_pct,
-                                        detection_confidence=result.similarity,
-                                        quality_score=0.94,
-                                        status="REVIEW_REQUIRED",
-                                        review_required=True,
-                                        priority="HIGH",
-                                        image_quality="High (94%)",
-                                        date_str=date_str,
-                                        time_str=time_str,
-                                    )
-                                    pg_db.add(cand)
-                                    await pg_db.commit()
-                            except Exception as dberr:
-                                logger.warning(f"[FRS-Worker] DB save error: {dberr}")
+                            if not ref_img_url:
+                                enroll_dir = os.path.join(os.getcwd(), "backend", "data", "enrollment")
+                                if os.path.exists(enroll_dir):
+                                    for fn in os.listdir(enroll_dir):
+                                        if fn.lower().startswith(person_clean.lower()):
+                                            ref_img_url = f"/static/enrollment/{fn}"
+                                            break
+                            if not ref_img_url:
+                                ref_img_url = f"/static/enrollment/{person_clean.lower()}_1.jpg"
 
-                        _emit_frs_event_threadsafe("frs_candidate", payload)
-                        global _main_loop
-                        if _main_loop and _main_loop.is_running():
-                            asyncio.run_coroutine_threadsafe(_persist(), _main_loop)
-                        else:
-                            try:
-                                loop.run_until_complete(_persist())
-                            except Exception as e:
-                                logger.debug(f"[FRS-Worker] Persist fallback error: {e}")
-                else:
-                    det_pct = round(face.det_score * 100)
-                    new_boxes.append({
-                        "bbox": [x1, y1, x2, y2],
-                        "label": f"FACE SCANNING {det_pct}%",
-                        "is_match": False,
-                        "expiry": now_ts + 1.0,
-                    })
+                            ref_id_str = f"WL-{person_clean.upper()}-001"
+                            time_str = datetime.now().strftime("%H:%M:%S")
+                            date_str = datetime.now().strftime("%d %b %Y")
+                            iso_ts = datetime.now(timezone.utc).isoformat()
 
-            with self._boxes_lock:
-                self._active_boxes = new_boxes
+                            payload = {
+                                "id": str(uuid.uuid4()),
+                                "candidateCode": cand_code,
+                                "candidate_code": cand_code,
+                                "cameraId": self.state.camera_id,
+                                "camera_id": self.state.camera_id,
+                                "cameraName": self.state.name,
+                                "camera_name": self.state.name,
+                                "personId": str(track.candidate_id or uuid.uuid4()),
+                                "person_id": str(track.candidate_id or uuid.uuid4()),
+                                "personName": person_clean,
+                                "person_name": person_clean,
+                                "referenceName": person_clean,
+                                "reference_name": person_clean,
+                                "referenceId": ref_id_str,
+                                "reference_id": ref_id_str,
+                                "matchScore": match_pct,
+                                "match_score": match_pct,
+                                "detectedImage": detected_image_url,
+                                "detected_image": detected_image_url,
+                                "referenceImage": ref_img_url,
+                                "reference_image": ref_img_url,
+                                "faceImageB64": face_b64,
+                                "face_image_b64": face_b64,
+                                "timestamp": iso_ts,
+                                "timeStr": time_str,
+                                "time_str": time_str,
+                                "dateStr": date_str,
+                                "date_str": date_str,
+                                "status": "PENDING_REVIEW",
+                                "location": "Khairatabad Main Entry",
+                                "category": "Authorized Watchlist",
+                                "priority": "HIGH",
+                                "imageQuality": "High (94%)",
+                                "image_quality": "High (94%)",
+                                "bbox": [tx1, ty1, tx2, ty2],
+                            }
 
-            time.sleep(0.18)
+                            logger.info(f"[FRS-Worker:{self.state.camera_id}] MATCH: {person_clean} ({match_pct}%) -> Broadcast & Save")
+
+                            async def _persist():
+                                try:
+                                    from app.db.session import AsyncSessionLocal
+                                    from app.models.frs import FRSCandidate, FRSReferenceProfile
+                                    from sqlalchemy import select
+                                    async with AsyncSessionLocal() as pg_db:
+                                        prof_q = await pg_db.execute(
+                                            select(FRSReferenceProfile).where(
+                                                FRSReferenceProfile.display_name.ilike(person_clean)
+                                            ).limit(1)
+                                        )
+                                        prof = prof_q.scalars().first()
+                                        prof_id = prof.id if prof else None
+
+                                        cand = FRSCandidate(
+                                            candidate_code=cand_code,
+                                            camera_code=self.state.camera_id,
+                                            camera_name=self.state.name,
+                                            zone_code="ZONE-A",
+                                            location="Khairatabad Main Entry",
+                                            reference_profile_id=prof_id,
+                                            detected_image_path=detected_image_url,
+                                            match_score=match_pct,
+                                            detection_confidence=track.candidate_similarity,
+                                            quality_score=0.94,
+                                            status="REVIEW_REQUIRED",
+                                            review_required=True,
+                                            priority="HIGH",
+                                            image_quality="High (94%)",
+                                            date_str=date_str,
+                                            time_str=time_str,
+                                        )
+                                        pg_db.add(cand)
+                                        await pg_db.commit()
+                                except Exception as dberr:
+                                    logger.warning(f"[FRS-Worker] DB save error: {dberr}")
+
+                            global _main_loop
+                            if _main_loop and _main_loop.is_running():
+                                asyncio.run_coroutine_threadsafe(_persist(), _main_loop)
+
+                            _emit_frs_event_threadsafe("frs_candidate", payload)
+                    else:
+                        # Unmatched / scanning face: ALWAYS show detection bounding box so every person is detected!
+                        conf_val = track.candidate_similarity if track.candidate_similarity > 0.0 else 0.85
+                        det_pct = round(max(0.35, min(0.99, conf_val)) * 100)
+                        new_boxes.append({
+                            "bbox": [tx1, ty1, tx2, ty2],
+                            "label": f"FACE SCANNING {det_pct}%",
+                            "is_match": False,
+                            "expiry": now_ts + 1.2,
+                        })
+                        rendered_bboxes.append((tx1, ty1, tx2, ty2))
+
+                # Safety fallback: If any face detected by model was missed by tracker, render it directly
+                for face in faces:
+                    fx1, fy1, fx2, fy2 = [int(v) for v in face.bbox]
+                    already_rendered = False
+                    for rx1, ry1, rx2, ry2 in rendered_bboxes:
+                        if _bbox_iou([fx1, fy1, fx2, fy2], [rx1, ry1, rx2, ry2]) > 0.3:
+                            already_rendered = True
+                            break
+                    if not already_rendered:
+                        det_score = getattr(face, "det_score", 0.85)
+                        det_pct = round(float(det_score) * 100)
+                        new_boxes.append({
+                            "bbox": [fx1, fy1, fx2, fy2],
+                            "label": f"FACE SCANNING {det_pct}%",
+                            "is_match": False,
+                            "expiry": now_ts + 1.2,
+                        })
+
+                with self._boxes_lock:
+                    self._active_boxes = new_boxes
+
+            except Exception as e:
+                logger.error(f"[FRS-AI-Worker:{self.state.camera_id}] Inference loop error: {e}")
+
+            time.sleep(0.06)
 
         loop.close()
 
+    def _refresh_roi_lines(self):
+        try:
+            from app.db.session import AsyncSessionLocal
+            from app.models.camera_roi import CameraROIConfiguration
+            from sqlalchemy import select
+
+            async def _fetch():
+                async with AsyncSessionLocal() as pg_db:
+                    clean_id = self.state.camera_id.replace("-FRS", "").replace("-CROWD", "")
+                    purposes = self.state.ai_purposes or ["ENTRY_EXIT"]
+                    if "QUEUE" in purposes:
+                        allowed_types = ["QUEUE_ROI", "DIRECTION_LINE"]
+                    elif "ZONE" in purposes:
+                        allowed_types = ["CROWD_ROI", "EXCLUSION_ZONE", "ZONE_BOUNDARY"]
+                    else:
+                        allowed_types = ["COUNTING_LINE", "ENTRY_LINE", "EXIT_LINE"]
+
+                    stmt = select(CameraROIConfiguration).where(
+                        CameraROIConfiguration.camera_code.in_([self.state.camera_id, clean_id]),
+                        CameraROIConfiguration.enabled.is_(True),
+                        CameraROIConfiguration.roi_type.in_(allowed_types),
+                    )
+                    res = await pg_db.execute(stmt)
+                    items = res.scalars().all()
+                    lines = []
+                    polygons = []
+                    for item in items:
+                        geom = item.geometry_json or {}
+                        # 1. Line geometries
+                        if "start" in geom and "end" in geom:
+                            lines.append({
+                                "id": str(item.id),
+                                "name": item.name or item.roi_name or "Counting Line",
+                                "type": item.roi_type,
+                                "start": geom["start"],
+                                "end": geom["end"],
+                                "direction": geom.get("direction", "BOTH"),
+                            })
+                        elif item.polygon_points and len(item.polygon_points) == 2 and item.roi_type in ("COUNTING_LINE", "ENTRY_LINE", "EXIT_LINE", "DIRECTION_LINE"):
+                            lines.append({
+                                "id": str(item.id),
+                                "name": item.name or item.roi_name or "Counting Line",
+                                "type": item.roi_type,
+                                "start": item.polygon_points[0],
+                                "end": item.polygon_points[1],
+                                "direction": item.direction or "BOTH",
+                            })
+                        # 2. Polygon geometries
+                        pts = geom.get("points") or item.polygon_points or []
+                        if isinstance(pts, list) and len(pts) >= 3:
+                            polygons.append({
+                                "id": str(item.id),
+                                "name": geom.get("zone_name") or item.name or item.roi_name or "Monitored Zone",
+                                "type": item.roi_type,
+                                "points": pts,
+                                "warning_threshold": int(geom.get("warning_threshold") or 50),
+                                "danger_threshold": int(geom.get("danger_threshold") or 80),
+                                "capacity": int(geom.get("capacity") or 100),
+                            })
+                    return lines, polygons
+
+            global _main_loop
+            if _main_loop and _main_loop.is_running():
+                fut = asyncio.run_coroutine_threadsafe(_fetch(), _main_loop)
+                res_lines, res_polygons = fut.result(timeout=1.5)
+                self._cached_roi_lines = res_lines
+                self._cached_roi_polygons = res_polygons
+        except Exception:
+            pass
+
+    def _crowd_ai_detection_loop(self):
+        logger.info(f"[Crowd-AI-Worker:{self.state.camera_id}] Crowd AI detection loop started.")
+        while self.state.running:
+            is_crowd = getattr(self.state, "crowd_ai_active", False) and not self.state.is_frs
+            if not is_crowd:
+                with self._crowd_boxes_lock:
+                    self._crowd_boxes.clear()
+                self._prev_centroids.clear()
+                self._prev_queue_centroids.clear()
+                time.sleep(0.3)
+                continue
+
+            now = time.time()
+            if (now - self._roi_lines_last_fetch) > 3.0:
+                self._roi_lines_last_fetch = now
+                self._refresh_roi_lines()
+
+            with self._ai_lock:
+                frame_to_process = None
+                if self._latest_ai_rgb is not None:
+                    frame_to_process = self._latest_ai_rgb.copy()
+
+            if frame_to_process is None:
+                time.sleep(0.04)
+                continue
+
+            yolo_sess = get_shared_yolo_engine()
+            if yolo_sess is None:
+                time.sleep(0.2)
+                continue
+
+            try:
+                h_orig, w_orig = frame_to_process.shape[:2]
+                img_resized = cv2.resize(frame_to_process, (640, 640))
+                inp = (img_resized.transpose(2, 0, 1).astype(np.float32) / 255.0)[np.newaxis, ...]
+                inp_name = yolo_sess.get_inputs()[0].name
+                out_name = yolo_sess.get_outputs()[0].name
+
+                with _onnx_inference_lock:
+                    outputs = yolo_sess.run([out_name], {inp_name: inp})
+
+                preds = np.squeeze(outputs[0]).T  # (8400, 84)
+                person_scores = preds[:, 4]
+                mask = person_scores > 0.28
+                filtered_preds = preds[mask]
+
+                sx = w_orig / 640.0
+                sy = h_orig / 640.0
+                raw_boxes = []
+                raw_scores = []
+                for row in filtered_preds:
+                    cx, cy, bw, bh = row[0], row[1], row[2], row[3]
+                    x1 = int((cx - bw / 2) * sx)
+                    y1 = int((cy - bh / 2) * sy)
+                    raw_boxes.append([x1, y1, int(bw * sx), int(bh * sy)])
+                    raw_scores.append(float(row[4]))
+
+                indices = cv2.dnn.NMSBoxes(raw_boxes, raw_scores, score_threshold=0.28, nms_threshold=0.45)
+                new_crowd_boxes = []
+                curr_centroids = []
+                now_ts = time.time()
+
+                if len(indices) > 0:
+                    for idx in indices.flatten():
+                        bx, by, bw, bh = raw_boxes[idx]
+                        x1 = max(0, bx)
+                        y1 = max(0, by)
+                        x2 = min(w_orig, bx + bw)
+                        y2 = min(h_orig, by + bh)
+                        conf = raw_scores[idx]
+                        conf_pct = round(conf * 100)
+                        # Head position (upper quarter of detected bounding box)
+                        head_x = (x1 + x2) // 2
+                        head_y = y1 + max(4, int((y2 - y1) * 0.18))
+                        new_crowd_boxes.append({
+                            "bbox": [x1, y1, x2, y2],
+                            "head": [head_x, head_y],
+                            "centroid": [(x1 + x2) // 2, (y1 + y2) // 2],
+                            "label": f"HUMAN {conf_pct}%",
+                            "confidence": conf,
+                            "expiry": now_ts + 0.8,
+                        })
+                        curr_centroids.append(((x1 + x2) // 2, (y1 + y2) // 2))
+
+                purposes = self.state.ai_purposes or ["ENTRY_EXIT"]
+
+                # -----------------------------------------------------------
+                # 1. ENTRY_EXIT Mode: Line crossing detection
+                # -----------------------------------------------------------
+                if "ENTRY_EXIT" in purposes:
+                    if self._prev_centroids and curr_centroids and self._cached_roi_lines:
+                        for p_curr in curr_centroids:
+                            closest_p = None
+                            min_d = 70.0
+                            for p_prev in self._prev_centroids:
+                                d = math.hypot(p_curr[0] - p_prev[0], p_curr[1] - p_prev[1])
+                                if d < min_d:
+                                    min_d = d
+                                    closest_p = p_prev
+
+                            if closest_p:
+                                for line in self._cached_roi_lines:
+                                    l1 = (int(line["start"]["x"] * w_orig), int(line["start"]["y"] * h_orig))
+                                    l2 = (int(line["end"]["x"] * w_orig), int(line["end"]["y"] * h_orig))
+                                    if _segments_cross(closest_p, p_curr, l1, l2):
+                                        v1 = (p_curr[0] - l1[0], p_curr[1] - l1[1])
+                                        v2 = (l2[0] - l1[0], l2[1] - l1[1])
+                                        cross = v1[0] * v2[1] - v1[1] * v2[0]
+                                        line_dir = (line.get("direction") or "BOTH").upper()
+                                        if line_dir == "OUT" or (cross < 0 and line_dir == "BOTH"):
+                                            self.state.out_count += 1
+                                        else:
+                                            self.state.in_count += 1
+                                        self.state.occupancy_count = max(0, self.state.in_count - self.state.out_count)
+                                        logger.info(f"[YOLO11x-Crowd:{self.state.camera_id}] Person crossed line '{line.get('name')}': IN={self.state.in_count} OUT={self.state.out_count}")
+                                        _emit_frs_event_threadsafe("crowd_telemetry", {
+                                            "camera_id": self.state.camera_id,
+                                            "camera_code": self.state.camera_id,
+                                            "in_count": self.state.in_count,
+                                            "out_count": self.state.out_count,
+                                            "occupancy": self.state.occupancy_count,
+                                            "headcount": len(new_crowd_boxes),
+                                            "timestamp": datetime.now(timezone.utc).isoformat(),
+                                        })
+
+                # -----------------------------------------------------------
+                # 2. ZONE Mode: Point-in-polygon headcount + density alert
+                # -----------------------------------------------------------
+                elif "ZONE" in purposes:
+                    zone_stats = []
+                    total_zone_count = 0
+                    for poly in self._cached_roi_polygons:
+                        if poly.get("type") in ("CROWD_ROI", "ZONE_BOUNDARY"):
+                            pts = poly["points"]
+                            count = 0
+                            for c in curr_centroids:
+                                norm_pt = (c[0] / float(w_orig), c[1] / float(h_orig))
+                                if _point_in_polygon(norm_pt, pts):
+                                    count += 1
+
+                            w_thresh = poly.get("warning_threshold", 50)
+                            d_thresh = poly.get("danger_threshold", 80)
+                            cap = poly.get("capacity", 100)
+
+                            if count > d_thresh:
+                                z_status = "DANGER"
+                                z_color = (0, 0, 235)  # Red BGR
+                            elif count > w_thresh:
+                                z_status = "WARNING"
+                                z_color = (0, 140, 255)  # Orange/Amber BGR
+                            else:
+                                z_status = "NORMAL"
+                                z_color = (46, 204, 113)  # Green BGR
+
+                            zone_stats.append({
+                                "id": poly["id"],
+                                "name": poly["name"],
+                                "points": pts,
+                                "count": count,
+                                "warning_threshold": w_thresh,
+                                "danger_threshold": d_thresh,
+                                "capacity": cap,
+                                "status": z_status,
+                                "color": z_color,
+                            })
+                            total_zone_count += count
+
+                    self._zone_stats = zone_stats
+                    self.state.occupancy_count = total_zone_count if zone_stats else len(curr_centroids)
+                    self.state.zone_data = [
+                        {
+                            "name": z["name"],
+                            "count": z["count"],
+                            "status": z["status"],
+                            "warning_threshold": z["warning_threshold"],
+                            "danger_threshold": z["danger_threshold"],
+                        }
+                        for z in zone_stats
+                    ]
+
+                # -----------------------------------------------------------
+                # 3. QUEUE Mode: Centroid flow & speed prediction
+                # -----------------------------------------------------------
+                elif "QUEUE" in purposes:
+                    queue_centroids = []
+                    if self._cached_roi_polygons:
+                        for c in curr_centroids:
+                            norm_pt = (c[0] / float(w_orig), c[1] / float(h_orig))
+                            in_any = False
+                            for poly in self._cached_roi_polygons:
+                                if _point_in_polygon(norm_pt, poly["points"]):
+                                    in_any = True
+                                    break
+                            if in_any:
+                                queue_centroids.append(c)
+                    else:
+                        queue_centroids = list(curr_centroids)
+
+                    # Compute movement displacement against previous frame
+                    if self._prev_queue_centroids and queue_centroids:
+                        displacements = []
+                        for curr_p in queue_centroids:
+                            min_d = 100.0
+                            best_prev = None
+                            for prev_p in self._prev_queue_centroids:
+                                d = math.hypot(curr_p[0] - prev_p[0], curr_p[1] - prev_p[1])
+                                if d < min_d:
+                                    min_d = d
+                                    best_prev = prev_p
+                            if best_prev is not None:
+                                displacements.append(min_d)
+
+                        if displacements:
+                            avg_disp = sum(displacements) / len(displacements)
+                            self._queue_displacement_history.append(avg_disp)
+                            mean_disp = float(np.mean(self._queue_displacement_history))
+                            if mean_disp < 3.0:
+                                self.state.queue_movement_status = "STOPPED"
+                            elif mean_disp <= 12.0:
+                                self.state.queue_movement_status = "SLOW"
+                            else:
+                                self.state.queue_movement_status = "FAST"
+                    else:
+                        if len(queue_centroids) == 0:
+                            self.state.queue_movement_status = "EMPTY"
+                        else:
+                            self.state.queue_movement_status = "STOPPED"
+
+                    self._prev_queue_centroids = queue_centroids
+                    self.state.occupancy_count = len(queue_centroids)
+
+                self._prev_centroids = curr_centroids
+                with self._crowd_boxes_lock:
+                    self._crowd_boxes = new_crowd_boxes
+                self.state.detections_count = len(new_crowd_boxes)
+
+            except Exception as e:
+                logger.debug(f"[Crowd-AI-Worker] Inference loop warning: {e}")
+
+            time.sleep(0.12)
+
     def run(self):
-        (FaceModel, IdentityMatcher, _, _, RTSPReader, db) = _load_frs_components()
+        (FaceModel, IdentityMatcher, FaceQualityAssessor, FaceTracker, RTSPReader, db) = _load_frs_components()
         if FaceModel is None:
             self.state.status = "error"
             return
 
         try:
             face_model, matcher = get_shared_engine()
-            reader = RTSPReader(url=self.state.rtsp_url, resize=(960, 540))
+            reader = RTSPReader(url=self.state.rtsp_url, resize=(1280, 720))
             reader.start()
             self.state.status = "online"
             logger.info(f"[FRS-Worker:{self.state.camera_id}] RTSP reader started: {self.state.rtsp_url}")
 
-            # Start decoupled background AI inference thread
+            # Instantiate FaceTracker for persistent temporal tracking across motion & static poses
+            tracker = FaceTracker(max_missed_frames=15, min_iou=0.10, max_center_distance=180.0)
+
+            # Start decoupled background FRS AI thread
             ai_thread = threading.Thread(
                 target=self._ai_detection_loop,
-                args=(face_model, matcher),
+                args=(face_model, matcher, tracker),
                 daemon=True,
                 name=f"FRS-AI-{self.state.camera_id}"
             )
             ai_thread.start()
+
+            # Start decoupled background YOLO11x Crowd AI thread
+            crowd_thread = threading.Thread(
+                target=self._crowd_ai_detection_loop,
+                daemon=True,
+                name=f"CROWD-AI-{self.state.camera_id}"
+            )
+            crowd_thread.start()
 
             while self.state.running:
                 rgb = reader.get_frame(timeout=0.04)
                 if rgb is None:
                     continue
 
-                # Pass latest frame to AI detection thread and worker state
+                # Pass latest frame to AI detection threads and worker state
                 with self._ai_lock:
                     self._latest_ai_rgb = rgb
                 with self.state.frame_lock:
                     self.state.latest_rgb = rgb
 
                 bgr = cv2.cvtColor(rgb, cv2.COLOR_RGB2BGR)
+                h, w = bgr.shape[:2]
 
-                # Overlay bounding boxes if FRS enabled
+                # 1. Clean frame without ANY annotations/overlays (always pure camera video)
+                ok_clean, clean_buf = cv2.imencode(".jpg", bgr, [cv2.IMWRITE_JPEG_QUALITY, 72])
+                if ok_clean:
+                    with self.state.frame_lock:
+                        self.state.latest_clean_frame = clean_buf.tobytes()
+
+                # 2. FRS Mode Overlays
                 if self.state.is_frs:
+                    bgr_annotated = bgr.copy()
                     now = time.time()
                     with self._boxes_lock:
                         boxes = [b for b in self._active_boxes if b["expiry"] > now]
@@ -466,19 +933,182 @@ class RTSPCameraWorker:
                         color = (46, 204, 113) if is_match else (255, 180, 0)
                         
                         # Draw bounding box
-                        cv2.rectangle(bgr, (x1, y1), (x2, y2), color, 2)
+                        cv2.rectangle(bgr_annotated, (x1, y1), (x2, y2), color, 2)
 
                         # Label badge
                         lbl = b["label"]
                         (lw, lh), _ = cv2.getTextSize(lbl, cv2.FONT_HERSHEY_SIMPLEX, 0.5, 1)
                         top_y = max(lh + 6, y1)
-                        cv2.rectangle(bgr, (x1, top_y - lh - 6), (x1 + lw + 6, top_y + 2), color, -1)
-                        cv2.putText(bgr, lbl, (x1 + 3, top_y - 3), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 0, 0), 1, cv2.LINE_AA)
+                        cv2.rectangle(bgr_annotated, (x1, top_y - lh - 6), (x1 + lw + 6, top_y + 2), color, -1)
+                        cv2.putText(bgr_annotated, lbl, (x1 + 3, top_y - 3), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 0, 0), 1, cv2.LINE_AA)
 
-                ok, jpeg_buf = cv2.imencode(".jpg", bgr, [cv2.IMWRITE_JPEG_QUALITY, 72])
-                if ok:
-                    with self.state.frame_lock:
-                        self.state.latest_frame = jpeg_buf.tobytes()
+                    ok, jpeg_buf = cv2.imencode(".jpg", bgr_annotated, [cv2.IMWRITE_JPEG_QUALITY, 72])
+                    if ok:
+                        with self.state.frame_lock:
+                            self.state.latest_frame = jpeg_buf.tobytes()
+
+                # 3. Crowd Mode Overlays (YOLO11x Person Detection & Line/Zone/Queue Analytics)
+                elif getattr(self.state, "crowd_ai_active", False):
+                    bgr_crowd = bgr.copy()
+                    now = time.time()
+                    with self._crowd_boxes_lock:
+                        cboxes = [b for b in self._crowd_boxes if b.get("expiry", 0) > now]
+
+                    purposes = self.state.ai_purposes or ["ENTRY_EXIT"]
+
+                    # -------------------------------------------------------
+                    # A. ENTRY / EXIT COUNTING OVERLAY
+                    # -------------------------------------------------------
+                    if "ENTRY_EXIT" in purposes:
+                        # Draw person boxes (emerald green)
+                        for cb in cboxes:
+                            x1, y1, x2, y2 = cb["bbox"]
+                            cv2.rectangle(bgr_crowd, (x1, y1), (x2, y2), (46, 204, 113), 2)
+                            clbl = cb["label"]
+                            (lw, lh), _ = cv2.getTextSize(clbl, cv2.FONT_HERSHEY_SIMPLEX, 0.45, 1)
+                            top_y = max(lh + 6, y1)
+                            cv2.rectangle(bgr_crowd, (x1, top_y - lh - 6), (x1 + lw + 6, top_y + 2), (46, 204, 113), -1)
+                            cv2.putText(bgr_crowd, clbl, (x1 + 3, top_y - 3), cv2.FONT_HERSHEY_SIMPLEX, 0.45, (0, 0, 0), 1, cv2.LINE_AA)
+
+                        # Draw configured counting lines
+                        for line in self._cached_roi_lines:
+                            l1 = (int(line["start"]["x"] * w), int(line["start"]["y"] * h))
+                            l2 = (int(line["end"]["x"] * w), int(line["end"]["y"] * h))
+                            line_color = (0, 215, 255) if "ENTRY" in line["type"] else ((255, 100, 50) if "EXIT" in line["type"] else (255, 200, 0))
+                            cv2.line(bgr_crowd, l1, l2, line_color, 3, cv2.LINE_AA)
+                            cv2.circle(bgr_crowd, l1, 6, line_color, -1)
+                            cv2.circle(bgr_crowd, l2, 6, line_color, -1)
+                            mx = (l1[0] + l2[0]) // 2
+                            my = (l1[1] + l2[1]) // 2
+                            tag = f"{line.get('name', 'LINE')} | IN: {self.state.in_count} | OUT: {self.state.out_count}"
+                            cv2.putText(bgr_crowd, tag, (max(10, mx - 100), max(22, my - 8)), cv2.FONT_HERSHEY_SIMPLEX, 0.45, (255, 255, 255), 1, cv2.LINE_AA)
+
+                        # Top HUD bar for Entry/Exit Counting
+                        cv2.rectangle(bgr_crowd, (0, 0), (w, 30), (15, 23, 42), -1)
+                        hud = f"YOLO11x ACTIVE | ENTRY/EXIT COUNTING | IN: {self.state.in_count} | OUT: {self.state.out_count} | OCCUPANCY: {self.state.occupancy_count}"
+                        cv2.putText(bgr_crowd, hud, (12, 20), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 140, 188), 2, cv2.LINE_AA)
+
+                    # -------------------------------------------------------
+                    # B. ZONE DENSITY MANAGEMENT OVERLAY (Polygons + Head Dots)
+                    # -------------------------------------------------------
+                    elif "ZONE" in purposes:
+                        worst_status = "NORMAL"
+                        overlay = bgr_crowd.copy()
+
+                        # 1. Draw semi-transparent color-coded zone polygons
+                        for z in self._zone_stats:
+                            pts = z["points"]
+                            if len(pts) >= 3:
+                                poly_arr = np.array(
+                                    [[int(p["x"] * w if isinstance(p, dict) else p[0] * w), int(p["y"] * h if isinstance(p, dict) else p[1] * h)] for p in pts],
+                                    dtype=np.int32
+                                )
+                                z_color = z["color"]
+                                cv2.fillPoly(overlay, [poly_arr], z_color)
+                                cv2.polylines(bgr_crowd, [poly_arr], True, z_color, 3, cv2.LINE_AA)
+
+                                # Centroid for zone tag
+                                M = cv2.moments(poly_arr)
+                                if M["m00"] != 0:
+                                    cx = int(M["m10"] / M["m00"])
+                                    cy = int(M["m01"] / M["m00"])
+                                else:
+                                    cx, cy = poly_arr[0][0], poly_arr[0][1]
+
+                                z_tag = f"{z['name']}: {z['count']}/{z['warning_threshold']} ({z['status']})"
+                                (tw, th), _ = cv2.getTextSize(z_tag, cv2.FONT_HERSHEY_SIMPLEX, 0.5, 2)
+                                cv2.rectangle(bgr_crowd, (max(5, cx - tw // 2 - 6), max(25, cy - 18)), (min(w - 5, cx + tw // 2 + 6), min(h - 5, cy + 6)), (15, 23, 42), -1)
+                                cv2.rectangle(bgr_crowd, (max(5, cx - tw // 2 - 6), max(25, cy - 18)), (min(w - 5, cx + tw // 2 + 6), min(h - 5, cy + 6)), z_color, 1)
+                                cv2.putText(bgr_crowd, z_tag, (max(10, cx - tw // 2), max(20, cy - 2)), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 255, 255), 1, cv2.LINE_AA)
+
+                                if z["status"] == "DANGER":
+                                    worst_status = "DANGER"
+                                elif z["status"] == "WARNING" and worst_status != "DANGER":
+                                    worst_status = "WARNING"
+
+                        # Blend polygon fill overlay (25% opacity)
+                        if self._zone_stats:
+                            cv2.addWeighted(overlay, 0.25, bgr_crowd, 0.75, 0, bgr_crowd)
+
+                        # 2. Draw Head Count Dots (glowing cyan / amber dots at head location)
+                        for cb in cboxes:
+                            hx, hy = cb.get("head", ((cb["bbox"][0] + cb["bbox"][2]) // 2, cb["bbox"][1] + 10))
+                            # Outer ring
+                            cv2.circle(bgr_crowd, (hx, hy), 7, (255, 255, 0), -1, cv2.LINE_AA)
+                            cv2.circle(bgr_crowd, (hx, hy), 9, (0, 255, 255), 2, cv2.LINE_AA)
+                            # Center dot
+                            cv2.circle(bgr_crowd, (hx, hy), 2, (0, 0, 0), -1, cv2.LINE_AA)
+
+                        # Top HUD bar for Zone Density
+                        hud_color = (0, 0, 235) if worst_status == "DANGER" else ((0, 140, 255) if worst_status == "WARNING" else (80, 185, 63))
+                        cv2.rectangle(bgr_crowd, (0, 0), (w, 30), (15, 23, 42), -1)
+                        hud = f"YOLO11x ACTIVE | ZONE DENSITY | OCCUPANCY: {self.state.occupancy_count} | STATUS: {worst_status}"
+                        cv2.putText(bgr_crowd, hud, (12, 20), cv2.FONT_HERSHEY_SIMPLEX, 0.5, hud_color, 2, cv2.LINE_AA)
+
+                    # -------------------------------------------------------
+                    # C. QUEUE MANAGEMENT OVERLAY (Queue Box + Speed Flow)
+                    # -------------------------------------------------------
+                    elif "QUEUE" in purposes:
+                        # Draw Queue Polygons / Area Box in Amber
+                        for poly in self._cached_roi_polygons:
+                            pts = poly["points"]
+                            if len(pts) >= 3:
+                                poly_arr = np.array(
+                                    [[int(p["x"] * w if isinstance(p, dict) else p[0] * w), int(p["y"] * h if isinstance(p, dict) else p[1] * h)] for p in pts],
+                                    dtype=np.int32
+                                )
+                                cv2.polylines(bgr_crowd, [poly_arr], True, (34, 153, 210), 3, cv2.LINE_AA)
+                                for pt in poly_arr:
+                                    cv2.circle(bgr_crowd, tuple(pt), 5, (34, 153, 210), -1)
+
+                        # Draw direction lines if any
+                        for line in self._cached_roi_lines:
+                            l1 = (int(line["start"]["x"] * w), int(line["start"]["y"] * h))
+                            l2 = (int(line["end"]["x"] * w), int(line["end"]["y"] * h))
+                            cv2.line(bgr_crowd, l1, l2, (34, 153, 210), 3, cv2.LINE_AA)
+                            cv2.circle(bgr_crowd, l1, 5, (34, 153, 210), -1)
+                            cv2.circle(bgr_crowd, l2, 5, (34, 153, 210), -1)
+                            mx = (l1[0] + l2[0]) // 2
+                            my = (l1[1] + l2[1]) // 2
+                            cv2.putText(bgr_crowd, line.get('name', 'Queue Line'), (max(10, mx - 60), max(22, my - 8)), cv2.FONT_HERSHEY_SIMPLEX, 0.45, (34, 153, 210), 1, cv2.LINE_AA)
+
+                        # Draw person boxes & head indicators
+                        for cb in cboxes:
+                            x1, y1, x2, y2 = cb["bbox"]
+                            cv2.rectangle(bgr_crowd, (x1, y1), (x2, y2), (34, 153, 210), 2)
+                            hx, hy = cb.get("head", ((x1 + x2) // 2, y1 + 10))
+                            cv2.circle(bgr_crowd, (hx, hy), 6, (0, 255, 255), -1, cv2.LINE_AA)
+
+                        # Top HUD bar for Queue Management with movement speed status
+                        q_status = getattr(self.state, "queue_movement_status", "STOPPED")
+                        if q_status == "FAST":
+                            stat_color = (63, 185, 80)
+                            stat_label = "FAST FLOW (ACTIVE)"
+                        elif q_status == "SLOW":
+                            stat_color = (34, 153, 210)
+                            stat_label = "SLOW QUEUE (MODERATE)"
+                        elif q_status == "EMPTY":
+                            stat_color = (180, 180, 180)
+                            stat_label = "EMPTY"
+                        else:
+                            stat_color = (0, 0, 235)
+                            stat_label = "STOPPED / CONGESTED"
+
+                        cv2.rectangle(bgr_crowd, (0, 0), (w, 30), (15, 23, 42), -1)
+                        hud = f"YOLO11x ACTIVE | QUEUE MANAGEMENT | WAITING: {self.state.occupancy_count} | FLOW: {stat_label}"
+                        cv2.putText(bgr_crowd, hud, (12, 20), cv2.FONT_HERSHEY_SIMPLEX, 0.5, stat_color, 2, cv2.LINE_AA)
+
+                    ok_cr, crowd_buf = cv2.imencode(".jpg", bgr_crowd, [cv2.IMWRITE_JPEG_QUALITY, 72])
+                    if ok_cr:
+                        with self.state.frame_lock:
+                            self.state.latest_crowd_frame = crowd_buf.tobytes()
+                            self.state.latest_frame = crowd_buf.tobytes()
+                else:
+                    # Neither AI mode active: use clean frames
+                    if ok_clean:
+                        with self.state.frame_lock:
+                            self.state.latest_frame = clean_buf.tobytes()
+                            self.state.latest_crowd_frame = clean_buf.tobytes()
 
             reader.stop()
             self.state.status = "offline"
@@ -502,6 +1132,7 @@ class AddCameraRequest(BaseModel):
     rtsp_url: str
     camera_type: str = "FRS"  # "FRS" or "CROWD"
     is_frs: bool = True
+    ai_purposes: Optional[List[str]] = Field(default_factory=lambda: ["ENTRY_EXIT", "ZONE"])
 
 
 class CameraInfo(BaseModel):
@@ -514,6 +1145,11 @@ class CameraInfo(BaseModel):
     stream_url: str
     is_frs: bool = True
     camera_type: str = "FRS"
+    crowd_ai_active: bool = False
+    in_count: int = 0
+    out_count: int = 0
+    occupancy_count: int = 0
+    ai_purposes: List[str] = Field(default_factory=list)
 
 
 # ── POST /cameras ────────────────────────────────────────────────────────────
@@ -521,49 +1157,46 @@ class CameraInfo(BaseModel):
 @router.post("/cameras", response_model=CameraInfo, status_code=201)
 async def add_frs_camera(req: AddCameraRequest):
     """Add a new RTSP camera and start live stream / FRS detection."""
-    prefix = "FRS" if req.is_frs or req.camera_type == "FRS" else "CAM"
-    cam_id = req.camera_id or f"{prefix}-{str(uuid.uuid4())[:8].upper()}"
+    cam_id = req.camera_id or "CAM-KHB-345"
     is_frs = req.is_frs if req.camera_type == "FRS" else False
+    ai_purp = req.ai_purposes or (["ENTRY_EXIT", "ZONE"] if req.camera_type == "CROWD" else ["FRS"])
 
     with _workers_lock:
-        # 1. If camera with same ID exists, update it and return
-        if cam_id in _camera_workers:
-            state = _camera_workers[cam_id]
+        # Check if an existing worker matches by ID or by same RTSP stream URL
+        existing_match = None
+        for existing_id, existing_state in list(_camera_workers.items()):
+            if existing_id == cam_id or existing_state.rtsp_url.strip() == req.rtsp_url.strip():
+                existing_match = (existing_id, existing_state)
+                break
+
+        if existing_match:
+            old_id, state = existing_match
+            if old_id != cam_id:
+                _camera_workers.pop(old_id, None)
+                state.camera_id = cam_id
+                _camera_workers[cam_id] = state
             state.is_frs = is_frs
             state.camera_type = req.camera_type
+            state.ai_purposes = ai_purp
             if req.name and req.name != "Camera":
                 state.name = req.name
+            logger.info(f"[FRS-Engine] Re-keyed and updated worker for {cam_id} ({req.camera_type}) with purposes {ai_purp}")
             return CameraInfo(
-                camera_id=state.camera_id,
+                camera_id=cam_id,
                 name=state.name,
                 rtsp_url=state.rtsp_url,
                 status=state.status,
                 started_at=state.started_at,
                 detections_count=state.detections_count,
-                stream_url=f"/api/v1/frs-engine/cameras/{state.camera_id}/stream",
+                stream_url=f"/api/v1/frs-engine/cameras/{cam_id}/stream",
                 is_frs=state.is_frs,
                 camera_type=state.camera_type,
+                crowd_ai_active=getattr(state, "crowd_ai_active", False),
+                in_count=getattr(state, "in_count", 0),
+                out_count=getattr(state, "out_count", 0),
+                occupancy_count=getattr(state, "occupancy_count", 0),
+                ai_purposes=state.ai_purposes,
             )
-
-        # 2. Check if a worker already streams the EXACT SAME rtsp_url
-        for existing_id, existing_state in _camera_workers.items():
-            if existing_state.rtsp_url.strip() == req.rtsp_url.strip() and existing_state.running:
-                logger.info(f"[FRS-Engine] Reusing existing worker {existing_id} for stream {req.rtsp_url[:40]}")
-                existing_state.is_frs = is_frs
-                existing_state.camera_type = req.camera_type
-                if req.name and req.name != "Camera":
-                    existing_state.name = req.name
-                return CameraInfo(
-                    camera_id=existing_id,
-                    name=existing_state.name,
-                    rtsp_url=existing_state.rtsp_url,
-                    status=existing_state.status,
-                    started_at=existing_state.started_at,
-                    detections_count=existing_state.detections_count,
-                    stream_url=f"/api/v1/frs-engine/cameras/{existing_id}/stream",
-                    is_frs=existing_state.is_frs,
-                    camera_type=existing_state.camera_type,
-                )
 
         state = CameraWorkerState(
             camera_id=cam_id,
@@ -571,6 +1204,7 @@ async def add_frs_camera(req: AddCameraRequest):
             name=req.name,
             is_frs=is_frs,
             camera_type=req.camera_type,
+            ai_purposes=ai_purp,
         )
         worker = RTSPCameraWorker(state)
         state.running = True
@@ -617,6 +1251,11 @@ async def list_frs_engine_cameras():
                 stream_url=f"/api/v1/frs-engine/cameras/{cam_id}/stream",
                 is_frs=state.is_frs,
                 camera_type=state.camera_type,
+                crowd_ai_active=getattr(state, "crowd_ai_active", False),
+                in_count=getattr(state, "in_count", 0),
+                out_count=getattr(state, "out_count", 0),
+                occupancy_count=getattr(state, "occupancy_count", 0),
+                ai_purposes=getattr(state, "ai_purposes", ["ENTRY_EXIT", "ZONE"] if state.camera_type == "CROWD" else ["FRS"]),
             ))
     return result
 
@@ -639,31 +1278,127 @@ async def remove_frs_camera(camera_id: str):
     logger.info(f"[FRS-Engine] Camera removed: {camera_id}")
 
 
+def get_worker_for_camera(camera_code_or_id: str) -> Optional[CameraWorkerState]:
+    """Resolves a CameraWorkerState for the requested camera code or ID with flexible mapping."""
+    with _workers_lock:
+        if not _camera_workers:
+            return None
+        # 1. Exact match
+        if camera_code_or_id in _camera_workers:
+            return _camera_workers[camera_code_or_id]
+
+        # 2. Match without -FRS or -CROWD
+        target_clean = camera_code_or_id.replace("-FRS", "").replace("-CROWD", "").strip().lower()
+        for cid, state in _camera_workers.items():
+            cid_clean = cid.replace("-FRS", "").replace("-CROWD", "").strip().lower()
+            if cid_clean == target_clean or target_clean in cid_clean or cid_clean in target_clean:
+                return state
+
+        # 3. If there is a single active worker in the system, map it to the physical camera
+        if len(_camera_workers) == 1:
+            return next(iter(_camera_workers.values()))
+
+        # 4. Check worker streaming the physical camera IP (192.168.0.102)
+        for state in _camera_workers.values():
+            if "192.168.0.102" in state.rtsp_url:
+                return state
+
+        return None
+
+
+def stop_frs_camera_worker(camera_code_or_id: str) -> bool:
+    """Safely stops and unregisters any FRS engine worker running for the given physical camera."""
+    state = get_worker_for_camera(camera_code_or_id)
+    if state and state.running:
+        state.running = False
+        state.is_frs = False
+        if state.thread and state.thread.is_alive():
+            state.thread.join(timeout=2.0)
+        with _workers_lock:
+            keys_to_del = [k for k, v in _camera_workers.items() if v is state]
+            for k in keys_to_del:
+                _camera_workers.pop(k, None)
+        logger.info(f"[FRS-Engine] Stopped and released RTSP worker for physical camera: {camera_code_or_id}")
+        return True
+    return False
+
+
+def is_frs_worker_running(camera_code_or_id: str) -> bool:
+    """Checks if an FRS engine worker is actively running for the given physical camera."""
+    state = get_worker_for_camera(camera_code_or_id)
+    return bool(state and state.running and state.is_frs)
+
+
+def is_crowd_worker_running(camera_code_or_id: str) -> bool:
+    """Checks if a Crowd AI (YOLO11x) worker is actively running for the given camera."""
+    state = get_worker_for_camera(camera_code_or_id)
+    return bool(state and state.running and getattr(state, "crowd_ai_active", False) and not state.is_frs)
+
+
+def toggle_crowd_ai_camera_worker(camera_code_or_id: str, active: bool = True) -> bool:
+    """Toggles Crowd AI (YOLO11x) on the existing RTSP stream without disconnecting the physical camera."""
+    state = get_worker_for_camera(camera_code_or_id)
+    if state and state.running:
+        state.crowd_ai_active = active
+        if active:
+            state.is_frs = False
+            state.camera_type = "CROWD"
+        logger.info(f"[FRS-Engine] Camera {camera_code_or_id} crowd_ai_active set to {active} (is_frs={state.is_frs})")
+        return True
+    return False
+
+
+def toggle_frs_camera_worker(camera_code_or_id: str, active: bool = True) -> bool:
+    """Toggles FRS on the existing RTSP stream without disconnecting the physical camera."""
+    state = get_worker_for_camera(camera_code_or_id)
+    if state and state.running:
+        state.is_frs = active
+        if active:
+            state.crowd_ai_active = False
+            state.camera_type = "FRS"
+        logger.info(f"[FRS-Engine] Camera {camera_code_or_id} is_frs set to {active} (crowd_ai_active={state.crowd_ai_active})")
+        return True
+    return False
+
+
+def sync_worker_roi_lines(camera_code_or_id: str) -> bool:
+    """Instructs the active worker to reload ROI counting lines and automatically start Crowd AI."""
+    state = get_worker_for_camera(camera_code_or_id)
+    if state and state.running:
+        state.crowd_ai_active = True
+        state.is_frs = False
+        state.camera_type = "CROWD"
+        logger.info(f"[FRS-Engine] Camera {camera_code_or_id} synced ROI lines & activated YOLO11x Crowd AI")
+        return True
+    return False
+
+
 # ── GET /cameras/{id}/stream  (MJPEG) ────────────────────────────────────────
 
 @router.get("/cameras/{camera_id}/stream")
 async def stream_camera(camera_id: str):
     """MJPEG live stream from RTSP camera. Use as <img src='...'> in frontend."""
+    state = get_worker_for_camera(camera_id)
+    if state is None or not state.running:
+        raise HTTPException(status_code=404, detail=f"Camera {camera_id} is not actively streaming")
 
-    with _workers_lock:
-        state = _camera_workers.get(camera_id)
-        if state is None:
-            # Fallback: look up by camera code or return the active main worker
-            for k, s in _camera_workers.items():
-                if k.lower() == camera_id.lower() or camera_id.lower() in k.lower() or k == "CAM-KHB-001":
-                    state = s
-                    break
-            if state is None and _camera_workers:
-                state = next(iter(_camera_workers.values()))
-
-    if state is None:
-        raise HTTPException(status_code=404, detail=f"Camera {camera_id} not found or not streaming")
+    # Strict isolation: if request is for CROWD or worker is not in FRS mode, serve crowd or clean frames
+    is_crowd = "-CROWD" in camera_id.upper() or state.camera_type == "CROWD" or not state.is_frs
 
     async def generate():
         boundary = b"--frame\r\nContent-Type: image/jpeg\r\n\r\n"
         while state.running:
             with state.frame_lock:
-                frame = state.latest_frame
+                if is_crowd:
+                    if getattr(state, "crowd_ai_active", False):
+                        frame = getattr(state, "latest_crowd_frame", None) or state.latest_clean_frame
+                    else:
+                        frame = getattr(state, "latest_clean_frame", None) or state.latest_frame
+                else:
+                    if state.is_frs:
+                        frame = state.latest_frame
+                    else:
+                        frame = getattr(state, "latest_clean_frame", None) or state.latest_frame
 
             if frame:
                 yield boundary + frame + b"\r\n"
@@ -675,11 +1410,135 @@ async def stream_camera(camera_id: str):
     )
 
 
+@router.patch("/cameras/{camera_id}/toggle-crowd-ai")
+async def api_toggle_crowd_ai(camera_id: str, active: bool = True):
+    success = toggle_crowd_ai_camera_worker(camera_id, active)
+    if not success:
+        raise HTTPException(status_code=404, detail=f"Camera worker for {camera_id} not found or not running")
+    return {"status": "success", "camera_id": camera_id, "crowd_ai_active": active}
+
+
+@router.patch("/cameras/{camera_id}/toggle-frs")
+async def api_toggle_frs(camera_id: str, active: bool = True):
+    success = toggle_frs_camera_worker(camera_id, active)
+    if not success:
+        raise HTTPException(status_code=404, detail=f"Camera worker for {camera_id} not found or not running")
+    return {"status": "success", "camera_id": camera_id, "is_frs": active}
+
+
+@router.patch("/cameras/{camera_id}/reassign-purpose")
+async def api_reassign_camera_purpose(camera_id: str, new_purpose: str):
+    """
+    Stops/disconnects existing pipeline configuration for a camera,
+    permanently deletes old ROI geometries from PostgreSQL,
+    and reassigns to the new purpose (ENTRY_EXIT, ZONE, or QUEUE).
+    """
+    valid_purposes = {"ENTRY_EXIT", "ZONE", "QUEUE"}
+    new_purpose = new_purpose.upper().strip()
+    if new_purpose not in valid_purposes:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Invalid purpose '{new_purpose}'. Must be one of: {', '.join(sorted(valid_purposes))}"
+        )
+
+    state = get_worker_for_camera(camera_id)
+    if state is None or not state.running:
+        raise HTTPException(status_code=404, detail=f"Camera worker for {camera_id} not found or not running")
+
+    clean_id = camera_id.replace("-FRS", "").replace("-CROWD", "")
+
+    # 1. Permanently DELETE existing ROI geometry in PostgreSQL database
+    try:
+        from app.db.session import AsyncSessionLocal
+        from app.models.camera_roi import CameraROIConfiguration
+        from sqlalchemy import delete
+
+        async with AsyncSessionLocal() as pg_db:
+            stmt = delete(CameraROIConfiguration).where(
+                CameraROIConfiguration.camera_code.in_([camera_id, clean_id, state.camera_id])
+            )
+            res = await pg_db.execute(stmt)
+            await pg_db.commit()
+            logger.info(f"[FRS-Engine] Permanently deleted {res.rowcount} previous ROI geometries for camera {camera_id} in DB.")
+    except Exception as e:
+        logger.warning(f"[FRS-Engine] Disconnecting old DB geometry warning: {e}")
+
+    # 2. Stop and disconnect worker pipeline in-memory
+    with state.frame_lock:
+        state.roi_lines = []
+        if hasattr(state, "worker") and state.worker:
+            state.worker._cached_roi_lines = []
+            state.worker._cached_roi_polygons = []
+            state.worker._zone_stats = []
+            state.worker._roi_lines_last_fetch = 0.0
+            state.worker._prev_centroids = []
+            state.worker._prev_queue_centroids = []
+            if hasattr(state.worker, "_queue_displacement_history"):
+                state.worker._queue_displacement_history.clear()
+            if hasattr(state.worker, "_crowd_boxes_lock"):
+                with state.worker._crowd_boxes_lock:
+                    state.worker._crowd_boxes.clear()
+
+        # Reset counts & states
+        state.in_count = 0
+        state.out_count = 0
+        state.occupancy_count = 0
+        state.queue_movement_status = "STOPPED"
+        state.zone_data = []
+
+        # Assign new profile
+        state.ai_purposes = [new_purpose]
+        state.camera_type = "CROWD"
+        state.is_frs = False
+        state.crowd_ai_active = True
+
+    # 3. Broadcast WebSocket event
+    _emit_frs_event_threadsafe("camera_reassigned", {
+        "camera_id": state.camera_id,
+        "ai_purposes": state.ai_purposes,
+        "new_purpose": new_purpose,
+        "timestamp": datetime.now(timezone.utc).isoformat(),
+    })
+
+    logger.info(f"[FRS-Engine] Camera {camera_id} successfully reassigned to purpose: {new_purpose}. Previous pipeline deleted and disconnected.")
+    return {
+        "status": "success",
+        "camera_id": state.camera_id,
+        "assigned_purpose": new_purpose,
+        "ai_purposes": state.ai_purposes,
+        "in_count": state.in_count,
+        "out_count": state.out_count,
+    }
+
+
+@router.get("/cameras/{camera_id}/raw-stream")
+async def stream_camera_raw(camera_id: str):
+    """Clean MJPEG stream without any FRS annotations, YOLO boxes, or counting lines."""
+    state = get_worker_for_camera(camera_id)
+    if state is None or not state.running:
+        raise HTTPException(status_code=404, detail=f"Camera {camera_id} is not actively streaming")
+
+    async def generate_clean():
+        boundary = b"--frame\r\nContent-Type: image/jpeg\r\n\r\n"
+        while state.running:
+            with state.frame_lock:
+                frame = getattr(state, "latest_clean_frame", None) or state.latest_frame
+
+            if frame:
+                yield boundary + frame + b"\r\n"
+            await asyncio.sleep(0.033)
+
+    return StreamingResponse(
+        generate_clean(),
+        media_type="multipart/x-mixed-replace; boundary=frame",
+    )
+
+
 @router.get("/stream")
 async def stream_default_camera():
-    """Default camera live MJPEG stream (CAM-KHB-001 or first active)."""
+    """Default camera live MJPEG stream (CAM-KHB-345-FRS or first active)."""
     with _workers_lock:
-        state = _camera_workers.get("CAM-KHB-001")
+        state = _camera_workers.get("CAM-KHB-345-FRS") or _camera_workers.get("CAM-KHB-345")
         if state is None and _camera_workers:
             state = next(iter(_camera_workers.values()))
     if state is None:
@@ -1053,7 +1912,7 @@ def auto_start_main_camera():
         logger.warning("[FRS-Engine] RTSP_URL not set — main camera not auto-started.")
         return
 
-    cam_id = "CAM-KHB-001"
+    cam_id = os.getenv("PHYSICAL_CAMERA_ID", "CAM-KHB-345")
     with _workers_lock:
         if cam_id in _camera_workers:
             return  # Already running
@@ -1061,7 +1920,9 @@ def auto_start_main_camera():
         state = CameraWorkerState(
             camera_id=cam_id,
             rtsp_url=rtsp_url,
-            name="Khairatabad Main Camera (FRS)",
+            name="Khairatabad Central Gate",
+            is_frs=True,
+            camera_type="FRS",
         )
         worker = RTSPCameraWorker(state)
         state.running = True

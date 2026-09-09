@@ -14,7 +14,9 @@ from pydantic import BaseModel, Field
 class AIProfileType(str, Enum):
     CROWD_STANDARD = "CROWD_STANDARD"
     CROWD_HIGH_DENSITY = "CROWD_HIGH_DENSITY"
+    CROWD_YOLO11X = "CROWD_YOLO11X"
     QUEUE_STANDARD = "QUEUE_STANDARD"
+    QUEUE_YOLO11X = "QUEUE_YOLO11X"
     FRS_STANDARD = "FRS_STANDARD"
     VIDEO_SAFETY = "VIDEO_SAFETY"
 
@@ -121,6 +123,31 @@ STANDARD_PROFILES: Dict[str, AIProfile] = {
         enabled_features=["headcount", "dense_cluster_detection", "bottleneck_warning", "reverse_flow"],
         description="High precision detection for dense sanctum sanctorum crowd.",
     ),
+    "CROWD_YOLO11X": AIProfile(
+        profile_id="CROWD_YOLO11X",
+        name="YOLO11x Production Crowd & Zone AI",
+        type=AIProfileType.CROWD_YOLO11X,
+        pipeline_type="CROWD",
+        model="yolo11x",
+        model_version="11.0.0",
+        processing_fps=15,
+        confidence_threshold=0.35,
+        tracker_enabled=True,
+        batch_size=1,
+        gpu_requirements=GPURequirement(min_vram_mb=3072, recommended_vram_mb=6144),
+        camera_requirements=CameraRequirement(min_resolution="1080p", recommended_resolution="1080p", min_fps=15),
+        workload=ProfileWorkloadEstimate(
+            estimated_vram_gb=1.80,
+            estimated_gpu_load_percent=12.0,
+            estimated_cpu_percent=6.0,
+            estimated_ram_mb=800.0,
+            supports_cpu_execution=True,
+            cpu_only_estimated_cpu_percent=35.0,
+            calculation_mode="ESTIMATED",
+        ),
+        enabled_features=["headcount", "flow_direction", "density_estimation", "entry_exit_counting", "zone_monitoring"],
+        description="Production-grade YOLO11x person detection for crowd occupancy, entry/exit, and zone density.",
+    ),
     "QUEUE_STANDARD": AIProfile(
         profile_id="QUEUE_STANDARD",
         name="Queue Length & Wait-Time AI",
@@ -145,6 +172,31 @@ STANDARD_PROFILES: Dict[str, AIProfile] = {
         ),
         enabled_features=["queue_length_meters", "people_in_queue", "wait_time_estimation"],
         description="Line queue tracking, barricade density, and congestion estimation.",
+    ),
+    "QUEUE_YOLO11X": AIProfile(
+        profile_id="QUEUE_YOLO11X",
+        name="YOLO11x Production Queue AI",
+        type=AIProfileType.QUEUE_YOLO11X,
+        pipeline_type="QUEUE",
+        model="yolo11x",
+        model_version="11.0.0",
+        processing_fps=12,
+        confidence_threshold=0.40,
+        tracker_enabled=True,
+        batch_size=1,
+        gpu_requirements=GPURequirement(min_vram_mb=3072, recommended_vram_mb=6144),
+        camera_requirements=CameraRequirement(min_resolution="1080p", recommended_resolution="1080p", min_fps=12),
+        workload=ProfileWorkloadEstimate(
+            estimated_vram_gb=1.60,
+            estimated_gpu_load_percent=10.0,
+            estimated_cpu_percent=5.5,
+            estimated_ram_mb=750.0,
+            supports_cpu_execution=True,
+            cpu_only_estimated_cpu_percent=30.0,
+            calculation_mode="ESTIMATED",
+        ),
+        enabled_features=["queue_length_meters", "people_in_queue", "wait_time_estimation", "dwell_tracking", "queue_movement"],
+        description="Production-grade YOLO11x person detector for queue monitoring, wait time, and dwell tracking.",
     ),
     "FRS_STANDARD": AIProfile(
         profile_id="FRS_STANDARD",

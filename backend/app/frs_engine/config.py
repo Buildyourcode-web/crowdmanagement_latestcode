@@ -37,7 +37,7 @@ USE_CUDA: bool = _bool(os.getenv("USE_CUDA"), True)
 
 # ── Matching ───────────────────────────────────────────────────────────────────
 # Calibrated 60% threshold: perfectly matches enrolled identities (75%-100%) while rejecting all room strangers (4%-44%).
-MATCH_THRESHOLD: float = _float(os.getenv("MATCH_THRESHOLD"), 0.60)
+MATCH_THRESHOLD: float = _float(os.getenv("MATCH_THRESHOLD"), 0.55)
 MATCHING_STRATEGY: str = os.getenv("MATCHING_STRATEGY", "max_similarity")
 AMBIGUITY_MARGIN: float = _float(os.getenv("AMBIGUITY_MARGIN"), 0.05)
 

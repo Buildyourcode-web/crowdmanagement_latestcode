@@ -39,7 +39,7 @@ class LineGeometry(BaseModel):
 class CameraROICreate(BaseModel):
     profile_id: str = Field(..., description="AI Profile ID (e.g. CROWD_STANDARD, QUEUE_STANDARD)")
     roi_type: str = Field(..., description="ROI Type (CROWD_ROI, QUEUE_ROI, ENTRY_LINE, etc.)")
-    name: str = Field(..., min_length=2, max_length=150, description="Human-readable label for this geometry")
+    name: Optional[str] = Field("Counting Line", max_length=150, description="Human-readable label for this geometry")
     geometry_json: Dict[str, Any] = Field(..., description="Normalized geometry definition (points or start/end)")
     normalized: bool = Field(True, description="Always true for resolution-independent coordinates")
     enabled: bool = Field(True, description="Whether this geometry is active")

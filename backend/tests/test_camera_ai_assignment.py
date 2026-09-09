@@ -540,9 +540,19 @@ async def test_mixed_workload_calculation(client: AsyncClient, superadmin_token:
 @pytest.mark.asyncio
 async def test_ai_read_permission_enforced(client: AsyncClient, sample_cameras):
     # No auth header -> 401
-    cam = sample_cameras["CROWD"]
-    res = await client.get(f"/api/v1/cameras/{cam.camera_code}/ai-config")
-    assert res.status_code == 401
+    from app.config import settings
+    import app.dependencies as deps
+    orig_env = settings.APP_ENV
+    orig_dev = deps._cached_dev_user
+    try:
+        settings.APP_ENV = "production"
+        deps._cached_dev_user = None
+        cam = sample_cameras["CROWD"]
+        res = await client.get(f"/api/v1/cameras/{cam.camera_code}/ai-config")
+        assert res.status_code == 401
+    finally:
+        settings.APP_ENV = orig_env
+        deps._cached_dev_user = orig_dev
 
 
 @pytest.mark.asyncio

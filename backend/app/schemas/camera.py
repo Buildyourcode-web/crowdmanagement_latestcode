@@ -52,6 +52,13 @@ class CameraRead(BaseSchema):
     last_seen_at: Optional[datetime] = None
     last_tested_at: Optional[datetime] = None
 
+    # Logical AI Identifiers & Exclusive Mode
+    logical_id_frs: Optional[str] = None
+    logical_id_crowd: Optional[str] = None
+    ai_mode: Optional[str] = None
+    frs_status: Optional[str] = None
+    crowd_status: Optional[str] = None
+
 
 class CameraCreate(BaseModel):
     model_config = ConfigDict(populate_by_name=True)

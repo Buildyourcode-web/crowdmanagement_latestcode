@@ -3,7 +3,9 @@ import { useState, useEffect, useCallback, useRef } from "react";
 import { useNavigate } from "react-router-dom";
 import CameraCard from "../components/camera/CameraCard.jsx";
 import { getCameras, getCameraStats, toggleCameraFRS } from "../services/cameraService.js";
+import { switchCameraAIMode } from "../services/aiService.js";
 import { LoadingState } from "../components/common/States.jsx";
+import ROIEditor from "../components/ai/ROIEditor.jsx";
 
 const BACKEND = `http://${window.location.hostname}:8000`;
 const DEFAULT_RTSP = "rtsp://admin:Veeru%40555@192.168.0.102:554/Streaming/Channels/101";
@@ -14,6 +16,42 @@ const GRID_SIZES = [
   { label: "2×", cols: 2 },
   { label: "1×", cols: 1 },
 ];
+
+const PURPOSE_NAMES = {
+  ENTRY_EXIT: "Entry/Exit Counting",
+  QUEUE: "Queue Management",
+  ZONE: "Zone Management",
+};
+
+const PURPOSE_META = {
+  ENTRY_EXIT: {
+    label: "Entry/Exit Counting",
+    icon: "bi-arrow-left-right",
+    color: "#bc8cff",
+    profile_id: "CROWD_STANDARD",
+    profile_name: "Footfall Counting Line",
+    initial_tool: "COUNTING_LINE",
+    description: "In/Out line crossing & footfall counting",
+  },
+  QUEUE: {
+    label: "Queue Management",
+    icon: "bi-people",
+    color: "#d29922",
+    profile_id: "QUEUE_STANDARD",
+    profile_name: "Queue Area Waiting Zone",
+    initial_tool: "QUEUE_ROI",
+    description: "Barricade queue depth & waiting time tracking",
+  },
+  ZONE: {
+    label: "Zone Management",
+    icon: "bi-bounding-box",
+    color: "#3fb950",
+    profile_id: "CROWD_STANDARD",
+    profile_name: "Crowd Density Zone",
+    initial_tool: "CROWD_ROI",
+    description: "Overcrowding risk & density monitoring",
+  },
+};
 
 export default function Cameras() {
   const navigate = useNavigate();
@@ -30,7 +68,21 @@ export default function Cameras() {
     rtsp_url: DEFAULT_RTSP,
     camera_type: "FRS",
     is_frs: true,
+    ai_purposes: ["ENTRY_EXIT"],
   });
+
+  const [reassignSelectModal, setReassignSelectModal] = useState({
+    open: false,
+    camera: null,
+  });
+  const [reassignConfirmModal, setReassignConfirmModal] = useState({
+    open: false,
+    camera: null,
+    currentPurpose: "",
+    targetPurpose: "",
+  });
+  const [reassignLoading, setReassignLoading] = useState(false);
+
   const [addLoading, setAddLoading] = useState(false);
   const [addError, setAddError] = useState("");
 
@@ -45,12 +97,19 @@ export default function Cameras() {
   const [enrollCategory, setEnrollCategory] = useState("Authorized Watchlist");
   const [enrollLoading, setEnrollLoading] = useState(false);
   const [enrollStatus, setEnrollStatus] = useState(null);
+  const [activeROIEditor, setActiveROIEditor] = useState(null);
 
-  // Load active FRS / RTSP engine camera workers
+  const engineInFlightRef = useRef(false);
+  const engineTimerRef = useRef(null);
+  const isMountedRef = useRef(true);
+
+  // Load active FRS / RTSP engine camera workers with in-flight guard
   const loadEngineCameras = useCallback(async () => {
+    if (engineInFlightRef.current) return;
+    engineInFlightRef.current = true;
     try {
       const res = await fetch(`${BACKEND}/api/v1/frs-engine/cameras`);
-      if (res.ok) {
+      if (res.ok && isMountedRef.current) {
         const data = await res.json();
         const list = Array.isArray(data) ? data : [data];
         setEngineCameras(
@@ -68,11 +127,14 @@ export default function Cameras() {
             zone_code: c.is_frs ? "ZONE-A" : "ZONE-B",
             detections_count: c.detections_count || 0,
             ai_status: c.status === "online" ? "online" : "offline",
+            ai_purposes: c.ai_purposes || (c.is_frs ? [] : ["ENTRY_EXIT"]),
           }))
         );
       }
     } catch (e) {
       console.warn("[Cameras] Engine cams fetch:", e);
+    } finally {
+      engineInFlightRef.current = false;
     }
   }, []);
 
@@ -83,40 +145,119 @@ export default function Cameras() {
         getCameras({ page_size: 50 }),
         getCameraStats(),
       ]);
+      if (!isMountedRef.current) return;
       const camsVal = camsRes.status === "fulfilled" ? camsRes.value : [];
       const statsVal = statsRes.status === "fulfilled" ? statsRes.value : null;
       const list = Array.isArray(camsVal) ? camsVal : (camsVal?.data || []);
-      // Filter out any non-working / deleted cameras
-      setDbCameras(list.filter((c) => c.status === "online" || c.status === "degraded"));
+      // Filter out any non-working, disabled, or legacy duplicate cameras
+      setDbCameras(list.filter((c) => (c.status === "online" || c.status === "degraded") && c.enabled !== false && c.camera_code !== "CAM-KHB-001" && c.id !== "CAM-KHB-001"));
       if (statsVal) setStats(statsVal);
     } catch (e) {
       console.warn(e);
     } finally {
-      setLoading(false);
+      if (isMountedRef.current) setLoading(false);
     }
   }, []);
 
   useEffect(() => {
+    isMountedRef.current = true;
     loadDbCameras();
     loadEngineCameras();
-    const interval = setInterval(loadEngineCameras, 5000);
-    return () => clearInterval(interval);
+
+    const scheduleNext = () => {
+      clearTimeout(engineTimerRef.current);
+      if (typeof document !== "undefined" && document.visibilityState === "hidden") return;
+      engineTimerRef.current = setTimeout(async () => {
+        if (isMountedRef.current && document.visibilityState === "visible") {
+          await loadEngineCameras();
+          scheduleNext();
+        }
+      }, 5000);
+    };
+
+    scheduleNext();
+
+    const handleVis = () => {
+      if (document.visibilityState === "visible") {
+        loadEngineCameras();
+        scheduleNext();
+      } else {
+        clearTimeout(engineTimerRef.current);
+      }
+    };
+    document.addEventListener("visibilitychange", handleVis);
+
+    return () => {
+      isMountedRef.current = false;
+      clearTimeout(engineTimerRef.current);
+      document.removeEventListener("visibilitychange", handleVis);
+    };
   }, [loadDbCameras, loadEngineCameras]);
 
-  // Combine working cameras without duplicates
-  const allWorkingCameras = [
-    ...engineCameras,
-    ...dbCameras
-      .filter((dbCam) => !engineCameras.some((eng) => eng.id === dbCam.id || eng.id === dbCam.camera_code))
-      .map((dbCam) => ({
-        ...dbCam,
-        // If it's CAM-KHB-001, connect it to the live engine stream
-        stream_url: dbCam.id === "CAM-KHB-001" ? "/api/v1/frs-engine/cameras/CAM-KHB-001/stream" : dbCam.stream_url,
-      })),
-  ];
+  // Build isolated FRS and Crowd cameras from physical DB cameras
+  const frsList = [];
+  const crowdList = [];
+
+  if (dbCameras.length > 0) {
+    for (const cam of dbCameras) {
+      // Check if engine is actively streaming for this physical camera
+      const matchingEngineCam = engineCameras.find(
+        (eng) =>
+          eng.id === cam.camera_code ||
+          eng.camera_code === cam.camera_code ||
+          eng.id === cam.id ||
+          (engineCameras.length === 1 && eng.status === "online")
+      );
+      const isEngineStreaming = Boolean(matchingEngineCam && matchingEngineCam.status === "online");
+      const isEngineFrs = isEngineStreaming && Boolean(matchingEngineCam.is_frs || matchingEngineCam.camera_type === "FRS");
+      const isEngineCrowd = isEngineStreaming && !isEngineFrs;
+
+      const isFrsActive = cam.ai_mode === "FRS_ACTIVE" || (cam.is_frs_camera && cam.frs_status === "RUNNING") || isEngineFrs;
+      const isCrowdActive = (cam.ai_mode === "CROWD_ACTIVE" || (!cam.is_frs_camera && cam.crowd_status === "RUNNING") || isEngineCrowd) && !isFrsActive;
+
+      frsList.push({
+        ...cam,
+        id: cam.logical_id_frs || `${cam.camera_code}-FRS`,
+        camera_code: cam.camera_code,
+        name: `${cam.name} (FRS)`,
+        label: `${cam.label || cam.name} [Facial Recognition]`,
+        is_frs: true,
+        is_frs_camera: true,
+        camera_type: "FRS",
+        status: isFrsActive ? "online" : "stopped",
+        is_running: isFrsActive,
+        stream_url: isFrsActive ? `/api/v1/frs-engine/cameras/${cam.camera_code}/stream` : null,
+        fps: isFrsActive ? (cam.fps || 25) : 0,
+      });
+
+      crowdList.push({
+        ...cam,
+        id: cam.logical_id_crowd || `${cam.camera_code}-CROWD`,
+        camera_code: cam.camera_code,
+        name: `${cam.name} (Crowd)`,
+        label: `${cam.label || cam.name} [Crowd Surveillance]`,
+        is_frs: false,
+        is_frs_camera: false,
+        camera_type: "CROWD",
+        status: isCrowdActive ? "online" : "stopped",
+        is_running: isCrowdActive,
+        stream_url: isCrowdActive ? `/api/v1/frs-engine/cameras/${cam.camera_code}-CROWD/stream` : null,
+        fps: isCrowdActive ? (cam.fps || 25) : 0,
+        ai_purposes: matchingEngineCam?.ai_purposes || cam.ai_purposes || ["ENTRY_EXIT", "ZONE"],
+      });
+    }
+  } else if (engineCameras.length > 0) {
+    for (const eng of engineCameras) {
+      if (eng.is_frs) {
+        frsList.push(eng);
+      } else {
+        crowdList.push(eng);
+      }
+    }
+  }
 
   // Apply search filter if any
-  const searchedCameras = allWorkingCameras.filter((cam) => {
+  const filterBySearch = (cam) => {
     if (!search.trim()) return true;
     const q = search.toLowerCase();
     return (
@@ -124,11 +265,11 @@ export default function Cameras() {
       (cam.name || "").toLowerCase().includes(q) ||
       (cam.label || "").toLowerCase().includes(q)
     );
-  });
+  };
 
-  // Divide into FRS and Crowd sections
-  const frsCameras = searchedCameras.filter((c) => Boolean(c.is_frs_camera || c.is_frs || c.camera_type === "FRS"));
-  const crowdCameras = searchedCameras.filter((c) => !Boolean(c.is_frs_camera || c.is_frs || c.camera_type === "FRS"));
+  const frsCameras = frsList.filter(filterBySearch);
+  const crowdCameras = crowdList.filter(filterBySearch);
+  const allWorkingCameras = [...frsCameras, ...crowdCameras];
 
   const handleAddCamera = async () => {
     if (!addForm.rtsp_url.trim()) {
@@ -147,16 +288,37 @@ export default function Cameras() {
         const err = await res.json();
         setAddError(err.detail || "Failed to add camera stream");
       } else {
+        const data = await res.json();
         setShowAddModal(false);
+        await Promise.all([loadDbCameras(), loadEngineCameras()]);
+        if (addForm.camera_type === "FRS") {
+          setActiveTab("FRS");
+        } else {
+          setActiveTab("CROWD");
+          const createdCam = {
+            id: data.camera_id,
+            camera_code: data.camera_id,
+            stream_url: data.stream_url,
+            name: data.name,
+            ai_purposes: addForm.ai_purposes || ["ENTRY_EXIT"],
+          };
+          const firstPurpose = (addForm.ai_purposes && addForm.ai_purposes[0]) || "ENTRY_EXIT";
+          const meta = PURPOSE_META[firstPurpose] || PURPOSE_META.ENTRY_EXIT;
+          setActiveROIEditor({
+            camera: createdCam,
+            profile_id: meta.profile_id,
+            profile_name: meta.profile_name,
+            initial_tool: meta.initial_tool,
+            initial_objective: firstPurpose,
+          });
+        }
         setAddForm({
           name: "Khairatabad Gate FRS Camera",
           rtsp_url: DEFAULT_RTSP,
           camera_type: "FRS",
           is_frs: true,
+          ai_purposes: ["ENTRY_EXIT"],
         });
-        await loadEngineCameras();
-        if (addForm.camera_type === "FRS") setActiveTab("FRS");
-        else if (addForm.camera_type === "CROWD") setActiveTab("CROWD");
       }
     } catch (e) {
       setAddError("Backend connection error — check backend is running");
@@ -165,15 +327,96 @@ export default function Cameras() {
     }
   };
 
+  const handleOpenReassign = (camera) => {
+    setReassignSelectModal({
+      open: true,
+      camera: camera,
+    });
+  };
+
+  const handleSelectTargetPurpose = (targetPurpose) => {
+    const cam = reassignSelectModal.camera;
+    if (!cam) return;
+    const currentPurp = (cam.ai_purposes && cam.ai_purposes[0]) || "ENTRY_EXIT";
+    if (currentPurp === targetPurpose) {
+      setReassignSelectModal({ open: false, camera: null });
+      return;
+    }
+    setReassignSelectModal({ open: false, camera: null });
+    setReassignConfirmModal({
+      open: true,
+      camera: cam,
+      currentPurpose: currentPurp,
+      targetPurpose: targetPurpose,
+    });
+  };
+
+  const handleConfirmReassign = async () => {
+    const { camera, targetPurpose } = reassignConfirmModal;
+    if (!camera || !targetPurpose) return;
+    setReassignLoading(true);
+    try {
+      const camCode = camera.camera_code || camera.id.replace("-CROWD", "").replace("-FRS", "");
+      const res = await fetch(`${BACKEND}/api/v1/frs-engine/cameras/${camCode}/reassign-purpose?new_purpose=${targetPurpose}`, {
+        method: "PATCH",
+      });
+      if (!res.ok) {
+        const err = await res.json().catch(() => ({}));
+        alert(err.detail || "Failed to reassign camera purpose");
+        return;
+      }
+
+      await Promise.all([loadDbCameras(), loadEngineCameras()]);
+
+      if (fullscreenCamera && (fullscreenCamera.id === camera.id || fullscreenCamera.camera_code === camCode)) {
+        setFullscreenCamera((prev) => (prev ? { ...prev, ai_purposes: [targetPurpose] } : null));
+      }
+
+      setReassignConfirmModal({ open: false, camera: null, currentPurpose: "", targetPurpose: "" });
+
+      const meta = PURPOSE_META[targetPurpose] || PURPOSE_META.ENTRY_EXIT;
+      setActiveROIEditor({
+        camera: { ...camera, ai_purposes: [targetPurpose] },
+        profile_id: meta.profile_id,
+        profile_name: meta.profile_name,
+        initial_tool: meta.initial_tool,
+        initial_objective: targetPurpose,
+      });
+    } catch (err) {
+      console.error("Failed to reassign camera purpose:", err);
+      alert("Error reassigning camera: " + (err.message || err));
+    } finally {
+      setReassignLoading(false);
+    }
+  };
+
   const handleToggleFrs = async (camera, enabled) => {
     try {
-      await toggleCameraFRS(camera.id || camera.camera_code, enabled);
+      const code = camera.camera_code || camera.id.replace("-FRS", "").replace("-CROWD", "");
+      await toggleCameraFRS(code, enabled);
       await Promise.all([loadDbCameras(), loadEngineCameras()]);
-      if (fullscreenCamera && (fullscreenCamera.id === camera.id || fullscreenCamera.camera_code === camera.camera_code)) {
+      if (fullscreenCamera && (fullscreenCamera.id === camera.id || fullscreenCamera.camera_code === code)) {
         setFullscreenCamera((prev) => (prev ? { ...prev, is_frs_camera: enabled, is_frs: enabled, camera_type: enabled ? "FRS" : "CROWD" } : null));
       }
     } catch (e) {
       console.error("Failed to toggle camera FRS state:", e);
+    }
+  };
+
+  const handleToggleCrowdAI = async (camera, enabled) => {
+    try {
+      const code = camera.camera_code || camera.id.replace("-FRS", "").replace("-CROWD", "");
+      if (enabled) {
+        await switchCameraAIMode(code, "CROWD");
+      } else {
+        await switchCameraAIMode(code, "IDLE");
+      }
+      await Promise.all([loadDbCameras(), loadEngineCameras()]);
+      if (fullscreenCamera && (fullscreenCamera.id === camera.id || fullscreenCamera.camera_code === code)) {
+        setFullscreenCamera((prev) => (prev ? { ...prev, is_running: enabled, status: enabled ? "online" : "stopped" } : null));
+      }
+    } catch (e) {
+      console.error("Failed to toggle Crowd AI model:", e);
     }
   };
 
@@ -506,15 +749,28 @@ export default function Cameras() {
                     gap: 12,
                   }}
                 >
-                  {crowdCameras.map((cam) => (
-                    <CameraCard
-                      key={cam.id}
-                      camera={cam}
-                      onSelect={(c) => setFullscreenCamera(c)}
-                      onFullscreen={(c) => setFullscreenCamera(c)}
-                      onToggleFrs={handleToggleFrs}
-                    />
-                  ))}
+                  {crowdCameras.map((cam) => {
+                    const currentPurp = (cam.ai_purposes && cam.ai_purposes[0]) || "ENTRY_EXIT";
+                    const meta = PURPOSE_META[currentPurp] || PURPOSE_META.ENTRY_EXIT;
+                    return (
+                      <CameraCard
+                        key={cam.id}
+                        camera={cam}
+                        onSelect={(c) => setFullscreenCamera(c)}
+                        onFullscreen={(c) => setFullscreenCamera(c)}
+                        onToggleFrs={handleToggleFrs}
+                        onToggleCrowdAI={handleToggleCrowdAI}
+                        onRequestReassign={handleOpenReassign}
+                        onConfigureROI={(c) => setActiveROIEditor({
+                          camera: c,
+                          profile_id: meta.profile_id,
+                          profile_name: meta.profile_name,
+                          initial_tool: meta.initial_tool,
+                          initial_objective: currentPurp,
+                        })}
+                      />
+                    );
+                  })}
                 </div>
               )}
             </div>
@@ -574,6 +830,133 @@ export default function Cameras() {
                   </button>
                 </div>
               </div>
+
+              {/* If Crowd Camera is chosen: Single-Choice Purpose Profile */}
+              {addForm.camera_type === "CROWD" && (
+                <div style={{ background: "rgba(15, 23, 42, 0.75)", padding: 12, borderRadius: 8, border: "1px solid var(--cc-border)" }}>
+                  <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", marginBottom: 8 }}>
+                    <div className="cc-label" style={{ marginBottom: 0, color: "var(--cc-text-primary)", fontWeight: 700 }}>
+                      Camera Purpose / Profile (Single Selection):
+                    </div>
+                    <span style={{ fontSize: 10, color: "var(--cc-accent)" }}>
+                      1 Profile Active per Camera
+                    </span>
+                  </div>
+
+                  <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr 1fr", gap: 8 }}>
+                    {/* 1. Entry / Exit */}
+                    <div
+                      onClick={() => setAddForm((f) => ({ ...f, ai_purposes: ["ENTRY_EXIT"] }))}
+                      style={{
+                        padding: "8px 10px",
+                        borderRadius: 6,
+                        cursor: "pointer",
+                        border: (addForm.ai_purposes?.[0] === "ENTRY_EXIT")
+                          ? "2px solid #bc8cff"
+                          : "1px solid var(--cc-border)",
+                        background: (addForm.ai_purposes?.[0] === "ENTRY_EXIT")
+                          ? "rgba(188, 140, 255, 0.15)"
+                          : "transparent",
+                        transition: "all 0.15s ease",
+                        display: "flex",
+                        flexDirection: "column",
+                        gap: 4,
+                      }}
+                    >
+                      <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between" }}>
+                        <div style={{ display: "flex", alignItems: "center", gap: 6, fontWeight: 700, fontSize: 11, color: (addForm.ai_purposes?.[0] === "ENTRY_EXIT") ? "#bc8cff" : "var(--cc-text-primary)" }}>
+                          <i className="bi bi-arrow-left-right" />
+                          <span>Entry / Exit</span>
+                        </div>
+                        <input
+                          type="radio"
+                          name="crowd_purpose_radio"
+                          checked={addForm.ai_purposes?.[0] === "ENTRY_EXIT"}
+                          onChange={() => setAddForm((f) => ({ ...f, ai_purposes: ["ENTRY_EXIT"] }))}
+                          style={{ cursor: "pointer", accentColor: "#bc8cff" }}
+                        />
+                      </div>
+                      <span style={{ fontSize: 9.5, color: "var(--cc-text-muted)", lineHeight: 1.3 }}>
+                        In/Out line crossing counting
+                      </span>
+                    </div>
+
+                    {/* 2. Queue Area */}
+                    <div
+                      onClick={() => setAddForm((f) => ({ ...f, ai_purposes: ["QUEUE"] }))}
+                      style={{
+                        padding: "8px 10px",
+                        borderRadius: 6,
+                        cursor: "pointer",
+                        border: (addForm.ai_purposes?.[0] === "QUEUE")
+                          ? "2px solid #d29922"
+                          : "1px solid var(--cc-border)",
+                        background: (addForm.ai_purposes?.[0] === "QUEUE")
+                          ? "rgba(210, 153, 34, 0.15)"
+                          : "transparent",
+                        transition: "all 0.15s ease",
+                        display: "flex",
+                        flexDirection: "column",
+                        gap: 4,
+                      }}
+                    >
+                      <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between" }}>
+                        <div style={{ display: "flex", alignItems: "center", gap: 6, fontWeight: 700, fontSize: 11, color: (addForm.ai_purposes?.[0] === "QUEUE") ? "#d29922" : "var(--cc-text-primary)" }}>
+                          <i className="bi bi-people" />
+                          <span>Queue Area</span>
+                        </div>
+                        <input
+                          type="radio"
+                          name="crowd_purpose_radio"
+                          checked={addForm.ai_purposes?.[0] === "QUEUE"}
+                          onChange={() => setAddForm((f) => ({ ...f, ai_purposes: ["QUEUE"] }))}
+                          style={{ cursor: "pointer", accentColor: "#d29922" }}
+                        />
+                      </div>
+                      <span style={{ fontSize: 9.5, color: "var(--cc-text-muted)", lineHeight: 1.3 }}>
+                        Barricade wait times & depth
+                      </span>
+                    </div>
+
+                    {/* 3. Zone Density */}
+                    <div
+                      onClick={() => setAddForm((f) => ({ ...f, ai_purposes: ["ZONE"] }))}
+                      style={{
+                        padding: "8px 10px",
+                        borderRadius: 6,
+                        cursor: "pointer",
+                        border: (addForm.ai_purposes?.[0] === "ZONE")
+                          ? "2px solid #3fb950"
+                          : "1px solid var(--cc-border)",
+                        background: (addForm.ai_purposes?.[0] === "ZONE")
+                          ? "rgba(63, 185, 80, 0.15)"
+                          : "transparent",
+                        transition: "all 0.15s ease",
+                        display: "flex",
+                        flexDirection: "column",
+                        gap: 4,
+                      }}
+                    >
+                      <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between" }}>
+                        <div style={{ display: "flex", alignItems: "center", gap: 6, fontWeight: 700, fontSize: 11, color: (addForm.ai_purposes?.[0] === "ZONE") ? "#3fb950" : "var(--cc-text-primary)" }}>
+                          <i className="bi bi-bounding-box" />
+                          <span>Zone Density</span>
+                        </div>
+                        <input
+                          type="radio"
+                          name="crowd_purpose_radio"
+                          checked={addForm.ai_purposes?.[0] === "ZONE"}
+                          onChange={() => setAddForm((f) => ({ ...f, ai_purposes: ["ZONE"] }))}
+                          style={{ cursor: "pointer", accentColor: "#3fb950" }}
+                        />
+                      </div>
+                      <span style={{ fontSize: 9.5, color: "var(--cc-text-muted)", lineHeight: 1.3 }}>
+                        Area density & surge alerts
+                      </span>
+                    </div>
+                  </div>
+                </div>
+              )}
 
               <div>
                 <div className="cc-label" style={{ marginBottom: 4 }}>Camera Location Name</div>
@@ -710,21 +1093,57 @@ export default function Cameras() {
 
               {/* Controls */}
               <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
-                <button
-                  className="cc-btn"
-                  style={{
-                    fontSize: 11,
-                    padding: "4px 10px",
-                    fontWeight: 700,
-                    background: (fullscreenCamera.is_frs || fullscreenCamera.is_frs_camera) ? "var(--cc-blue-dim)" : "transparent",
-                    color: (fullscreenCamera.is_frs || fullscreenCamera.is_frs_camera) ? "var(--cc-accent)" : "var(--cc-text-muted)",
-                    borderColor: (fullscreenCamera.is_frs || fullscreenCamera.is_frs_camera) ? "var(--cc-blue-border)" : "var(--cc-border)",
-                  }}
-                  onClick={() => handleToggleFrs(fullscreenCamera, !(fullscreenCamera.is_frs || fullscreenCamera.is_frs_camera))}
-                >
-                  <i className={`bi ${(fullscreenCamera.is_frs || fullscreenCamera.is_frs_camera) ? "bi-person-check-fill" : "bi-person-bounding-box"}`} />
-                  {(fullscreenCamera.is_frs || fullscreenCamera.is_frs_camera) ? "FRS ACTIVE" : "ENABLE FRS"}
-                </button>
+                {!(fullscreenCamera.camera_type === "CROWD" || !fullscreenCamera.is_frs) ? (
+                  /* FRS Camera: Keep existing FRS Active / Enable FRS button unchanged */
+                  <button
+                    className="cc-btn"
+                    style={{
+                      fontSize: 11,
+                      padding: "4px 10px",
+                      fontWeight: 700,
+                      background: (fullscreenCamera.is_frs || fullscreenCamera.is_frs_camera) ? "var(--cc-blue-dim)" : "transparent",
+                      color: (fullscreenCamera.is_frs || fullscreenCamera.is_frs_camera) ? "var(--cc-accent)" : "var(--cc-text-muted)",
+                      borderColor: (fullscreenCamera.is_frs || fullscreenCamera.is_frs_camera) ? "var(--cc-blue-border)" : "var(--cc-border)",
+                    }}
+                    onClick={() => handleToggleFrs(fullscreenCamera, !(fullscreenCamera.is_frs || fullscreenCamera.is_frs_camera))}
+                  >
+                    <i className={`bi ${(fullscreenCamera.is_frs || fullscreenCamera.is_frs_camera) ? "bi-person-check-fill" : "bi-person-bounding-box"}`} />
+                    {(fullscreenCamera.is_frs || fullscreenCamera.is_frs_camera) ? "FRS ACTIVE" : "ENABLE FRS"}
+                  </button>
+                ) : (
+                  /* Crowd Camera: NEVER show "ENABLE FRS"! Show "ENABLE AI MODEL" / "CROWD AI ACTIVE" */
+                  <button
+                    className="cc-btn"
+                    style={{
+                      fontSize: 11,
+                      padding: "4px 10px",
+                      fontWeight: 700,
+                      background: fullscreenCamera.is_running ? "rgba(63, 185, 80, 0.15)" : "transparent",
+                      color: fullscreenCamera.is_running ? "var(--cc-green)" : "var(--cc-text-primary)",
+                      borderColor: fullscreenCamera.is_running ? "rgba(63, 185, 80, 0.4)" : "var(--cc-border)",
+                      display: "flex",
+                      alignItems: "center",
+                      gap: 5,
+                    }}
+                    onClick={async () => {
+                      const code = fullscreenCamera.camera_code || fullscreenCamera.id.replace("-CROWD", "");
+                      try {
+                        if (fullscreenCamera.is_running) {
+                          await switchCameraAIMode(code, "IDLE");
+                        } else {
+                          await switchCameraAIMode(code, "CROWD");
+                        }
+                        await Promise.all([loadDbCameras(), loadEngineCameras()]);
+                        setFullscreenCamera((prev) => prev ? ({ ...prev, is_running: !prev.is_running, status: !prev.is_running ? "online" : "stopped" }) : null);
+                      } catch (err) {
+                        console.error("Failed to toggle Crowd AI model:", err);
+                      }
+                    }}
+                  >
+                    <i className={`bi ${fullscreenCamera.is_running ? "bi-check-circle-fill" : "bi-cpu-fill"}`} />
+                    {fullscreenCamera.is_running ? "CROWD AI ACTIVE" : "ENABLE AI MODEL"}
+                  </button>
+                )}
 
                 <button
                   className="cc-btn cc-btn-primary"
@@ -785,7 +1204,9 @@ export default function Cameras() {
                       ? (fullscreenCamera.stream_url.startsWith("http")
                           ? `${fullscreenCamera.stream_url}?t=${modalRetry}`
                           : `${BACKEND}${fullscreenCamera.stream_url}?t=${modalRetry}`)
-                      : `${BACKEND}/api/v1/frs-engine/cameras/${fullscreenCamera.id || fullscreenCamera.camera_code}/stream?t=${modalRetry}`
+                      : (fullscreenCamera.is_frs || fullscreenCamera.is_frs_camera
+                          ? `${BACKEND}/api/v1/frs-engine/cameras/${fullscreenCamera.camera_code || fullscreenCamera.id}/stream?t=${modalRetry}`
+                          : `${BACKEND}/api/v1/frs-engine/cameras/${(fullscreenCamera.camera_code || fullscreenCamera.id).replace("-CROWD", "")}-CROWD/stream?t=${modalRetry}`)
                   }
                   alt={`Live Fullscreen ${fullscreenCamera.id}`}
                   style={{ width: "100%", height: "100%", objectFit: "contain", display: "block" }}
@@ -819,7 +1240,7 @@ export default function Cameras() {
                 </div>
               </div>
 
-              {(fullscreenCamera.is_frs || fullscreenCamera.is_frs_camera) && (
+              {(fullscreenCamera.is_frs || fullscreenCamera.is_frs_camera) ? (
                 <div
                   style={{
                     position: "absolute",
@@ -837,10 +1258,28 @@ export default function Cameras() {
                 >
                   FRS BIOMETRIC AI DETECTING
                 </div>
+              ) : (
+                <div
+                  style={{
+                    position: "absolute",
+                    top: 12,
+                    right: 16,
+                    fontSize: 10,
+                    color: "var(--cc-green)",
+                    fontWeight: 800,
+                    background: "rgba(0,0,0,0.8)",
+                    padding: "3px 8px",
+                    borderRadius: 3,
+                    border: "1px solid rgba(63,185,80,0.4)",
+                    backdropFilter: "blur(4px)",
+                  }}
+                >
+                  CROWD SURVEILLANCE & DENSITY
+                </div>
               )}
             </div>
 
-            {/* 1-Click Enrollment & Quick Actions Bar */}
+            {/* Quick Actions Bar */}
             <div
               style={{
                 padding: "10px 18px",
@@ -853,40 +1292,80 @@ export default function Cameras() {
                 flexWrap: "wrap",
               }}
             >
-              {/* Enrollment Bar */}
-              <div style={{ display: "flex", alignItems: "center", gap: 10, flex: 1, minWidth: 320 }}>
-                <span style={{ fontSize: 12, fontWeight: 700, color: "var(--cc-accent)", whiteSpace: "nowrap", display: "flex", alignItems: "center", gap: 6 }}>
-                  <i className="bi bi-camera-fill" /> 1-Click Face Enroll:
-                </span>
-                <input
-                  value={enrollName}
-                  onChange={(e) => setEnrollName(e.target.value)}
-                  placeholder="Enter person name to enroll (e.g. Ramesh Kumar)..."
-                  style={{
-                    flex: 1,
-                    maxWidth: 280,
-                    padding: "6px 10px",
-                    background: "var(--cc-bg-input)",
-                    border: "1px solid var(--cc-border)",
-                    borderRadius: "var(--cc-radius)",
-                    color: "var(--cc-text-primary)",
-                    fontSize: 12,
-                  }}
-                  onKeyDown={(e) => e.key === "Enter" && handleEnrollFromCamera()}
-                />
-                <button
-                  className="cc-btn cc-btn-primary"
-                  onClick={handleEnrollFromCamera}
-                  disabled={enrollLoading || !enrollName.trim()}
-                  style={{ fontSize: 11, padding: "6px 12px", whiteSpace: "nowrap", display: "flex", alignItems: "center", gap: 6 }}
-                >
-                  {enrollLoading ? (
-                    <><i className="bi bi-hourglass-split" /> Enrolling...</>
-                  ) : (
-                    <><i className="bi bi-person-plus-fill" /> Snap & Enroll Face</>
-                  )}
-                </button>
-              </div>
+              {(fullscreenCamera.is_frs || fullscreenCamera.is_frs_camera) ? (
+                <div style={{ display: "flex", alignItems: "center", gap: 10, flex: 1, minWidth: 320 }}>
+                  <span style={{ fontSize: 12, fontWeight: 700, color: "var(--cc-accent)", whiteSpace: "nowrap", display: "flex", alignItems: "center", gap: 6 }}>
+                    <i className="bi bi-camera-fill" /> 1-Click Face Enroll:
+                  </span>
+                  <input
+                    value={enrollName}
+                    onChange={(e) => setEnrollName(e.target.value)}
+                    placeholder="Enter person name to enroll (e.g. Ramesh Kumar)..."
+                    style={{
+                      flex: 1,
+                      maxWidth: 280,
+                      padding: "6px 10px",
+                      background: "var(--cc-bg-input)",
+                      border: "1px solid var(--cc-border)",
+                      borderRadius: "var(--cc-radius)",
+                      color: "var(--cc-text-primary)",
+                      fontSize: 12,
+                    }}
+                    onKeyDown={(e) => e.key === "Enter" && handleEnrollFromCamera()}
+                  />
+                  <button
+                    className="cc-btn cc-btn-primary"
+                    onClick={handleEnrollFromCamera}
+                    disabled={enrollLoading || !enrollName.trim()}
+                    style={{ fontSize: 11, padding: "6px 12px", whiteSpace: "nowrap", display: "flex", alignItems: "center", gap: 6 }}
+                  >
+                    {enrollLoading ? (
+                      <><i className="bi bi-hourglass-split" /> Enrolling...</>
+                    ) : (
+                      <><i className="bi bi-person-plus-fill" /> Snap & Enroll Face</>
+                    )}
+                  </button>
+                </div>
+              ) : (() => {
+                const curPurp = (fullscreenCamera.ai_purposes && fullscreenCamera.ai_purposes[0]) || "ENTRY_EXIT";
+                const curMeta = PURPOSE_META[curPurp] || PURPOSE_META.ENTRY_EXIT;
+                return (
+                  <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: 12, flex: 1, flexWrap: "wrap" }}>
+                    <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
+                      <span style={{ fontSize: 12, fontWeight: 700, color: curMeta.color, display: "flex", alignItems: "center", gap: 6 }}>
+                        <i className={`bi ${curMeta.icon}`} /> Assigned: {curMeta.label}
+                      </span>
+                      <span style={{ fontSize: 11, color: "var(--cc-text-muted)" }}>
+                        {curMeta.description}
+                      </span>
+                    </div>
+                    <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
+                      <button
+                        className="cc-btn cc-btn-secondary"
+                        style={{ fontSize: 11, padding: "5px 12px", borderColor: curMeta.color, color: curMeta.color, display: "flex", alignItems: "center", gap: 6, fontWeight: 600 }}
+                        onClick={() => setActiveROIEditor({
+                          camera: fullscreenCamera,
+                          profile_id: curMeta.profile_id,
+                          profile_name: curMeta.profile_name,
+                          initial_tool: curMeta.initial_tool,
+                          initial_objective: curPurp,
+                        })}
+                        title={`Configure ROI / Lines for ${curMeta.label}`}
+                      >
+                        <i className="bi bi-vector-pen" /> Configure {curMeta.label} ROI
+                      </button>
+                      <button
+                        className="cc-btn"
+                        style={{ fontSize: 11, padding: "5px 12px", borderColor: "rgba(227, 179, 65, 0.5)", color: "#e3b341", background: "rgba(227, 179, 65, 0.12)", display: "flex", alignItems: "center", gap: 6, fontWeight: 600 }}
+                        onClick={() => handleOpenReassign(fullscreenCamera)}
+                        title="Switch this camera to another purpose (Entry/Exit, Queue, Zone)"
+                      >
+                        <i className="bi bi-arrow-repeat" /> Switch Purpose
+                      </button>
+                    </div>
+                  </div>
+                );
+              })()}
 
               {enrollStatus && (
                 <div
@@ -906,6 +1385,252 @@ export default function Cameras() {
                   {enrollStatus.message}
                 </div>
               )}
+            </div>
+          </div>
+        </div>
+      )}
+
+      {activeROIEditor && (
+        <ROIEditor
+          camera={activeROIEditor.camera}
+          profileId={activeROIEditor.profile_id}
+          profileName={activeROIEditor.profile_name}
+          initialTool={activeROIEditor.initial_tool}
+          initialObjective={activeROIEditor.initial_objective}
+          streamUrl={
+            `${BACKEND}/api/v1/frs-engine/cameras/${(activeROIEditor.camera.camera_code || activeROIEditor.camera.id).replace("-CROWD", "").replace("-FRS", "")}/raw-stream`
+          }
+          onClose={() => setActiveROIEditor(null)}
+          onSaved={async () => {
+            await Promise.all([loadDbCameras(), loadEngineCameras()]);
+          }}
+        />
+      )}
+
+      {/* 5. Purpose Selection Dialog (when user clicks Switch Purpose) */}
+      {reassignSelectModal.open && reassignSelectModal.camera && (
+        <div
+          style={{
+            position: "fixed",
+            inset: 0,
+            background: "rgba(0,0,0,0.75)",
+            backdropFilter: "blur(4px)",
+            zIndex: 1050,
+            display: "flex",
+            alignItems: "center",
+            justifyContent: "center",
+            padding: 16,
+          }}
+        >
+          <div className="cc-card" style={{ width: 500, maxWidth: "95vw", padding: 22, position: "relative", border: "1px solid var(--cc-border)" }}>
+            <button
+              onClick={() => setReassignSelectModal({ open: false, camera: null })}
+              style={{ position: "absolute", top: 14, right: 14, background: "none", border: "none", color: "var(--cc-text-muted)", fontSize: 18, cursor: "pointer" }}
+            >
+              <i className="bi bi-x-lg" />
+            </button>
+            <div className="cc-section-title" style={{ marginBottom: 4, display: "flex", alignItems: "center", gap: 8 }}>
+              <i className="bi bi-arrow-repeat" style={{ color: "#e3b341" }} />
+              <span>Switch Camera Purpose</span>
+            </div>
+            <div style={{ fontSize: 11, color: "var(--cc-text-muted)", marginBottom: 16 }}>
+              Camera: <strong style={{ color: "var(--cc-text-primary)" }}>{reassignSelectModal.camera.name || reassignSelectModal.camera.id}</strong> ({reassignSelectModal.camera.camera_code || reassignSelectModal.camera.id})
+            </div>
+
+            <div style={{ display: "flex", flexDirection: "column", gap: 10, marginBottom: 18 }}>
+              {["ENTRY_EXIT", "QUEUE", "ZONE"].map((purposeKey) => {
+                const meta = PURPOSE_META[purposeKey];
+                const currentPurp = (reassignSelectModal.camera.ai_purposes && reassignSelectModal.camera.ai_purposes[0]) || "ENTRY_EXIT";
+                const isCurrent = currentPurp === purposeKey;
+
+                return (
+                  <div
+                    key={purposeKey}
+                    onClick={() => {
+                      if (!isCurrent) handleSelectTargetPurpose(purposeKey);
+                    }}
+                    style={{
+                      padding: "12px 14px",
+                      borderRadius: 8,
+                      border: isCurrent ? `2px solid ${meta.color}` : "1px solid var(--cc-border)",
+                      background: isCurrent ? `${meta.color}15` : "rgba(15, 23, 42, 0.6)",
+                      cursor: isCurrent ? "default" : "pointer",
+                      display: "flex",
+                      alignItems: "center",
+                      justifyContent: "space-between",
+                      transition: "all 0.15s ease",
+                    }}
+                  >
+                    <div style={{ display: "flex", alignItems: "center", gap: 12 }}>
+                      <div
+                        style={{
+                          width: 36,
+                          height: 36,
+                          borderRadius: 6,
+                          background: `${meta.color}20`,
+                          color: meta.color,
+                          display: "flex",
+                          alignItems: "center",
+                          justifyContent: "center",
+                          fontSize: 18,
+                        }}
+                      >
+                        <i className={`bi ${meta.icon}`} />
+                      </div>
+                      <div>
+                        <div style={{ fontSize: 13, fontWeight: 700, color: isCurrent ? meta.color : "var(--cc-text-primary)" }}>
+                          {meta.label}
+                        </div>
+                        <div style={{ fontSize: 11, color: "var(--cc-text-muted)" }}>
+                          {meta.description}
+                        </div>
+                      </div>
+                    </div>
+                    {isCurrent ? (
+                      <span
+                        style={{
+                          fontSize: 10,
+                          fontWeight: 700,
+                          padding: "3px 8px",
+                          borderRadius: 4,
+                          background: `${meta.color}25`,
+                          color: meta.color,
+                          border: `1px solid ${meta.color}50`,
+                        }}
+                      >
+                        Current Active
+                      </span>
+                    ) : (
+                      <span style={{ fontSize: 11, color: "var(--cc-accent)", fontWeight: 600, display: "flex", alignItems: "center", gap: 4 }}>
+                        Switch <i className="bi bi-chevron-right" />
+                      </span>
+                    )}
+                  </div>
+                );
+              })}
+            </div>
+
+            <div style={{ display: "flex", justifyContent: "flex-end" }}>
+              <button
+                type="button"
+                className="cc-btn"
+                onClick={() => setReassignSelectModal({ open: false, camera: null })}
+                style={{ padding: "6px 14px", fontSize: 11 }}
+              >
+                Close
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* 6. Purpose Reassignment Confirmation Dialog */}
+      {reassignConfirmModal.open && reassignConfirmModal.camera && (
+        <div
+          style={{
+            position: "fixed",
+            inset: 0,
+            background: "rgba(0,0,0,0.8)",
+            backdropFilter: "blur(4px)",
+            zIndex: 1100,
+            display: "flex",
+            alignItems: "center",
+            justifyContent: "center",
+            padding: 16,
+          }}
+        >
+          <div
+            className="cc-card"
+            style={{
+              width: 530,
+              maxWidth: "95vw",
+              padding: 24,
+              border: "1px solid rgba(227, 179, 65, 0.5)",
+              boxShadow: "0 12px 48px rgba(0,0,0,0.85)",
+            }}
+          >
+            <div style={{ display: "flex", alignItems: "center", gap: 12, marginBottom: 14 }}>
+              <div
+                style={{
+                  width: 40,
+                  height: 40,
+                  borderRadius: "50%",
+                  background: "rgba(227, 179, 65, 0.15)",
+                  display: "flex",
+                  alignItems: "center",
+                  justifyContent: "center",
+                  color: "var(--cc-yellow)",
+                  fontSize: 20,
+                  flexShrink: 0,
+                }}
+              >
+                <i className="bi bi-exclamation-triangle-fill" />
+              </div>
+              <div>
+                <div style={{ fontSize: 16, fontWeight: 700, color: "var(--cc-text-primary)" }}>
+                  Confirm Purpose Reassignment
+                </div>
+                <div style={{ fontSize: 11, color: "var(--cc-text-muted)" }}>
+                  Camera: {reassignConfirmModal.camera?.name || reassignConfirmModal.camera?.id} ({reassignConfirmModal.camera?.camera_code || reassignConfirmModal.camera?.id})
+                </div>
+              </div>
+            </div>
+
+            <p style={{ fontSize: 13.5, lineHeight: 1.6, color: "var(--cc-text-primary)", margin: "16px 0", background: "rgba(255,255,255,0.03)", padding: "12px 14px", borderRadius: 6, border: "1px solid var(--cc-border)" }}>
+              This camera is already assigned to <strong>{PURPOSE_NAMES[reassignConfirmModal.currentPurpose] || reassignConfirmModal.currentPurpose}</strong>. Do you want to remove the current assignment and use this camera for <strong>{PURPOSE_NAMES[reassignConfirmModal.targetPurpose] || reassignConfirmModal.targetPurpose}</strong> instead?
+            </p>
+
+            <div
+              style={{
+                padding: "10px 14px",
+                background: "rgba(227, 179, 65, 0.08)",
+                border: "1px solid rgba(227, 179, 65, 0.25)",
+                borderRadius: 6,
+                fontSize: 11,
+                color: "var(--cc-text-muted)",
+                marginBottom: 20,
+                lineHeight: 1.5,
+              }}
+            >
+              <div style={{ color: "var(--cc-yellow)", fontWeight: 700, marginBottom: 3, display: "flex", alignItems: "center", gap: 5 }}>
+                <i className="bi bi-info-circle-fill" /> Pipeline Disconnect & Reassignment:
+              </div>
+              The existing {PURPOSE_NAMES[reassignConfirmModal.currentPurpose] || reassignConfirmModal.currentPurpose} configuration and pipeline will be stopped and disconnected first, and then the camera will be reassigned and connected to {PURPOSE_NAMES[reassignConfirmModal.targetPurpose] || reassignConfirmModal.targetPurpose}.
+            </div>
+
+            <div style={{ display: "flex", justifyContent: "flex-end", gap: 10 }}>
+              <button
+                type="button"
+                className="cc-btn"
+                onClick={() => setReassignConfirmModal({ open: false, camera: null, currentPurpose: "", targetPurpose: "" })}
+                disabled={reassignLoading}
+                style={{ padding: "8px 16px", fontSize: 12 }}
+              >
+                Cancel
+              </button>
+              <button
+                type="button"
+                className="cc-btn cc-btn-primary"
+                onClick={handleConfirmReassign}
+                disabled={reassignLoading}
+                style={{
+                  padding: "8px 20px",
+                  fontSize: 12,
+                  background: "var(--cc-yellow)",
+                  color: "#000",
+                  borderColor: "var(--cc-yellow)",
+                  fontWeight: 700,
+                  display: "flex",
+                  alignItems: "center",
+                  gap: 6,
+                }}
+              >
+                {reassignLoading ? (
+                  <><i className="bi bi-hourglass-split" /> Reassigning...</>
+                ) : (
+                  <><i className="bi bi-check-circle-fill" /> OK / Confirm</>
+                )}
+              </button>
             </div>
           </div>
         </div>

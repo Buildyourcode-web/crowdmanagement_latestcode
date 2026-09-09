@@ -78,8 +78,8 @@ class FaceModel:
             name=MODEL_NAME,
             providers=providers,
         )
-        self._app.prepare(ctx_id=0 if use_gpu else -1, det_size=(DET_SIZE, DET_SIZE))
-        print(f"[FaceModel] Loaded: {MODEL_NAME}  Providers={providers}  det_size={DET_SIZE}")
+        self._app.prepare(ctx_id=0 if use_gpu else -1, det_size=(DET_SIZE, DET_SIZE), det_thresh=0.35)
+        print(f"[FaceModel] Loaded: {MODEL_NAME}  Providers={providers}  det_size={DET_SIZE}  det_thresh=0.35")
 
     # ── Public API ─────────────────────────────────────────────────────────────
 
@@ -105,8 +105,8 @@ class FaceModel:
             bbox = face.bbox.astype(int)  # [x1, y1, x2, y2]
             w, h = bbox[2] - bbox[0], bbox[3] - bbox[1]
 
-            # Filter tiny detections — likely noise
-            if w < 20 or h < 20:
+            # Filter tiny detections — allow distant faces down to 14px
+            if w < 14 or h < 14:
                 continue
 
             det_score = float(face.det_score) if hasattr(face, "det_score") else 0.9

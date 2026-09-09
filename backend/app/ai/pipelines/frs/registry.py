@@ -27,6 +27,15 @@ class FRSPipelineRegistry:
         return cls._pipelines.get(camera_code)
 
     @classmethod
+    async def stop_pipeline(cls, camera_code: str) -> bool:
+        pipeline = cls.get(camera_code)
+        if not pipeline:
+            return False
+        await pipeline.stop()
+        cls.unregister(camera_code)
+        return True
+
+    @classmethod
     def get_all(cls) -> Dict[str, FRSPipeline]:
         return dict(cls._pipelines)
 
