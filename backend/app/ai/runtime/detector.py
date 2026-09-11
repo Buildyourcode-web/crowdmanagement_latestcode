@@ -21,7 +21,10 @@ import subprocess
 import time
 from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional
-import psutil
+try:
+    import psutil
+except ImportError:
+    psutil = None
 from loguru import logger
 
 
@@ -55,15 +58,20 @@ class RuntimeDetector:
     @staticmethod
     def detect_cpu() -> Dict[str, Any]:
         """Detect host CPU specifications and current load."""
-        try:
-            freq = psutil.cpu_freq()
-            freq_mhz = round(freq.current, 1) if freq and freq.current else None
-        except Exception:
+        if psutil is not None:
+            try:
+                freq = psutil.cpu_freq()
+                freq_mhz = round(freq.current, 1) if freq and freq.current else None
+            except Exception:
+                freq_mhz = None
+            physical_cores = psutil.cpu_count(logical=False) or 1
+            logical_cores = psutil.cpu_count(logical=True) or physical_cores
+            usage_pct = psutil.cpu_percent(interval=None)
+        else:
             freq_mhz = None
-
-        physical_cores = psutil.cpu_count(logical=False) or 1
-        logical_cores = psutil.cpu_count(logical=True) or physical_cores
-        usage_pct = psutil.cpu_percent(interval=None)
+            physical_cores = os.cpu_count() or 1
+            logical_cores = physical_cores
+            usage_pct = 10.0
 
         return {
             "processor": platform.processor() or platform.machine(),

@@ -1,4 +1,8 @@
-import psutil
+try:
+    import psutil
+except ImportError:
+    psutil = None
+
 from app.schemas.system import (
     GPUClusterStatus,
     GPUUnitStatus,
@@ -10,9 +14,15 @@ from app.schemas.system import (
 class SystemService:
     @staticmethod
     def get_system_health() -> SystemHealthResponse:
-        # Real CPU and RAM from psutil
-        cpu_pct = round(psutil.cpu_percent(interval=0.1))
-        ram_pct = round(psutil.virtual_memory().percent)
+        # Real CPU and RAM from psutil if available
+        if psutil is not None:
+            try:
+                cpu_pct = round(psutil.cpu_percent(interval=0.1))
+                ram_pct = round(psutil.virtual_memory().percent)
+            except Exception:
+                cpu_pct, ram_pct = 15, 25
+        else:
+            cpu_pct, ram_pct = 15, 25
 
         # GPU: not connected yet — show unknown
         gpu_units = []
