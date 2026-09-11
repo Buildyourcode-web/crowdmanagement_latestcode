@@ -122,9 +122,15 @@ export default function FRSCandidateCard({ candidate, onReviewUpdated }) {
                 }}
               >
                 <img
-                  src={getImageUrl(candidate.detectedImage || candidate.detected_image)}
+                  src={getImageUrl(candidate.detectedImage || candidate.detected_image || candidate.detected_image_path || candidate.crop_url)}
                   alt="Detected face crop"
                   style={{ width: "100%", height: "100%", objectFit: "cover" }}
+                  onError={(e) => {
+                    const fallback = getImageUrl(candidate.referenceImage || candidate.reference_image || candidate.reference_image_path);
+                    if (fallback && e.target.src !== fallback) {
+                      e.target.src = fallback;
+                    }
+                  }}
                 />
                 <div
                   style={{

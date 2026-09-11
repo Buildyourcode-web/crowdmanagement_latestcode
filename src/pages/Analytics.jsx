@@ -16,11 +16,20 @@ export default function Analytics() {
   const [loading, setLoading] = useState(true);
 
   useEffect(() => {
-    Promise.all([getAttendanceAnalytics(), getCameraAnalytics(), getIncidentAnalytics()])
-      .then(([a, c, i]) => { setAttendance(a); setCamera(c); setIncident(i); setLoading(false); });
+    Promise.allSettled([getAttendanceAnalytics(), getCameraAnalytics(), getIncidentAnalytics()])
+      .then(([a, c, i]) => {
+        if (a.status === "fulfilled" && a.value) setAttendance(a.value);
+        if (c.status === "fulfilled" && c.value) setCamera(c.value);
+        if (i.status === "fulfilled" && i.value) setIncident(i.value);
+      })
+      .finally(() => setLoading(false));
   }, []);
 
   if (loading) return <LoadingState />;
+
+  const safeAttendance = attendance || { totalVisitorsToday: 0, peakHour: "—", peakCount: 0, avgPerHour: 0, hourly: [], daily: [] };
+  const safeIncident = incident || { total: 0, resolved: 0, active: 0, avgResolutionMin: 0, byType: [] };
+  const safeCamera = camera || { uptime: "99.9%", totalDetections: 0, avgFps: 25, avgLatencyMs: 30 };
 
   const hourlyChart = {
     backgroundColor: "transparent",
@@ -36,7 +45,7 @@ export default function Analytics() {
     },
     xAxis: {
       type: "category",
-      data: attendance.hourly.map((h) => h.hour),
+      data: (safeAttendance.hourly || []).map((h) => h.hour),
       axisLine: ct.axisLine,
       axisTick: { show: false },
       axisLabel: { color: ct.axisLabelColor, interval: 3 },
@@ -44,14 +53,14 @@ export default function Analytics() {
     yAxis: {
       axisLine: ct.axisLine,
       splitLine: ct.splitLine,
-      axisLabel: { formatter: (v) => `${(v / 1000).toFixed(0)}k`, color: ct.axisLabelColor },
+      axisLabel: { formatter: (v) => `${v.toLocaleString()}`, color: ct.axisLabelColor },
     },
     series: [
       {
         type: "bar",
-        data: attendance.hourly.map((h) => ({
+        data: (safeAttendance.hourly || []).map((h) => ({
           value: h.visitors,
-          itemStyle: { color: h.visitors === attendance.peakCount ? ct.dangerColor : ct.primaryColor },
+          itemStyle: { color: h.visitors === safeAttendance.peakCount ? ct.dangerColor : ct.primaryColor },
         })),
         barMaxWidth: 20,
       },
@@ -66,7 +75,7 @@ export default function Analytics() {
       type: "pie",
       radius: ["40%", "65%"],
       center: ["50%", "45%"],
-      data: incident.byType.map((t, i) => ({
+      data: (safeIncident.byType || []).map((t, i) => ({
         name: t.type, value: t.count,
         itemStyle: { color: [ct.primaryColor, ct.dangerColor, ct.secondaryColor, ct.successColor, "#f0883e"][i % 5] },
       })),
@@ -90,19 +99,19 @@ export default function Analytics() {
     xAxis: {
       type: "value",
       axisLine: ct.axisLine,
-      axisLabel: { formatter: (v) => `${(v / 1000).toFixed(0)}k`, color: ct.axisLabelColor },
+      axisLabel: { formatter: (v) => `${v.toLocaleString()}`, color: ct.axisLabelColor },
       splitLine: ct.splitLine,
     },
     yAxis: {
       type: "category",
-      data: attendance.daily.map((d) => d.day),
+      data: (safeAttendance.daily || []).map((d) => d.day),
       axisLine: ct.axisLine,
       axisLabel: { color: ct.isLight ? "#334155" : "#8b949e" },
       axisTick: { show: false },
     },
     series: [{
       type: "bar",
-      data: attendance.daily.map((d) => d.visitors),
+      data: (safeAttendance.daily || []).map((d) => d.visitors),
       barMaxWidth: 30,
       itemStyle: { color: ct.primaryColor, borderRadius: [0, 3, 3, 0] },
     }],
@@ -120,14 +129,14 @@ export default function Analytics() {
       {/* Attendance KPIs */}
       <div style={{ display: "flex", gap: 8 }}>
         {[
-          { label: "Total Visitors Today", value: (attendance?.total_today ?? attendance?.totalVisitorsToday ?? 0).toLocaleString() },
-          { label: "Peak Hour", value: attendance?.peak_hour ?? attendance?.peakHour ?? "—" },
-          { label: "Peak Count", value: (attendance?.peak_count ?? attendance?.peakCount ?? 0).toLocaleString() },
-          { label: "Avg / Hour", value: (attendance?.avg_per_hour ?? attendance?.avgPerHour ?? 0).toLocaleString() },
-          { label: "Camera Uptime", value: camera?.uptime ?? "—" },
-          { label: "Total Detections", value: (camera?.total_detections ?? camera?.totalDetections ?? 0).toLocaleString() },
-          { label: "Avg FPS", value: camera?.avg_fps ?? camera?.avgFps ?? 0 },
-          { label: "Incidents Total", value: incident?.total ?? 0 },
+          { label: "Total Visitors Today", value: (safeAttendance.total_today ?? safeAttendance.totalVisitorsToday ?? 0).toLocaleString() },
+          { label: "Peak Hour", value: safeAttendance.peak_hour ?? safeAttendance.peakHour ?? "—" },
+          { label: "Peak Count", value: (safeAttendance.peak_count ?? safeAttendance.peakCount ?? 0).toLocaleString() },
+          { label: "Avg / Hour", value: (safeAttendance.avg_per_hour ?? safeAttendance.avgPerHour ?? 0).toLocaleString() },
+          { label: "Camera Uptime", value: safeCamera.uptime ?? "—" },
+          { label: "Total Detections", value: (safeCamera.total_detections ?? safeCamera.totalDetections ?? 0).toLocaleString() },
+          { label: "Avg FPS", value: safeCamera.avg_fps ?? safeCamera.avgFps ?? 0 },
+          { label: "Incidents Total", value: safeIncident.total ?? 0 },
         ].map((k) => (
           <div key={k.label} className="cc-card" style={{ flex: 1, minWidth: 0 }}>
             <div className="cc-label" style={{ marginBottom: 4 }}>{k.label}</div>
@@ -156,10 +165,10 @@ export default function Analytics() {
           <div className="cc-section-title" style={{ marginBottom: 14 }}>Incident Analytics</div>
           <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 12 }}>
             {[
-              { label: "Total", value: incident.total },
-              { label: "Resolved", value: incident.resolved, color: "var(--cc-green)" },
-              { label: "Active", value: incident.active, color: "var(--cc-red)" },
-              { label: "Avg Resolution", value: `${incident.avgResolutionMin} min` },
+              { label: "Total", value: safeIncident.total },
+              { label: "Resolved", value: safeIncident.resolved, color: "var(--cc-green)" },
+              { label: "Active", value: safeIncident.active, color: "var(--cc-red)" },
+              { label: "Avg Resolution", value: `${safeIncident.avgResolutionMin} min` },
             ].map((s) => (
               <div key={s.label}>
                 <div className="cc-label">{s.label}</div>

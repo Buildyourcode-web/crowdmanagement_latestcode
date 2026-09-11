@@ -5,24 +5,34 @@ const API_BASE_URL = import.meta.env.VITE_API_BASE_URL || "http://localhost:8000
 
 const apiClient = axios.create({
   baseURL: API_BASE_URL,
-  timeout: 15000,
+  timeout: 30000,
   headers: {
     "Content-Type": "application/json",
     Accept: "application/json",
   },
 });
 
-// Request interceptor — attach JWT access token
+
+// Request interceptor — attach JWT access token, active event ID, and active site ID
 apiClient.interceptors.request.use(
   (config) => {
     const token = localStorage.getItem("byc_access_token");
     if (token) {
       config.headers.Authorization = `Bearer ${token}`;
     }
+    const activeEventId = localStorage.getItem("byc_active_event_id");
+    if (activeEventId) {
+      config.headers["X-Event-ID"] = activeEventId;
+    }
+    const activeSiteId = localStorage.getItem("byc_active_site_id");
+    if (activeSiteId) {
+      config.headers["X-Site-ID"] = activeSiteId;
+    }
     return config;
   },
   (error) => Promise.reject(error)
 );
+
 
 // Response interceptor — auto-refresh token on 401, clear session on failure
 let isRefreshing = false;

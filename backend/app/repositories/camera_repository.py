@@ -97,10 +97,17 @@ class CameraRepository(BaseRepository[Camera]):
         is_frs: Optional[bool] = None,
         search: Optional[str] = None,
         enabled_only: Optional[bool] = None,
+        event_id: Optional[uuid.UUID] = None,
+        allowed_site_ids: Optional[List[uuid.UUID]] = None,
         skip: int = 0,
         limit: int = 100,
     ) -> Tuple[List[Camera], int]:
         stmt = select(Camera)
+
+        if event_id is not None:
+            stmt = stmt.where(or_(Camera.event_id == event_id, Camera.event_id.is_(None)))
+        if allowed_site_ids is not None:
+            stmt = stmt.where(or_(Camera.site_id.in_(allowed_site_ids), Camera.site_id.is_(None)))
 
         if zone_code and zone_code.upper() != "ALL":
             stmt = stmt.where(Camera.zone_code == zone_code)
@@ -130,6 +137,7 @@ class CameraRepository(BaseRepository[Camera]):
                     Camera.location_name.ilike(q),
                 )
             )
+
 
         count_stmt = select(func.count()).select_from(stmt.subquery())
         total = (await self.db.execute(count_stmt)).scalar() or 0

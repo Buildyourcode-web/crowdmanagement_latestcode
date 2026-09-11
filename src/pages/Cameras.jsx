@@ -4,6 +4,7 @@ import { useNavigate } from "react-router-dom";
 import CameraCard from "../components/camera/CameraCard.jsx";
 import { getCameras, getCameraStats, toggleCameraFRS } from "../services/cameraService.js";
 import { switchCameraAIMode } from "../services/aiService.js";
+import { realtimeService } from "../services/realtimeService.js";
 import { LoadingState } from "../components/common/States.jsx";
 import ROIEditor from "../components/ai/ROIEditor.jsx";
 
@@ -18,20 +19,31 @@ const GRID_SIZES = [
 ];
 
 const PURPOSE_NAMES = {
-  ENTRY_EXIT: "Entry/Exit Counting",
+  ENTRY: "Entry Gate (IN)",
+  EXIT: "Exit Gate (OUT)",
   QUEUE: "Queue Management",
   ZONE: "Zone Management",
+  ENTRY_EXIT: "Entry/Exit Counting",
 };
 
 const PURPOSE_META = {
-  ENTRY_EXIT: {
-    label: "Entry/Exit Counting",
-    icon: "bi-arrow-left-right",
-    color: "#bc8cff",
+  ENTRY: {
+    label: "Entry Gate (IN)",
+    icon: "bi-box-arrow-in-right",
+    color: "#3fb950",
     profile_id: "CROWD_STANDARD",
-    profile_name: "Footfall Counting Line",
-    initial_tool: "COUNTING_LINE",
-    description: "In/Out line crossing & footfall counting",
+    profile_name: "Entry Footfall Line",
+    initial_tool: "ENTRY_LINE",
+    description: "Counts visitors entering (IN count)",
+  },
+  EXIT: {
+    label: "Exit Gate (OUT)",
+    icon: "bi-box-arrow-right",
+    color: "#f85149",
+    profile_id: "CROWD_STANDARD",
+    profile_name: "Exit Footfall Line",
+    initial_tool: "EXIT_LINE",
+    description: "Counts visitors leaving (OUT count)",
   },
   QUEUE: {
     label: "Queue Management",
@@ -45,13 +57,30 @@ const PURPOSE_META = {
   ZONE: {
     label: "Zone Management",
     icon: "bi-bounding-box",
-    color: "#3fb950",
+    color: "#bc8cff",
     profile_id: "CROWD_STANDARD",
     profile_name: "Crowd Density Zone",
     initial_tool: "CROWD_ROI",
     description: "Overcrowding risk & density monitoring",
   },
+  ENTRY_EXIT: {
+    label: "Entry/Exit Counting",
+    icon: "bi-arrow-left-right",
+    color: "#3fb950",
+    profile_id: "CROWD_STANDARD",
+    profile_name: "Footfall Counting Line",
+    initial_tool: "ENTRY_LINE",
+    description: "In/Out line crossing & footfall counting",
+  },
 };
+
+export const ZONE_PRESETS = [
+  { code: "ZONE-A", name: "Zone A", label: "North Gate & Approach", color: "#3fb950", icon: "bi-geo-alt-fill", capacity: 10000 },
+  { code: "ZONE-B", name: "Zone B", label: "Main Idol Darshan Arena", color: "#58a6ff", icon: "bi-geo-alt-fill", capacity: 20000 },
+  { code: "ZONE-C", name: "Zone C", label: "VIP Enclosure & Stage", color: "#bc8cff", icon: "bi-geo-alt-fill", capacity: 6000 },
+  { code: "ZONE-D", name: "Zone D", label: "Prasadam & Laddu Counters", color: "#d29922", icon: "bi-geo-alt-fill", capacity: 5000 },
+];
+
 
 export default function Cameras() {
   const navigate = useNavigate();
@@ -68,8 +97,15 @@ export default function Cameras() {
     rtsp_url: DEFAULT_RTSP,
     camera_type: "FRS",
     is_frs: true,
-    ai_purposes: ["ENTRY_EXIT"],
+    ai_purposes: ["ENTRY"],
+    zone_code: "ZONE-A",
   });
+
+  const [zoneSwitchModal, setZoneSwitchModal] = useState({
+    open: false,
+    camera: null,
+  });
+  const [zoneSwitchLoading, setZoneSwitchLoading] = useState(false);
 
   const [reassignSelectModal, setReassignSelectModal] = useState({
     open: false,
@@ -187,10 +223,26 @@ export default function Cameras() {
     };
     document.addEventListener("visibilitychange", handleVis);
 
+    const unsubEvents = realtimeService.subscribe((msg, eventType) => {
+      const type = eventType || msg?.type;
+      if (
+        type === "pipeline_state_changed" ||
+        type === "PIPELINE_STARTED" ||
+        type === "PIPELINE_STOPPED" ||
+        type === "camera_update" ||
+        type === "CAMERA_ADDED" ||
+        type === "CAMERA_DELETED"
+      ) {
+        loadEngineCameras();
+        loadDbCameras();
+      }
+    });
+
     return () => {
       isMountedRef.current = false;
       clearTimeout(engineTimerRef.current);
       document.removeEventListener("visibilitychange", handleVis);
+      unsubEvents();
     };
   }, [loadDbCameras, loadEngineCameras]);
 
@@ -317,7 +369,8 @@ export default function Cameras() {
           rtsp_url: DEFAULT_RTSP,
           camera_type: "FRS",
           is_frs: true,
-          ai_purposes: ["ENTRY_EXIT"],
+          ai_purposes: ["ENTRY"],
+          zone_code: "ZONE-A",
         });
       }
     } catch (e) {
@@ -327,7 +380,38 @@ export default function Cameras() {
     }
   };
 
+  const handleOpenZoneSwitch = (camera) => {
+    setZoneSwitchModal({
+      open: true,
+      camera: camera,
+    });
+  };
+
+  const handleConfirmZoneSwitch = async (targetZoneCode) => {
+    const cam = zoneSwitchModal.camera;
+    if (!cam) return;
+    setZoneSwitchLoading(true);
+    try {
+      const camCode = cam.camera_code || cam.id;
+      const res = await fetch(`${BACKEND}/api/v1/frs-engine/cameras/${camCode}/assign-zone?zone_code=${targetZoneCode}`, {
+        method: "PATCH",
+      });
+      if (!res.ok) {
+        const err = await res.json().catch(() => ({}));
+        alert(err.detail || "Failed to assign zone to camera");
+        return;
+      }
+      setZoneSwitchModal({ open: false, camera: null });
+      await Promise.all([loadDbCameras(), loadEngineCameras()]);
+    } catch (err) {
+      alert("Error assigning zone: " + err.message);
+    } finally {
+      setZoneSwitchLoading(false);
+    }
+  };
+
   const handleOpenReassign = (camera) => {
+
     setReassignSelectModal({
       open: true,
       camera: camera,
@@ -393,6 +477,15 @@ export default function Cameras() {
   const handleToggleFrs = async (camera, enabled) => {
     try {
       const code = camera.camera_code || camera.id.replace("-FRS", "").replace("-CROWD", "");
+      if (enabled && (camera.ai_mode === "CROWD" || camera.crowd_status === "online" || camera.is_running)) {
+        const confirmed = window.confirm(
+          `[MUTUAL EXCLUSIVITY NOTICE]\nCamera "${camera.name || code}" is currently running Crowd Intelligence. Switching to Facial Recognition (FRS) will pause Crowd analytics on this physical stream to ensure dedicated inference bandwidth.\n\nDo you want to proceed with mode switch?`
+        );
+        if (!confirmed) return;
+        try {
+          await switchCameraAIMode(code, "FRS");
+        } catch (e) {}
+      }
       await toggleCameraFRS(code, enabled);
       await Promise.all([loadDbCameras(), loadEngineCameras()]);
       if (fullscreenCamera && (fullscreenCamera.id === camera.id || fullscreenCamera.camera_code === code)) {
@@ -406,6 +499,15 @@ export default function Cameras() {
   const handleToggleCrowdAI = async (camera, enabled) => {
     try {
       const code = camera.camera_code || camera.id.replace("-FRS", "").replace("-CROWD", "");
+      if (enabled && (camera.ai_mode === "FRS" || camera.is_frs_camera || camera.frs_status === "online")) {
+        const confirmed = window.confirm(
+          `[MUTUAL EXCLUSIVITY NOTICE]\nCamera "${camera.name || code}" is currently designated for Facial Recognition (FRS). Switching to Crowd Intelligence will transition AI processing away from FRS.\n\nDo you want to proceed with mode switch?`
+        );
+        if (!confirmed) return;
+        try {
+          await toggleCameraFRS(code, false);
+        } catch (e) {}
+      }
       if (enabled) {
         await switchCameraAIMode(code, "CROWD");
       } else {
@@ -419,6 +521,7 @@ export default function Cameras() {
       console.error("Failed to toggle Crowd AI model:", e);
     }
   };
+
 
   useEffect(() => {
     const handleKeyDown = (e) => {
@@ -843,19 +946,19 @@ export default function Cameras() {
                     </span>
                   </div>
 
-                  <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr 1fr", gap: 8 }}>
-                    {/* 1. Entry / Exit */}
+                  <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 8 }}>
+                    {/* 1. Entry Gate (IN) */}
                     <div
-                      onClick={() => setAddForm((f) => ({ ...f, ai_purposes: ["ENTRY_EXIT"] }))}
+                      onClick={() => setAddForm((f) => ({ ...f, ai_purposes: ["ENTRY"] }))}
                       style={{
                         padding: "8px 10px",
                         borderRadius: 6,
                         cursor: "pointer",
-                        border: (addForm.ai_purposes?.[0] === "ENTRY_EXIT")
-                          ? "2px solid #bc8cff"
+                        border: (addForm.ai_purposes?.[0] === "ENTRY")
+                          ? "2px solid #3fb950"
                           : "1px solid var(--cc-border)",
-                        background: (addForm.ai_purposes?.[0] === "ENTRY_EXIT")
-                          ? "rgba(188, 140, 255, 0.15)"
+                        background: (addForm.ai_purposes?.[0] === "ENTRY")
+                          ? "rgba(63, 185, 80, 0.15)"
                           : "transparent",
                         transition: "all 0.15s ease",
                         display: "flex",
@@ -864,24 +967,61 @@ export default function Cameras() {
                       }}
                     >
                       <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between" }}>
-                        <div style={{ display: "flex", alignItems: "center", gap: 6, fontWeight: 700, fontSize: 11, color: (addForm.ai_purposes?.[0] === "ENTRY_EXIT") ? "#bc8cff" : "var(--cc-text-primary)" }}>
-                          <i className="bi bi-arrow-left-right" />
-                          <span>Entry / Exit</span>
+                        <div style={{ display: "flex", alignItems: "center", gap: 6, fontWeight: 700, fontSize: 11, color: (addForm.ai_purposes?.[0] === "ENTRY") ? "#3fb950" : "var(--cc-text-primary)" }}>
+                          <i className="bi bi-box-arrow-in-right" />
+                          <span>Entry Gate (IN)</span>
                         </div>
                         <input
                           type="radio"
                           name="crowd_purpose_radio"
-                          checked={addForm.ai_purposes?.[0] === "ENTRY_EXIT"}
-                          onChange={() => setAddForm((f) => ({ ...f, ai_purposes: ["ENTRY_EXIT"] }))}
-                          style={{ cursor: "pointer", accentColor: "#bc8cff" }}
+                          checked={addForm.ai_purposes?.[0] === "ENTRY"}
+                          onChange={() => setAddForm((f) => ({ ...f, ai_purposes: ["ENTRY"] }))}
+                          style={{ cursor: "pointer", accentColor: "#3fb950" }}
                         />
                       </div>
                       <span style={{ fontSize: 9.5, color: "var(--cc-text-muted)", lineHeight: 1.3 }}>
-                        In/Out line crossing counting
+                        Counts visitors entering (IN only)
                       </span>
                     </div>
 
-                    {/* 2. Queue Area */}
+                    {/* 2. Exit Gate (OUT) */}
+                    <div
+                      onClick={() => setAddForm((f) => ({ ...f, ai_purposes: ["EXIT"] }))}
+                      style={{
+                        padding: "8px 10px",
+                        borderRadius: 6,
+                        cursor: "pointer",
+                        border: (addForm.ai_purposes?.[0] === "EXIT")
+                          ? "2px solid #f85149"
+                          : "1px solid var(--cc-border)",
+                        background: (addForm.ai_purposes?.[0] === "EXIT")
+                          ? "rgba(248, 81, 73, 0.15)"
+                          : "transparent",
+                        transition: "all 0.15s ease",
+                        display: "flex",
+                        flexDirection: "column",
+                        gap: 4,
+                      }}
+                    >
+                      <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between" }}>
+                        <div style={{ display: "flex", alignItems: "center", gap: 6, fontWeight: 700, fontSize: 11, color: (addForm.ai_purposes?.[0] === "EXIT") ? "#f85149" : "var(--cc-text-primary)" }}>
+                          <i className="bi bi-box-arrow-right" />
+                          <span>Exit Gate (OUT)</span>
+                        </div>
+                        <input
+                          type="radio"
+                          name="crowd_purpose_radio"
+                          checked={addForm.ai_purposes?.[0] === "EXIT"}
+                          onChange={() => setAddForm((f) => ({ ...f, ai_purposes: ["EXIT"] }))}
+                          style={{ cursor: "pointer", accentColor: "#f85149" }}
+                        />
+                      </div>
+                      <span style={{ fontSize: 9.5, color: "var(--cc-text-muted)", lineHeight: 1.3 }}>
+                        Counts visitors leaving (OUT only)
+                      </span>
+                    </div>
+
+                    {/* 3. Queue Area */}
                     <div
                       onClick={() => setAddForm((f) => ({ ...f, ai_purposes: ["QUEUE"] }))}
                       style={{
@@ -918,7 +1058,7 @@ export default function Cameras() {
                       </span>
                     </div>
 
-                    {/* 3. Zone Density */}
+                    {/* 4. Zone Density */}
                     <div
                       onClick={() => setAddForm((f) => ({ ...f, ai_purposes: ["ZONE"] }))}
                       style={{
@@ -926,10 +1066,10 @@ export default function Cameras() {
                         borderRadius: 6,
                         cursor: "pointer",
                         border: (addForm.ai_purposes?.[0] === "ZONE")
-                          ? "2px solid #3fb950"
+                          ? "2px solid #bc8cff"
                           : "1px solid var(--cc-border)",
                         background: (addForm.ai_purposes?.[0] === "ZONE")
-                          ? "rgba(63, 185, 80, 0.15)"
+                          ? "rgba(188, 140, 255, 0.15)"
                           : "transparent",
                         transition: "all 0.15s ease",
                         display: "flex",
@@ -938,7 +1078,7 @@ export default function Cameras() {
                       }}
                     >
                       <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between" }}>
-                        <div style={{ display: "flex", alignItems: "center", gap: 6, fontWeight: 700, fontSize: 11, color: (addForm.ai_purposes?.[0] === "ZONE") ? "#3fb950" : "var(--cc-text-primary)" }}>
+                        <div style={{ display: "flex", alignItems: "center", gap: 6, fontWeight: 700, fontSize: 11, color: (addForm.ai_purposes?.[0] === "ZONE") ? "#bc8cff" : "var(--cc-text-primary)" }}>
                           <i className="bi bi-bounding-box" />
                           <span>Zone Density</span>
                         </div>
@@ -947,13 +1087,44 @@ export default function Cameras() {
                           name="crowd_purpose_radio"
                           checked={addForm.ai_purposes?.[0] === "ZONE"}
                           onChange={() => setAddForm((f) => ({ ...f, ai_purposes: ["ZONE"] }))}
-                          style={{ cursor: "pointer", accentColor: "#3fb950" }}
+                          style={{ cursor: "pointer", accentColor: "#bc8cff" }}
                         />
                       </div>
                       <span style={{ fontSize: 9.5, color: "var(--cc-text-muted)", lineHeight: 1.3 }}>
                         Area density & surge alerts
                       </span>
                     </div>
+                  </div>
+                </div>
+              )}
+
+              {/* Zone Assignment — only for CROWD cameras */}
+              {addForm.camera_type === "CROWD" && (
+                <div style={{ background: "rgba(15,23,42,0.75)", padding: 12, borderRadius: 8, border: "1px solid var(--cc-border)" }}>
+                  <div className="cc-label" style={{ marginBottom: 8, fontWeight: 700, fontSize: 11, display: "flex", alignItems: "center", gap: 6 }}>
+                    <i className="bi bi-geo-alt-fill" style={{ color: "#58a6ff" }} /> Assign to Zone:
+                  </div>
+                  <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 8 }}>
+                    {ZONE_PRESETS.map((z) => (
+                      <div
+                        key={z.code}
+                        onClick={() => setAddForm((f) => ({ ...f, zone_code: z.code }))}
+                        style={{
+                          padding: "8px 10px",
+                          borderRadius: 6,
+                          cursor: "pointer",
+                          border: addForm.zone_code === z.code ? `2px solid ${z.color}` : "1px solid var(--cc-border)",
+                          background: addForm.zone_code === z.code ? `${z.color}22` : "transparent",
+                          transition: "all 0.15s",
+                        }}
+                      >
+                        <div style={{ fontWeight: 700, fontSize: 11, color: addForm.zone_code === z.code ? z.color : "var(--cc-text-primary)", display: "flex", alignItems: "center", gap: 5 }}>
+                          <i className={`bi ${z.icon}`} style={{ color: z.color }} /> {z.name}
+                        </div>
+                        <div style={{ fontSize: 9.5, color: "var(--cc-text-muted)", marginTop: 2 }}>{z.label}</div>
+                        <div style={{ fontSize: 9, color: "var(--cc-text-muted)", fontFamily: "var(--cc-font-mono)" }}>Cap: {z.capacity.toLocaleString()}</div>
+                      </div>
+                    ))}
                   </div>
                 </div>
               )}
@@ -1362,6 +1533,14 @@ export default function Cameras() {
                       >
                         <i className="bi bi-arrow-repeat" /> Switch Purpose
                       </button>
+                      <button
+                        className="cc-btn"
+                        style={{ fontSize: 11, padding: "5px 12px", borderColor: "rgba(88,166,255,0.4)", color: "#58a6ff", background: "rgba(88,166,255,0.10)", display: "flex", alignItems: "center", gap: 6, fontWeight: 600 }}
+                        onClick={() => handleOpenZoneSwitch(fullscreenCamera)}
+                        title="Reassign camera to a different zone (A/B/C/D)"
+                      >
+                        <i className="bi bi-geo-alt-fill" /> Switch Zone
+                      </button>
                     </div>
                   </div>
                 );
@@ -1438,9 +1617,9 @@ export default function Cameras() {
             </div>
 
             <div style={{ display: "flex", flexDirection: "column", gap: 10, marginBottom: 18 }}>
-              {["ENTRY_EXIT", "QUEUE", "ZONE"].map((purposeKey) => {
+              {["ENTRY", "EXIT", "QUEUE", "ZONE"].map((purposeKey) => {
                 const meta = PURPOSE_META[purposeKey];
-                const currentPurp = (reassignSelectModal.camera.ai_purposes && reassignSelectModal.camera.ai_purposes[0]) || "ENTRY_EXIT";
+                const currentPurp = (reassignSelectModal.camera.ai_purposes && reassignSelectModal.camera.ai_purposes[0]) || "ENTRY";
                 const isCurrent = currentPurp === purposeKey;
 
                 return (
@@ -1630,6 +1809,84 @@ export default function Cameras() {
                 ) : (
                   <><i className="bi bi-check-circle-fill" /> OK / Confirm</>
                 )}
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* ===== ZONE SWITCH MODAL ===== */}
+      {zoneSwitchModal.open && zoneSwitchModal.camera && (
+        <div
+          style={{
+            position: "fixed", inset: 0, background: "rgba(0,0,0,0.72)",
+            display: "flex", alignItems: "center", justifyContent: "center",
+            zIndex: 1100, padding: 16,
+          }}
+          onClick={(e) => { if (e.target === e.currentTarget) setZoneSwitchModal({ open: false, camera: null }); }}
+        >
+          <div
+            style={{
+              background: "var(--cc-bg-card)", border: "1px solid var(--cc-border)",
+              borderRadius: 12, padding: "24px 24px 20px", maxWidth: 420, width: "100%",
+              boxShadow: "0 24px 60px rgba(0,0,0,0.6)",
+            }}
+          >
+            {/* Header */}
+            <div style={{ display: "flex", alignItems: "center", gap: 12, marginBottom: 16 }}>
+              <div style={{ width: 36, height: 36, borderRadius: 8, background: "rgba(88,166,255,0.15)", border: "1px solid rgba(88,166,255,0.35)", display: "flex", alignItems: "center", justifyContent: "center", color: "#58a6ff", fontSize: 18, flexShrink: 0 }}>
+                <i className="bi bi-geo-alt-fill" />
+              </div>
+              <div>
+                <div style={{ fontSize: 15, fontWeight: 700, color: "var(--cc-text-primary)" }}>Switch Zone Assignment</div>
+                <div style={{ fontSize: 11, color: "var(--cc-text-muted)" }}>
+                  Camera: {zoneSwitchModal.camera.name || zoneSwitchModal.camera.id} ({zoneSwitchModal.camera.camera_code || zoneSwitchModal.camera.id})
+                </div>
+              </div>
+            </div>
+
+            <p style={{ fontSize: 12, color: "var(--cc-text-muted)", marginBottom: 14, lineHeight: 1.5 }}>
+              Select the zone you want to assign this camera to. The live feed will immediately start contributing counts to the selected zone.
+            </p>
+
+            {/* Zone Tiles */}
+            <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 10, marginBottom: 20 }}>
+              {ZONE_PRESETS.map((z) => {
+                const isCurrent = (zoneSwitchModal.camera.zone_code || "ZONE-A") === z.code;
+                return (
+                  <button
+                    key={z.code}
+                    type="button"
+                    disabled={zoneSwitchLoading}
+                    onClick={() => handleConfirmZoneSwitch(z.code)}
+                    style={{
+                      padding: "12px 10px", borderRadius: 8, cursor: zoneSwitchLoading ? "not-allowed" : "pointer",
+                      border: isCurrent ? `2px solid ${z.color}` : "1px solid var(--cc-border)",
+                      background: isCurrent ? `${z.color}22` : "rgba(255,255,255,0.02)",
+                      textAlign: "left", transition: "all 0.15s",
+                    }}
+                  >
+                    <div style={{ fontWeight: 700, fontSize: 12, color: z.color, display: "flex", alignItems: "center", gap: 6 }}>
+                      <i className={`bi ${z.icon}`} /> {z.name}
+                      {isCurrent && <span style={{ fontSize: 9, background: `${z.color}33`, padding: "1px 5px", borderRadius: 3, marginLeft: "auto" }}>CURRENT</span>}
+                    </div>
+                    <div style={{ fontSize: 10, color: "var(--cc-text-muted)", marginTop: 3 }}>{z.label}</div>
+                    <div style={{ fontSize: 9.5, color: "var(--cc-text-muted)", fontFamily: "var(--cc-font-mono)", marginTop: 2 }}>Cap: {z.capacity.toLocaleString()}</div>
+                  </button>
+                );
+              })}
+            </div>
+
+            {/* Footer */}
+            <div style={{ display: "flex", justifyContent: "flex-end" }}>
+              <button
+                type="button"
+                className="cc-btn"
+                onClick={() => setZoneSwitchModal({ open: false, camera: null })}
+                disabled={zoneSwitchLoading}
+                style={{ fontSize: 12, padding: "7px 18px" }}
+              >
+                {zoneSwitchLoading ? <><i className="bi bi-hourglass-split" /> Switching...</> : "Cancel"}
               </button>
             </div>
           </div>

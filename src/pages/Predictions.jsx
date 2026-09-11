@@ -1,7 +1,7 @@
-// Predictions page — predictive analytics
-import { useEffect, useState } from "react";
+import { useEffect, useState, useCallback, useRef } from "react";
 import ReactECharts from "echarts-for-react";
 import { getPredictions, getQueuePredictions, getZoneRiskPredictions } from "../services/predictionService.js";
+import { realtimeService } from "../services/realtimeService.js";
 import { LoadingState } from "../components/common/States.jsx";
 
 import { useAppStore } from "../store/useAppStore.js";
@@ -15,20 +15,77 @@ export default function Predictions() {
   const [zoneData, setZoneData] = useState([]);
   const [loading, setLoading] = useState(true);
 
-  useEffect(() => {
-    Promise.all([
-      getPredictions().catch(() => null),
-      getQueuePredictions().catch(() => []),
-      getZoneRiskPredictions().catch(() => []),
-    ])
-      .then(([d, q, z]) => {
+  const inFlightRef = useRef(false);
+  const timerRef = useRef(null);
+  const isMountedRef = useRef(true);
+
+  const loadData = useCallback(async (silent = false) => {
+    if (inFlightRef.current) return;
+    inFlightRef.current = true;
+    if (!silent) setLoading(true);
+    try {
+      const [d, q, z] = await Promise.all([
+        getPredictions().catch(() => null),
+        getQueuePredictions().catch(() => []),
+        getZoneRiskPredictions().catch(() => []),
+      ]);
+      if (isMountedRef.current) {
         setData(d || {});
         setQueueData(Array.isArray(q) ? q : (q?.data || []));
         setZoneData(Array.isArray(z) ? z : (z?.data || []));
-        setLoading(false);
-      })
-      .catch(() => setLoading(false));
+      }
+    } finally {
+      if (isMountedRef.current) setLoading(false);
+      inFlightRef.current = false;
+    }
   }, []);
+
+  useEffect(() => {
+    isMountedRef.current = true;
+    loadData();
+
+    const scheduleNext = () => {
+      clearTimeout(timerRef.current);
+      if (typeof document !== "undefined" && document.visibilityState === "hidden") return;
+      timerRef.current = setTimeout(async () => {
+        if (isMountedRef.current && document.visibilityState === "visible") {
+          await loadData(true);
+          scheduleNext();
+        }
+      }, 10000);
+    };
+
+    scheduleNext();
+
+    const handleVis = () => {
+      if (document.visibilityState === "visible") {
+        loadData(true);
+        scheduleNext();
+      } else {
+        clearTimeout(timerRef.current);
+      }
+    };
+    document.addEventListener("visibilitychange", handleVis);
+
+    const unsubEvents = realtimeService.subscribe((msg, eventType) => {
+      const type = eventType || msg?.type;
+      if (
+        type === "crowd_update" ||
+        type === "zone_update" ||
+        type === "queue_update" ||
+        type === "pipeline_state_changed"
+      ) {
+        loadData(true);
+      }
+    });
+
+    return () => {
+      isMountedRef.current = false;
+      clearTimeout(timerRef.current);
+      document.removeEventListener("visibilitychange", handleVis);
+      unsubEvents();
+    };
+  }, [loadData]);
 
   if (loading) return <LoadingState />;
 

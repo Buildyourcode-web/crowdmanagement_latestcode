@@ -82,6 +82,22 @@ class Permissions:
     SYSTEM_SETTINGS_READ = "system_settings:read"
     SYSTEM_SETTINGS_UPDATE = "system_settings:update"
 
+    # ── Event & Site management permissions ──────────────────────────────────
+    EVENT_CREATE = "event:create"
+    EVENT_READ = "event:read"
+    EVENT_UPDATE = "event:update"
+    EVENT_ARCHIVE = "event:archive"
+    EVENT_ACCESS_MANAGE = "event:access_manage"  # Grant/revoke user event access
+
+    SITE_CREATE = "site:create"
+    SITE_READ = "site:read"
+    SITE_UPDATE = "site:update"
+    SITE_DELETE = "site:delete"
+
+    # ── Predictions ───────────────────────────────────────────────────────────
+    PREDICTION_READ = "prediction:read"
+
+
 
 # Standard role mappings
 DEFAULT_ROLE_PERMISSIONS = {
@@ -98,6 +114,7 @@ DEFAULT_ROLE_PERMISSIONS = {
         Permissions.ANALYTICS_READ, Permissions.REPORTS_READ, Permissions.REPORTS_EXPORT,
         Permissions.SYSTEM_READ, Permissions.SYSTEM_MANAGE, Permissions.AUDIT_READ,
         Permissions.AI_READ, Permissions.AI_MANAGE,
+        Permissions.PREDICTION_READ,
         # Settings
         Permissions.SETTINGS_READ, Permissions.SETTINGS_UPDATE,
         Permissions.EVENT_SETTINGS_READ, Permissions.EVENT_SETTINGS_UPDATE,
@@ -109,6 +126,10 @@ DEFAULT_ROLE_PERMISSIONS = {
         Permissions.AI_SETTINGS_READ, Permissions.AI_SETTINGS_UPDATE,
         Permissions.FRS_SETTINGS_READ, Permissions.FRS_SETTINGS_UPDATE,
         Permissions.SYSTEM_SETTINGS_READ, Permissions.SYSTEM_SETTINGS_UPDATE,
+        # Event & Site management
+        Permissions.EVENT_CREATE, Permissions.EVENT_READ, Permissions.EVENT_UPDATE, Permissions.EVENT_ARCHIVE,
+        Permissions.EVENT_ACCESS_MANAGE,
+        Permissions.SITE_CREATE, Permissions.SITE_READ, Permissions.SITE_UPDATE, Permissions.SITE_DELETE,
     ],
     "COMMANDER": [
         Permissions.CAMERA_READ, Permissions.CAMERA_MANAGE,
@@ -122,6 +143,7 @@ DEFAULT_ROLE_PERMISSIONS = {
         Permissions.ANALYTICS_READ, Permissions.REPORTS_READ, Permissions.REPORTS_EXPORT,
         Permissions.SYSTEM_READ, Permissions.AUDIT_READ,
         Permissions.AI_READ,
+        Permissions.PREDICTION_READ,
         # Settings (read + limited update)
         Permissions.SETTINGS_READ,
         Permissions.EVENT_SETTINGS_READ, Permissions.EVENT_SETTINGS_UPDATE,
@@ -133,6 +155,9 @@ DEFAULT_ROLE_PERMISSIONS = {
         Permissions.AI_SETTINGS_READ,
         Permissions.FRS_SETTINGS_READ,
         Permissions.SYSTEM_SETTINGS_READ,
+        # Event & Site (can read + update, not create/archive events)
+        Permissions.EVENT_READ, Permissions.EVENT_UPDATE, Permissions.EVENT_ACCESS_MANAGE,
+        Permissions.SITE_CREATE, Permissions.SITE_READ, Permissions.SITE_UPDATE, Permissions.SITE_DELETE,
     ],
     "CONTROL_ROOM": [
         Permissions.CAMERA_READ,
@@ -143,6 +168,7 @@ DEFAULT_ROLE_PERMISSIONS = {
         Permissions.OPERATIONS_READ,
         Permissions.ANALYTICS_READ, Permissions.REPORTS_READ,
         Permissions.SYSTEM_READ,
+        Permissions.PREDICTION_READ,
         # Settings (read-only)
         Permissions.SETTINGS_READ,
         Permissions.EVENT_SETTINGS_READ,
@@ -151,6 +177,9 @@ DEFAULT_ROLE_PERMISSIONS = {
         Permissions.ALERT_SETTINGS_READ,
         Permissions.NOTIFICATION_SETTINGS_READ,
         Permissions.SYSTEM_SETTINGS_READ,
+        # Event & Site (read only)
+        Permissions.EVENT_READ,
+        Permissions.SITE_READ,
     ],
     "FRS_OPERATOR": [
         Permissions.FRS_READ, Permissions.FRS_REVIEW,
@@ -159,6 +188,8 @@ DEFAULT_ROLE_PERMISSIONS = {
         Permissions.SYSTEM_READ,
         Permissions.FRS_SETTINGS_READ,
         Permissions.SETTINGS_READ,
+        Permissions.EVENT_READ,
+        Permissions.SITE_READ,
     ],
     "POLICE_OPERATOR": [
         Permissions.CAMERA_READ,
@@ -168,6 +199,8 @@ DEFAULT_ROLE_PERMISSIONS = {
         Permissions.INCIDENT_READ, Permissions.INCIDENT_MANAGE,
         Permissions.OPERATIONS_READ, Permissions.OPERATIONS_MANAGE,
         Permissions.SETTINGS_READ,
+        Permissions.EVENT_READ,
+        Permissions.SITE_READ,
     ],
     "MEDICAL_OPERATOR": [
         Permissions.ZONE_READ,
@@ -175,6 +208,8 @@ DEFAULT_ROLE_PERMISSIONS = {
         Permissions.INCIDENT_READ, Permissions.INCIDENT_MANAGE,
         Permissions.OPERATIONS_READ, Permissions.OPERATIONS_MANAGE,
         Permissions.SETTINGS_READ,
+        Permissions.EVENT_READ,
+        Permissions.SITE_READ,
     ],
     "VIEWER": [
         Permissions.CAMERA_READ,
@@ -183,5 +218,8 @@ DEFAULT_ROLE_PERMISSIONS = {
         Permissions.ALERT_READ,
         Permissions.ANALYTICS_READ,
         Permissions.SETTINGS_READ,
+        Permissions.EVENT_READ,
+        Permissions.SITE_READ,
     ],
 }
+

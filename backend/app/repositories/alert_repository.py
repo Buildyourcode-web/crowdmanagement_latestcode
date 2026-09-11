@@ -1,3 +1,4 @@
+import uuid
 from typing import List, Optional, Tuple
 from sqlalchemy import func, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -22,10 +23,15 @@ class AlertRepository(BaseRepository[Alert]):
         camera_code: Optional[str] = None,
         status: Optional[str] = None,
         search: Optional[str] = None,
+        event_id: Optional[uuid.UUID] = None,
         skip: int = 0,
         limit: int = 50,
     ) -> Tuple[List[Alert], int]:
         stmt = select(Alert)
+
+        if event_id is not None:
+            stmt = stmt.where(or_(Alert.event_id == event_id, Alert.event_id.is_(None)))
+
 
         if severity and severity.lower() != "all":
             stmt = stmt.where(Alert.severity == severity.lower())

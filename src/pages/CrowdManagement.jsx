@@ -6,10 +6,9 @@ import KpiCard from "../components/common/KpiCard.jsx";
 import StatusBadge from "../components/common/StatusBadge.jsx";
 import { LoadingState, ErrorState } from "../components/common/States.jsx";
 import { getCrowdManagementSummary } from "../services/crowdManagementService.js";
+import { realtimeService } from "../services/realtimeService.js";
 import { useAppStore } from "../store/useAppStore.js";
 import { getChartTheme } from "../utils/chartTheme.js";
-
-const WS_URL = `ws://${window.location.hostname}:8000/ws/v1/events`;
 
 const RISK_COLORS = {
   LOW: "#3fb950",
@@ -76,7 +75,9 @@ export default function CrowdManagement() {
       // Coalesce queued refresh if triggered during in-flight fetch
       if (pendingRefreshRef.current && isMountedRef.current) {
         pendingRefreshRef.current = false;
-        loadSummary(true);
+        setTimeout(() => {
+          if (isMountedRef.current) loadSummary(true);
+        }, 1000);
       }
     }
   }, [timeFilter, modeFilter, cameraFilter, riskFilter]);
@@ -117,57 +118,30 @@ export default function CrowdManagement() {
     };
   }, [loadSummary]);
 
-  // WebSocket connection for real-time live events & telemetry
+  // Real-time live events & telemetry subscription via centralized realtimeService
   useEffect(() => {
-    let ws;
-    let reconnectTimeout;
+    const unsubStatus = realtimeService.subscribeStatus((status) => {
+      setWsConnected(status === "LIVE DATA" || status === "UPDATING");
+    });
 
-    const connectWS = () => {
-      try {
-        ws = new WebSocket(WS_URL);
-        wsRef.current = ws;
-
-        ws.onopen = () => {
-          setWsConnected(true);
-        };
-
-        ws.onmessage = (evt) => {
-          try {
-            const msg = JSON.parse(evt.data);
-            // Trigger quick silent refresh on crowd or queue events
-            if (
-              msg.type === "crowd_update" ||
-              msg.type === "zone_update" ||
-              msg.type === "queue_update" ||
-              msg.type === "new_alert" ||
-              msg.type === "PIPELINE_STARTED" ||
-              msg.type === "PIPELINE_STOPPED"
-            ) {
-              loadSummary(true);
-            }
-          } catch {
-            // ignore non-json
-          }
-        };
-
-        ws.onclose = () => {
-          setWsConnected(false);
-          reconnectTimeout = setTimeout(connectWS, 4000);
-        };
-
-        ws.onerror = () => {
-          setWsConnected(false);
-        };
-      } catch {
-        setWsConnected(false);
-        reconnectTimeout = setTimeout(connectWS, 4000);
+    const unsubEvents = realtimeService.subscribe((msg, eventType) => {
+      const type = eventType || msg?.type;
+      if (
+        type === "crowd_update" ||
+        type === "zone_update" ||
+        type === "queue_update" ||
+        type === "new_alert" ||
+        type === "PIPELINE_STARTED" ||
+        type === "PIPELINE_STOPPED" ||
+        type === "pipeline_state_changed"
+      ) {
+        loadSummary(true);
       }
-    };
+    });
 
-    connectWS();
     return () => {
-      clearTimeout(reconnectTimeout);
-      if (ws) ws.close();
+      unsubStatus();
+      unsubEvents();
     };
   }, [loadSummary]);
 

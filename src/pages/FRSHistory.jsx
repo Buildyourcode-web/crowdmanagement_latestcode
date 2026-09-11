@@ -10,6 +10,13 @@ import { LoadingState } from "../components/common/States.jsx";
 const ZONES = ["ALL", "ZONE-A", "ZONE-B", "ZONE-C", "ZONE-D", "ZONE-E", "ZONE-G", "ZONE-H", "ZONE-I", "ZONE-K", "ZONE-L"];
 const STATUSES = ["ALL", "PENDING_REVIEW", "POSSIBLE_MATCH", "NOT_A_MATCH", "NEEDS_MORE_REVIEW", "DISMISSED", "CLOSED"];
 
+const getImageUrl = (url) => {
+  if (!url) return "";
+  if (url.startsWith("http://") || url.startsWith("https://") || url.startsWith("data:")) return url;
+  const base = import.meta.env.VITE_API_BASE_URL || "http://localhost:8000";
+  return `${base}${url.startsWith("/") ? "" : "/"}${url}`;
+};
+
 export default function FRSHistory() {
   const navigate = useNavigate();
   const [history, setHistory] = useState([]);
@@ -275,7 +282,17 @@ export default function FRSHistory() {
                               flexShrink: 0,
                             }}
                           >
-                            <img src={row.detectedImage} alt="Crop" style={{ width: "100%", height: "100%", objectFit: "cover" }} />
+                            <img
+                              src={getImageUrl(row.detectedImage || row.detected_image || row.detected_image_path)}
+                              alt="Crop"
+                              style={{ width: "100%", height: "100%", objectFit: "cover" }}
+                              onError={(e) => {
+                                const fallback = getImageUrl(row.referenceImage || row.reference_image);
+                                if (fallback && e.target.src !== fallback) {
+                                  e.target.src = fallback;
+                                }
+                              }}
+                            />
                           </div>
                           <div>
                             <span style={{ fontFamily: "var(--cc-font-mono)", fontSize: 10, color: "var(--cc-text-primary)" }}>{row.id}</span>
@@ -302,7 +319,17 @@ export default function FRSHistory() {
                             }}
                             title="Inspect HD Reference Photo"
                           >
-                            <img src={row.referenceImage} alt="Ref" style={{ width: "100%", height: "100%", objectFit: "cover" }} />
+                            <img
+                              src={getImageUrl(row.referenceImage || row.reference_image)}
+                              alt="Ref"
+                              style={{ width: "100%", height: "100%", objectFit: "cover" }}
+                              onError={(e) => {
+                                const fallback = getImageUrl(row.detectedImage || row.detected_image);
+                                if (fallback && e.target.src !== fallback) {
+                                  e.target.src = fallback;
+                                }
+                              }}
+                            />
                           </div>
                           <div>
                             <div style={{ fontWeight: 600, color: "var(--cc-text-primary)", fontSize: 11 }}>{row.referenceName}</div>

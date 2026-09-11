@@ -1,28 +1,24 @@
 from typing import AsyncGenerator
-from sqlalchemy.ext.asyncio import (
-    AsyncSession,
-    async_sessionmaker,
-    create_async_engine,
-)
+from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
+from sqlalchemy import create_engine
+from sqlalchemy.orm import sessionmaker
 from app.config import settings
 
-# Create async engine with pool settings compatible with Supabase poolers
+# ---------------------------------------------------------------------------
+# Async engine (used by FastAPI endpoints)
+# ---------------------------------------------------------------------------
 async_engine = create_async_engine(
     settings.DATABASE_URL,
     echo=False,
     future=True,
-    pool_size=4,
-    max_overflow=2,
-    pool_timeout=15,
+    pool_size=15,
+    max_overflow=10,
+    pool_timeout=30,
     pool_recycle=300,
     pool_pre_ping=False,
-    connect_args={
-        "statement_cache_size": 0,
-        "prepared_statement_cache_size": 0,
-    },
+    connect_args={"statement_cache_size": 0, "prepared_statement_cache_size": 0},
 )
 
-# Async session factory
 AsyncSessionLocal = async_sessionmaker(
     bind=async_engine,
     class_=AsyncSession,
@@ -33,11 +29,9 @@ AsyncSessionLocal = async_sessionmaker(
 
 
 async def get_db() -> AsyncGenerator[AsyncSession, None]:
-    """Dependency for obtaining database sessions."""
     async with AsyncSessionLocal() as session:
         try:
             yield session
-            # Only commit if data was modified, added, or deleted (avoids roundtrip on GET/reads)
             if session.dirty or session.new or session.deleted:
                 await session.commit()
         except Exception:
@@ -46,3 +40,28 @@ async def get_db() -> AsyncGenerator[AsyncSession, None]:
         finally:
             await session.close()
 
+
+# ---------------------------------------------------------------------------
+# Synchronous engine (used by background worker threads like Crowd AI)
+# ---------------------------------------------------------------------------
+_sync_db_url = settings.DATABASE_URL.replace("postgresql+asyncpg://", "postgresql+psycopg2://")
+
+try:
+    sync_engine = create_engine(
+        _sync_db_url,
+        echo=False,
+        pool_size=5,
+        max_overflow=3,
+        pool_timeout=10,
+        pool_recycle=300,
+    )
+    SyncSessionLocal = sessionmaker(
+        bind=sync_engine,
+        autocommit=False,
+        autoflush=False,
+        expire_on_commit=False,
+    )
+except Exception as _e:
+    # psycopg2 not installed — fallback: SyncSessionLocal = None
+    sync_engine = None
+    SyncSessionLocal = None

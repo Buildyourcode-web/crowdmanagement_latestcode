@@ -30,6 +30,7 @@ import time
 import uuid
 from collections import deque
 from datetime import datetime, timezone
+from pathlib import Path
 from typing import Dict, List, Optional
 
 import cv2
@@ -38,6 +39,13 @@ from fastapi import APIRouter, HTTPException, WebSocket, WebSocketDisconnect
 from fastapi.responses import StreamingResponse
 from loguru import logger
 from pydantic import BaseModel, Field
+
+_PKG_BACKEND_DIR = Path(__file__).resolve().parent.parent.parent  # backend root directory
+_DATA_CROPS_DIR = _PKG_BACKEND_DIR / "data" / "crops"
+_DATA_ENROLLMENT_DIR = _PKG_BACKEND_DIR / "data" / "enrollment"
+_DATA_CROPS_DIR.mkdir(parents=True, exist_ok=True)
+_DATA_ENROLLMENT_DIR.mkdir(parents=True, exist_ok=True)
+
 
 
 def _bbox_iou(a, b) -> float:
@@ -89,13 +97,14 @@ def _load_frs_components():
 # ---------------------------------------------------------------------------
 
 class CameraWorkerState:
-    def __init__(self, camera_id: str, rtsp_url: str, name: str, is_frs: bool = True, camera_type: str = "FRS", ai_purposes: Optional[List[str]] = None):
+    def __init__(self, camera_id: str, rtsp_url: str, name: str, is_frs: bool = True, camera_type: str = "FRS", ai_purposes: Optional[List[str]] = None, zone_code: Optional[str] = None):
         self.camera_id = camera_id
         self.rtsp_url = rtsp_url
         self.name = name
         self.is_frs = is_frs
         self.camera_type = camera_type
         self.ai_purposes = ai_purposes or (["ENTRY_EXIT", "ZONE"] if camera_type == "CROWD" else ["FRS"])
+        self.zone_code = zone_code or "ZONE-A"
         self.thread: Optional[threading.Thread] = None
         self.running = False
         self.latest_frame: Optional[bytes] = None  # JPEG bytes for MJPEG (annotated if AI active)
@@ -134,6 +143,81 @@ _main_loop: Optional[asyncio.AbstractEventLoop] = None
 def set_main_event_loop(loop: asyncio.AbstractEventLoop):
     global _main_loop
     _main_loop = loop
+
+def _fetch_rois_sync(state) -> tuple:
+    """Synchronously fetch ROI configs from DB. Safe to call from any background thread."""
+    from app.db.session import SyncSessionLocal
+    from app.models.camera_roi import CameraROIConfiguration
+    from sqlalchemy import select as sa_select
+
+    if SyncSessionLocal is None:
+        return [], []
+
+    clean_id = state.camera_id.replace("-FRS", "").replace("-CROWD", "")
+    all_valid_types = [
+        "COUNTING_LINE", "ENTRY_LINE", "EXIT_LINE",
+        "CROWD_ROI", "EXCLUSION_ZONE", "ZONE_BOUNDARY",
+        "QUEUE_ROI", "DIRECTION_LINE",
+    ]
+
+    with SyncSessionLocal() as db:
+        stmt = sa_select(CameraROIConfiguration).where(
+            CameraROIConfiguration.camera_code.in_([state.camera_id, clean_id]),
+            CameraROIConfiguration.enabled.is_(True),
+            CameraROIConfiguration.roi_type.in_(all_valid_types),
+        )
+        items = db.execute(stmt).scalars().all()
+        lines = []
+        polygons = []
+        found_types = set()
+        for item in items:
+            found_types.add(item.roi_type)
+            geom = item.geometry_json or {}
+            if "start" in geom and "end" in geom:
+                lines.append({
+                    "id": str(item.id),
+                    "name": item.name or item.roi_name or "Counting Line",
+                    "type": item.roi_type,
+                    "start": geom["start"],
+                    "end": geom["end"],
+                    "direction": geom.get("direction", "BOTH"),
+                })
+            elif item.polygon_points and len(item.polygon_points) == 2 and item.roi_type in ("COUNTING_LINE", "ENTRY_LINE", "EXIT_LINE", "DIRECTION_LINE"):
+                lines.append({
+                    "id": str(item.id),
+                    "name": item.name or item.roi_name or "Counting Line",
+                    "type": item.roi_type,
+                    "start": item.polygon_points[0],
+                    "end": item.polygon_points[1],
+                    "direction": item.direction or "BOTH",
+                })
+            pts = geom.get("points") or item.polygon_points or []
+            if isinstance(pts, list) and len(pts) >= 3:
+                polygons.append({
+                    "id": str(item.id),
+                    "name": geom.get("zone_name") or item.name or item.roi_name or "Monitored Zone",
+                    "type": item.roi_type,
+                    "points": pts,
+                    "warning_threshold": int(geom.get("warning_threshold") or 50),
+                    "danger_threshold": int(geom.get("danger_threshold") or 80),
+                    "capacity": int(geom.get("capacity") or 100),
+                })
+
+        # Dynamically sync camera purposes based on actual ROIs saved in DB
+        if "QUEUE_ROI" in found_types:
+            state.ai_purposes = ["QUEUE"]
+        elif "CROWD_ROI" in found_types or "ZONE_BOUNDARY" in found_types:
+            state.ai_purposes = ["ZONE"]
+        elif "ENTRY_LINE" in found_types and "EXIT_LINE" not in found_types:
+            state.ai_purposes = ["ENTRY"]
+        elif "EXIT_LINE" in found_types and "ENTRY_LINE" not in found_types:
+            state.ai_purposes = ["EXIT"]
+        elif any(t in found_types for t in ("COUNTING_LINE", "ENTRY_LINE", "EXIT_LINE")):
+            state.ai_purposes = ["ENTRY_EXIT"]
+
+        return lines, polygons
+
+
 
 def _emit_frs_event_threadsafe(event_type: str, payload: dict):
     mgr = _get_ws_manager()
@@ -238,6 +322,58 @@ def _check_ccw(a, b, c):
 def _segments_cross(p1, p2, l1, l2):
     return _check_ccw(p1, l1, l2) != _check_ccw(p2, l1, l2) and _check_ccw(p1, p2, l1) != _check_ccw(p1, p2, l2)
 
+def _point_to_segment_dist(p, s1, s2):
+    px, py = p
+    x1, y1 = s1
+    x2, y2 = s2
+    dx = x2 - x1
+    dy = y2 - y1
+    if dx == 0 and dy == 0:
+        return math.hypot(px - x1, py - y1)
+    t = max(0.0, min(1.0, ((px - x1) * dx + (py - y1) * dy) / (dx * dx + dy * dy)))
+    proj_x = x1 + t * dx
+    proj_y = y1 + t * dy
+    return math.hypot(px - proj_x, py - proj_y)
+
+def _box_touches_line(box, l1, l2):
+    """
+    Checks if a bounding box [x1, y1, x2, y2] touches or intersects a line segment l1->l2.
+    Checks all 4 box edges, centroid trajectory, and point proximity.
+    """
+    x1, y1, x2, y2 = box
+    # 4 bounding box edge segments
+    e_top = ((x1, y1), (x2, y1))
+    e_bot = ((x1, y2), (x2, y2))
+    e_lft = ((x1, y1), (x1, y2))
+    e_rgt = ((x2, y1), (x2, y2))
+
+    if _segments_cross(e_top[0], e_top[1], l1, l2):
+        return True
+    if _segments_cross(e_bot[0], e_bot[1], l1, l2):
+        return True
+    if _segments_cross(e_lft[0], e_lft[1], l1, l2):
+        return True
+    if _segments_cross(e_rgt[0], e_rgt[1], l1, l2):
+        return True
+
+    # Check if any corner or center is within 16px of line segment
+    cx = (x1 + x2) / 2
+    cy = (y1 + y2) / 2
+    if _point_to_segment_dist((cx, cy), l1, l2) <= 16.0:
+        return True
+    if _point_to_segment_dist((cx, y1), l1, l2) <= 16.0:  # head
+        return True
+    if _point_to_segment_dist((cx, y2), l1, l2) <= 16.0:  # feet
+        return True
+
+    # Check if either endpoint of line segment is inside the bounding box
+    if x1 <= l1[0] <= x2 and y1 <= l1[1] <= y2:
+        return True
+    if x1 <= l2[0] <= x2 and y1 <= l2[1] <= y2:
+        return True
+
+    return False
+
 def _point_in_polygon(pt: tuple[float, float], polygon_pts: list) -> bool:
     """
     Ray-casting algorithm to test if point pt (x, y) is inside polygon_pts.
@@ -267,6 +403,133 @@ def _point_in_polygon(pt: tuple[float, float], polygon_pts: list) -> bool:
         p1x, p1y = p2x, p2y
     return inside
 
+
+def _box_iou(b1, b2):
+    """Calculate IoU for two bounding boxes [x1, y1, x2, y2]."""
+    xA = max(b1[0], b2[0])
+    yA = max(b1[1], b2[1])
+    xB = min(b1[2], b2[2])
+    yB = min(b1[3], b2[3])
+    inter = max(0, xB - xA) * max(0, yB - yA)
+    area1 = max(0, b1[2] - b1[0]) * max(0, b1[3] - b1[1])
+    area2 = max(0, b2[2] - b2[0]) * max(0, b2[3] - b2[1])
+    denom = area1 + area2 - inter
+    return (inter / denom) if denom > 0 else 0.0
+
+
+def _persist_crowd_snapshot_threadsafe(camera_code: str, inflow_delta: int, outflow_delta: int, headcount: int, zone_code_override: Optional[str] = None):
+    """Asynchronously persist line-crossing or crowd headcount snapshot to PostgreSQL, updating Camera and Zone tables."""
+    async def _do_persist():
+        try:
+            from app.db.session import AsyncSessionLocal
+            from app.models.camera import Camera
+            from app.models.crowd import CrowdSnapshot
+            from app.models.zone import Zone
+            from sqlalchemy import select
+
+            async with AsyncSessionLocal() as session:
+                clean_code = camera_code.replace("-FRS", "").replace("-CROWD", "")
+                stmt = select(Camera).where(Camera.camera_code.in_([camera_code, clean_code])).limit(1)
+                res = await session.execute(stmt)
+                cam = res.scalars().first()
+
+                now = datetime.now(timezone.utc)
+                target_zone = zone_code_override or (cam.zone_code if (cam and cam.zone_code) else "ZONE-A")
+
+                snap = CrowdSnapshot(
+                    id=uuid.uuid4(),
+                    event_id=cam.event_id if cam else None,
+                    zone_id=cam.zone_id if cam else None,
+                    zone_code=target_zone,
+                    camera_id=cam.id if cam else None,
+                    camera_code=camera_code,
+                    profile_id="CROWD_STANDARD",
+                    timestamp=now,
+                    people_count=headcount,
+                    density=round(headcount / 100.0, 2),
+                    inflow_rate=inflow_delta,
+                    outflow_rate=outflow_delta,
+                    occupancy_percentage=min(100.0, max(0.0, round((headcount / 200.0) * 100, 1))),
+                    risk_level="LOW" if headcount < 10 else ("MODERATE" if headcount < 25 else "HIGH"),
+                    risk_score=round(headcount * 0.04, 2),
+                )
+                session.add(snap)
+
+                # 1. Update Camera in DB
+                if cam:
+                    cam.people_count = headcount
+                    cam.last_seen_at = now
+                    if target_zone and cam.zone_code != target_zone:
+                        cam.zone_code = target_zone
+
+                # 2. Update Zone in DB
+                stmt_z = select(Zone).where(Zone.zone_code == target_zone).limit(1)
+                res_z = await session.execute(stmt_z)
+                zone_obj = res_z.scalars().first()
+                if zone_obj:
+                    zone_obj.current_people = max(0, headcount)
+                    cap = zone_obj.capacity or 100
+                    density_ratio = (headcount / float(cap)) if cap > 0 else 0.0
+                    zone_obj.density = round(density_ratio, 2)
+                    zone_obj.density_label = "HIGH" if density_ratio >= 0.75 else ("MODERATE" if density_ratio >= 0.50 else "LOW")
+                    zone_obj.risk_level = "CRITICAL" if density_ratio >= 0.85 else ("HIGH" if density_ratio >= 0.60 else "LOW")
+                    zone_obj.status = "ACTIVE"
+
+                await session.commit()
+        except Exception as e:
+            logger.debug(f"[Crowd-AI] Snapshot persist notice: {e}")
+
+    global _main_loop
+    if _main_loop and _main_loop.is_running():
+        asyncio.run_coroutine_threadsafe(_do_persist(), _main_loop)
+
+
+def _persist_queue_snapshot_threadsafe(camera_code: str, headcount: int, movement_status: str, zone_code_override: Optional[str] = None):
+    """Asynchronously persist queue status snapshot to PostgreSQL."""
+    async def _do_persist_queue():
+        try:
+            from app.db.session import AsyncSessionLocal
+            from app.models.camera import Camera
+            from app.models.queue import QueueSnapshot
+            from sqlalchemy import select
+
+            async with AsyncSessionLocal() as session:
+                clean_code = camera_code.replace("-FRS", "").replace("-CROWD", "")
+                stmt = select(Camera).where(Camera.camera_code.in_([camera_code, clean_code])).limit(1)
+                res = await session.execute(stmt)
+                cam = res.scalars().first()
+
+                now = datetime.now(timezone.utc)
+                target_zone = zone_code_override or (cam.zone_code if (cam and cam.zone_code) else "ZONE-A")
+                wait_min = max(1, int(round(headcount * 0.8)))
+
+                snap = QueueSnapshot(
+                    id=uuid.uuid4(),
+                    event_id=cam.event_id if cam else None,
+                    zone_id=cam.zone_id if cam else None,
+                    zone_code=target_zone,
+                    camera_id=cam.id if cam else None,
+                    camera_code=camera_code,
+                    queue_code=f"QUEUE-{target_zone}",
+                    queue_name=f"Queue {target_zone}",
+                    timestamp=now,
+                    people_count=headcount,
+                    wait_time_minutes=wait_min,
+                    movement_status=movement_status,
+                    service_rate=12.0,
+                    risk_level="LOW" if headcount < 20 else ("MODERATE" if headcount < 50 else "HIGH"),
+                )
+                session.add(snap)
+                await session.commit()
+        except Exception as e:
+            logger.debug(f"[Queue-AI] Queue snapshot persist notice: {e}")
+
+    global _main_loop
+    if _main_loop and _main_loop.is_running():
+        asyncio.run_coroutine_threadsafe(_do_persist_queue(), _main_loop)
+
+
+
 class RTSPCameraWorker:
     """
     Decoupled threaded RTSP worker:
@@ -293,9 +556,15 @@ class RTSPCameraWorker:
         self._prev_queue_centroids: List[tuple] = []
         self._queue_displacement_history = deque(maxlen=8)
         self._line_cross_cooldown: float = 0.0
+        self._crowd_tracks: Dict[int, dict] = {}
+        self._next_track_id: int = 1
+        self._queue_tracks: Dict[int, dict] = {}
+        self._next_queue_track_id: int = 1
+        self._last_snapshot_persist: float = 0.0
+        self._recent_crossings: List[dict] = []
 
     def _ai_detection_loop(self, face_model, matcher, tracker):
-        crop_dir = os.path.join(os.getcwd(), "backend", "data", "crops")
+        crop_dir = str(_DATA_CROPS_DIR)
         os.makedirs(crop_dir, exist_ok=True)
         loop = asyncio.new_event_loop()
         asyncio.set_event_loop(loop)
@@ -403,6 +672,13 @@ class RTSPCameraWorker:
                                 crop_filename = f"crop_{person_clean.lower()}_{crop_id}.jpg"
                                 crop_filepath = os.path.join(crop_dir, crop_filename)
                                 cv2.imwrite(crop_filepath, crop_bgr)
+                                # Also write to nested directory if present to keep in sync
+                                try:
+                                    nested_dir = _PKG_BACKEND_DIR / "backend" / "data" / "crops"
+                                    if nested_dir.exists():
+                                        cv2.imwrite(str(nested_dir / crop_filename), crop_bgr)
+                                except Exception:
+                                    pass
                                 detected_image_url = f"/static/crops/{crop_filename}"
 
                             if not detected_image_url:
@@ -420,7 +696,7 @@ class RTSPCameraWorker:
                                 pass
 
                             if not ref_img_url:
-                                enroll_dir = os.path.join(os.getcwd(), "backend", "data", "enrollment")
+                                enroll_dir = str(_DATA_ENROLLMENT_DIR)
                                 if os.path.exists(enroll_dir):
                                     for fn in os.listdir(enroll_dir):
                                         if fn.lower().startswith(person_clean.lower()):
@@ -557,74 +833,16 @@ class RTSPCameraWorker:
         loop.close()
 
     def _refresh_roi_lines(self):
+        """Query DB for ROI configs synchronously from the crowd AI thread."""
         try:
-            from app.db.session import AsyncSessionLocal
-            from app.models.camera_roi import CameraROIConfiguration
-            from sqlalchemy import select
+            res_lines, res_polygons = _fetch_rois_sync(self.state)
+            self._cached_roi_lines = res_lines
+            self._cached_roi_polygons = res_polygons
+            if res_lines or res_polygons:
+                logger.info(f"[Crowd-AI-Worker:{self.state.camera_id}] ROI loaded: {len(res_lines)} line(s), {len(res_polygons)} polygon(s)")
+        except Exception as e:
+            logger.warning(f"[Crowd-AI-Worker:{self.state.camera_id}] _refresh_roi_lines failed: {type(e).__name__}: {e}")
 
-            async def _fetch():
-                async with AsyncSessionLocal() as pg_db:
-                    clean_id = self.state.camera_id.replace("-FRS", "").replace("-CROWD", "")
-                    purposes = self.state.ai_purposes or ["ENTRY_EXIT"]
-                    if "QUEUE" in purposes:
-                        allowed_types = ["QUEUE_ROI", "DIRECTION_LINE"]
-                    elif "ZONE" in purposes:
-                        allowed_types = ["CROWD_ROI", "EXCLUSION_ZONE", "ZONE_BOUNDARY"]
-                    else:
-                        allowed_types = ["COUNTING_LINE", "ENTRY_LINE", "EXIT_LINE"]
-
-                    stmt = select(CameraROIConfiguration).where(
-                        CameraROIConfiguration.camera_code.in_([self.state.camera_id, clean_id]),
-                        CameraROIConfiguration.enabled.is_(True),
-                        CameraROIConfiguration.roi_type.in_(allowed_types),
-                    )
-                    res = await pg_db.execute(stmt)
-                    items = res.scalars().all()
-                    lines = []
-                    polygons = []
-                    for item in items:
-                        geom = item.geometry_json or {}
-                        # 1. Line geometries
-                        if "start" in geom and "end" in geom:
-                            lines.append({
-                                "id": str(item.id),
-                                "name": item.name or item.roi_name or "Counting Line",
-                                "type": item.roi_type,
-                                "start": geom["start"],
-                                "end": geom["end"],
-                                "direction": geom.get("direction", "BOTH"),
-                            })
-                        elif item.polygon_points and len(item.polygon_points) == 2 and item.roi_type in ("COUNTING_LINE", "ENTRY_LINE", "EXIT_LINE", "DIRECTION_LINE"):
-                            lines.append({
-                                "id": str(item.id),
-                                "name": item.name or item.roi_name or "Counting Line",
-                                "type": item.roi_type,
-                                "start": item.polygon_points[0],
-                                "end": item.polygon_points[1],
-                                "direction": item.direction or "BOTH",
-                            })
-                        # 2. Polygon geometries
-                        pts = geom.get("points") or item.polygon_points or []
-                        if isinstance(pts, list) and len(pts) >= 3:
-                            polygons.append({
-                                "id": str(item.id),
-                                "name": geom.get("zone_name") or item.name or item.roi_name or "Monitored Zone",
-                                "type": item.roi_type,
-                                "points": pts,
-                                "warning_threshold": int(geom.get("warning_threshold") or 50),
-                                "danger_threshold": int(geom.get("danger_threshold") or 80),
-                                "capacity": int(geom.get("capacity") or 100),
-                            })
-                    return lines, polygons
-
-            global _main_loop
-            if _main_loop and _main_loop.is_running():
-                fut = asyncio.run_coroutine_threadsafe(_fetch(), _main_loop)
-                res_lines, res_polygons = fut.result(timeout=1.5)
-                self._cached_roi_lines = res_lines
-                self._cached_roi_polygons = res_polygons
-        except Exception:
-            pass
 
     def _crowd_ai_detection_loop(self):
         logger.info(f"[Crowd-AI-Worker:{self.state.camera_id}] Crowd AI detection loop started.")
@@ -639,7 +857,8 @@ class RTSPCameraWorker:
                 continue
 
             now = time.time()
-            if (now - self._roi_lines_last_fetch) > 3.0:
+            _refresh_interval = 5.0 if not self._cached_roi_lines else 60.0
+            if (now - self._roi_lines_last_fetch) > _refresh_interval:
                 self._roi_lines_last_fetch = now
                 self._refresh_roi_lines()
 
@@ -713,43 +932,228 @@ class RTSPCameraWorker:
                 purposes = self.state.ai_purposes or ["ENTRY_EXIT"]
 
                 # -----------------------------------------------------------
-                # 1. ENTRY_EXIT Mode: Line crossing detection
+                # 1. ENTRY / EXIT Mode: High-Accuracy IoU + Trajectory Tracking
                 # -----------------------------------------------------------
-                if "ENTRY_EXIT" in purposes:
-                    if self._prev_centroids and curr_centroids and self._cached_roi_lines:
-                        for p_curr in curr_centroids:
-                            closest_p = None
-                            min_d = 70.0
-                            for p_prev in self._prev_centroids:
-                                d = math.hypot(p_curr[0] - p_prev[0], p_curr[1] - p_prev[1])
-                                if d < min_d:
-                                    min_d = d
-                                    closest_p = p_prev
+                if any(p in purposes for p in ("ENTRY", "EXIT", "ENTRY_EXIT")):
+                    curr_time = time.time()
+                    matched_tids = set()
 
-                            if closest_p:
+                    # Associate each detection with an active track (IoU first, then adaptive centroid)
+                    for det in new_crowd_boxes:
+                        det_box = det["bbox"]
+                        det_c = det["centroid"]
+                        det_tc = (det_c[0], det_box[1])  # Head (top-center)
+                        det_bc = (det_c[0], det_box[3])  # Legs/Feet (bottom-center)
+                        det["top_center"] = det_tc
+                        det["bottom_center"] = det_bc
+
+                        best_tid = None
+                        best_score = -1.0
+                        bw = det_box[2] - det_box[0]
+                        bh = det_box[3] - det_box[1]
+                        max_d = max(180.0, max(bw, bh) * 1.2)
+
+                        for tid, trk in list(self._crowd_tracks.items()):
+                            if tid in matched_tids:
+                                continue
+                            iou = _box_iou(det_box, trk["bbox"])
+                            dist = math.hypot(det_c[0] - trk["centroid"][0], det_c[1] - trk["centroid"][1])
+                            if iou > 0.20:
+                                score = 2.0 + iou
+                            elif dist < max_d:
+                                score = 1.0 - (dist / max_d)
+                            else:
+                                score = -1.0
+
+                            if score > best_score:
+                                best_score = score
+                                best_tid = tid
+
+                        if best_tid is not None:
+                            matched_tids.add(best_tid)
+                            trk = self._crowd_tracks[best_tid]
+                            prev_c = trk["centroid"]
+                            prev_tc = trk.get("top_center", (prev_c[0], trk["bbox"][1]))
+                            prev_bc = trk["bottom_center"]
+
+                            trk["bbox"] = det_box
+                            trk["centroid"] = det_c
+                            trk["top_center"] = det_tc
+                            trk["bottom_center"] = det_bc
+                            trk["last_seen"] = curr_time
+                            trk["hits"] += 1
+                            if "history" not in trk:
+                                trk["history"] = deque(maxlen=10)
+                            trk["history"].append(det_c)
+                            det["track_id"] = best_tid
+
+                            # Line crossing evaluation for active track
+                            if self._cached_roi_lines:
                                 for line in self._cached_roi_lines:
+                                    line_id = str(line.get("id") or line.get("name") or "line")
                                     l1 = (int(line["start"]["x"] * w_orig), int(line["start"]["y"] * h_orig))
                                     l2 = (int(line["end"]["x"] * w_orig), int(line["end"]["y"] * h_orig))
-                                    if _segments_cross(closest_p, p_curr, l1, l2):
-                                        v1 = (p_curr[0] - l1[0], p_curr[1] - l1[1])
-                                        v2 = (l2[0] - l1[0], l2[1] - l1[1])
-                                        cross = v1[0] * v2[1] - v1[1] * v2[0]
-                                        line_dir = (line.get("direction") or "BOTH").upper()
-                                        if line_dir == "OUT" or (cross < 0 and line_dir == "BOTH"):
-                                            self.state.out_count += 1
-                                        else:
-                                            self.state.in_count += 1
-                                        self.state.occupancy_count = max(0, self.state.in_count - self.state.out_count)
-                                        logger.info(f"[YOLO11x-Crowd:{self.state.camera_id}] Person crossed line '{line.get('name')}': IN={self.state.in_count} OUT={self.state.out_count}")
-                                        _emit_frs_event_threadsafe("crowd_telemetry", {
-                                            "camera_id": self.state.camera_id,
-                                            "camera_code": self.state.camera_id,
-                                            "in_count": self.state.in_count,
-                                            "out_count": self.state.out_count,
-                                            "occupancy": self.state.occupancy_count,
-                                            "headcount": len(new_crowd_boxes),
-                                            "timestamp": datetime.now(timezone.utc).isoformat(),
-                                        })
+
+                                    # Extend line slightly (25px) at endpoints for edge robustness
+                                    vx = l2[0] - l1[0]
+                                    vy = l2[1] - l1[1]
+                                    l_len = math.hypot(vx, vy)
+                                    if l_len > 0:
+                                        ext_x = int(vx / l_len * 25)
+                                        ext_y = int(vy / l_len * 25)
+                                        el1 = (l1[0] - ext_x, l1[1] - ext_y)
+                                        el2 = (l2[0] + ext_x, l2[1] + ext_y)
+                                    else:
+                                        el1, el2 = l1, l2
+
+                                    # 1. Check if bounding box touches or crosses line segment
+                                    box_touches = _box_touches_line(det_box, el1, el2)
+                                    cross_tc = _segments_cross(prev_tc, det_tc, el1, el2)
+                                    cross_c  = _segments_cross(prev_c,  det_c,  el1, el2)
+                                    cross_bc = _segments_cross(prev_bc, det_bc, el1, el2)
+
+                                    is_touching = box_touches or cross_tc or cross_c or cross_bc
+                                    if not is_touching:
+                                        continue
+
+                                    # 2. Strict Deduplication:
+                                    # Rule A: Has this track already been counted on this line?
+                                    if line_id in trk["crossed_lines"]:
+                                        continue
+
+                                    # Rule B: Track cooldown (minimum 3.0s between crossings for same track)
+                                    if curr_time < trk.get("cooldown_until", 0.0):
+                                        continue
+
+                                    # Rule C: SPATIAL-TEMPORAL DEDUPLICATION (1 PERSON = EXACTLY 1 COUNT)
+                                    # If a count was registered at this location on the line within 2.2s,
+                                    # it is the same physical person whose bounding box is still on the line!
+                                    is_duplicate = False
+                                    for rc in self._recent_crossings:
+                                        if (curr_time - rc["time"]) < 2.2 and rc.get("line_id") == line_id:
+                                            dist_to_recent = math.hypot(det_c[0] - rc["pos"][0], det_c[1] - rc["pos"][1])
+                                            if dist_to_recent < 130.0:
+                                                is_duplicate = True
+                                                trk["crossed_lines"].add(line_id)
+                                                trk["cooldown_until"] = curr_time + 3.0
+                                                break
+
+                                    if is_duplicate:
+                                        continue
+
+                                    # Rule D: Inherit crossed state from nearby track if ID switched
+                                    for old_tid, old_trk in self._crowd_tracks.items():
+                                        if old_tid != best_tid and line_id in old_trk.get("crossed_lines", set()):
+                                            if math.hypot(det_c[0] - old_trk["centroid"][0], det_c[1] - old_trk["centroid"][1]) < 110.0:
+                                                is_duplicate = True
+                                                trk["crossed_lines"].add(line_id)
+                                                trk["cooldown_until"] = curr_time + 3.0
+                                                break
+
+                                    if is_duplicate:
+                                        continue
+
+                                    # --- VALID NEW PERSON TOUCHING / CROSSING ROI: COUNT EXACTLY ONCE ---
+                                    trk["crossed_lines"].add(line_id)
+                                    trk["cooldown_until"] = curr_time + 4.0
+                                    self._recent_crossings.append({
+                                        "time": curr_time,
+                                        "pos": det_c,
+                                        "line_id": line_id,
+                                        "track_id": best_tid,
+                                    })
+                                    # Prune crossings older than 10s
+                                    self._recent_crossings = [rc for rc in self._recent_crossings if (curr_time - rc["time"]) < 10.0]
+
+                                    # Direction determination using track history
+                                    hist = trk.get("history")
+                                    if hist and len(hist) >= 2:
+                                        start_c = hist[0]
+                                        mv_x = det_c[0] - start_c[0]
+                                        mv_y = det_c[1] - start_c[1]
+                                    else:
+                                        mv_x = det_c[0] - prev_c[0]
+                                        mv_y = det_c[1] - prev_c[1]
+
+                                    cross_prod = vx * mv_y - vy * mv_x
+                                    line_type = str(line.get("type") or "").upper()
+                                    line_dir = (line.get("direction") or ("IN" if "ENTRY" in line_type else ("OUT" if "EXIT" in line_type else "BOTH"))).upper()
+
+                                    is_pure_entry = ("ENTRY" in purposes and "EXIT" not in purposes) or line_type == "ENTRY_LINE"
+                                    is_pure_exit = ("EXIT" in purposes and "ENTRY" not in purposes) or line_type == "EXIT_LINE"
+
+                                    if is_pure_exit or (not is_pure_entry and (line_dir == "OUT" or (cross_prod < 0 and line_dir == "BOTH"))):
+                                        self.state.out_count += 1
+                                        inflow_d, outflow_d = 0, 1
+                                        crossing_label = "OUT"
+                                    else:
+                                        self.state.in_count += 1
+                                        inflow_d, outflow_d = 1, 0
+                                        crossing_label = "IN"
+
+                                    self.state.occupancy_count = max(0, self.state.in_count - self.state.out_count)
+                                    logger.info(
+                                        f"[YOLO11x-Crowd:{self.state.camera_id}] Track #{best_tid} touched/crossed '{line.get('name')}': "
+                                        f"{crossing_label} | IN={self.state.in_count} OUT={self.state.out_count} OCCUPANCY={self.state.occupancy_count}"
+                                    )
+
+                                    # 1. Real-time WebSocket emission
+                                    _emit_frs_event_threadsafe("crowd_telemetry", {
+                                        "camera_id": self.state.camera_id,
+                                        "camera_code": self.state.camera_id,
+                                        "in_count": self.state.in_count,
+                                        "out_count": self.state.out_count,
+                                        "occupancy": self.state.occupancy_count,
+                                        "headcount": len(new_crowd_boxes),
+                                        "timestamp": datetime.now(timezone.utc).isoformat(),
+                                    })
+
+                                    # 2. Database Persistence for Dashboard, Analytics & Reports
+                                    _persist_crowd_snapshot_threadsafe(
+                                        camera_code=self.state.camera_id,
+                                        inflow_delta=inflow_d,
+                                        outflow_delta=outflow_d,
+                                        headcount=len(new_crowd_boxes),
+                                    )
+                        else:
+                            # Register new track
+                            new_tid = self._next_track_id
+                            self._next_track_id += 1
+                            det["track_id"] = new_tid
+                            new_crossed = set()
+                            # If new track is spawned near a track that already crossed, inherit crossed status
+                            for old_tid, old_trk in self._crowd_tracks.items():
+                                if old_trk.get("crossed_lines"):
+                                    if math.hypot(det_c[0] - old_trk["centroid"][0], det_c[1] - old_trk["centroid"][1]) < 110.0:
+                                        new_crossed.update(old_trk["crossed_lines"])
+                                        break
+                            self._crowd_tracks[new_tid] = {
+                                "track_id": new_tid,
+                                "bbox": det_box,
+                                "centroid": det_c,
+                                "top_center": det_tc,
+                                "bottom_center": det_bc,
+                                "last_seen": curr_time,
+                                "hits": 1,
+                                "history": deque([det_c], maxlen=10),
+                                "cooldown_until": 0.0,
+                                "crossed_lines": new_crossed,
+                            }
+
+                    # Prune stale tracks inactive for > 2.5 seconds (prevents track loss on momentary frame skip)
+                    stale_tids = [tid for tid, trk in self._crowd_tracks.items() if (curr_time - trk["last_seen"]) > 2.5]
+                    for tid in stale_tids:
+                        del self._crowd_tracks[tid]
+
+                    # Periodic telemetry snapshot flush (every 30s)
+                    if (curr_time - self._last_snapshot_persist) > 30.0:
+                        self._last_snapshot_persist = curr_time
+                        _persist_crowd_snapshot_threadsafe(
+                            camera_code=self.state.camera_id,
+                            inflow_delta=0,
+                            outflow_delta=0,
+                            headcount=len(new_crowd_boxes),
+                        )
 
                 # -----------------------------------------------------------
                 # 2. ZONE Mode: Point-in-polygon headcount + density alert
@@ -794,7 +1198,8 @@ class RTSPCameraWorker:
                             total_zone_count += count
 
                     self._zone_stats = zone_stats
-                    self.state.occupancy_count = total_zone_count if zone_stats else len(curr_centroids)
+                    eff_count = total_zone_count if zone_stats else len(curr_centroids)
+                    self.state.occupancy_count = eff_count
                     self.state.zone_data = [
                         {
                             "name": z["name"],
@@ -806,56 +1211,230 @@ class RTSPCameraWorker:
                         for z in zone_stats
                     ]
 
+                    # Periodic zone persistence (every 5s or significant count change)
+                    curr_time = time.time()
+                    if (curr_time - getattr(self, "_last_zone_persist", 0.0)) > 5.0 or abs(eff_count - getattr(self, "_last_zone_count", -999)) >= 2:
+                        self._last_zone_persist = curr_time
+                        self._last_zone_count = eff_count
+                        z_code = getattr(self.state, "zone_code", "ZONE-A")
+                        first_poly = zone_stats[0] if zone_stats else {}
+                        poly_cap = first_poly.get("capacity") or getattr(self.state, "zone_capacity", 100)
+                        poly_warn = first_poly.get("warning_threshold") or getattr(self.state, "warning_threshold", 50)
+                        poly_dang = first_poly.get("danger_threshold") or getattr(self.state, "danger_threshold", 80)
+
+                        if eff_count >= poly_dang:
+                            calc_status = "RED"
+                        elif eff_count >= poly_warn:
+                            calc_status = "ORANGE"
+                        else:
+                            calc_status = "GREEN"
+
+                        calc_pct = round((eff_count / float(poly_cap)) * 100.0, 1) if poly_cap > 0 else 0.0
+
+                        _persist_crowd_snapshot_threadsafe(
+                            camera_code=self.state.camera_id,
+                            inflow_delta=0,
+                            outflow_delta=0,
+                            headcount=eff_count,
+                            zone_code_override=z_code,
+                        )
+                        _emit_frs_event_threadsafe("zone_update", {
+                            "camera_id": self.state.camera_id,
+                            "camera_code": self.state.camera_id,
+                            "zone_code": z_code,
+                            "current_people": eff_count,
+                            "capacity": poly_cap,
+                            "status": calc_status,
+                            "density_pct": calc_pct,
+                            "occupancy": eff_count,
+                            "zone_data": self.state.zone_data,
+                            "timestamp": datetime.now(timezone.utc).isoformat(),
+                        })
+
                 # -----------------------------------------------------------
                 # 3. QUEUE Mode: Centroid flow & speed prediction
                 # -----------------------------------------------------------
+                # -----------------------------------------------------------
+                # 3. QUEUE Mode: Ground-truth locomotion tracking & walking vs standing classification
+                # -----------------------------------------------------------
                 elif "QUEUE" in purposes:
-                    queue_centroids = []
-                    if self._cached_roi_polygons:
-                        for c in curr_centroids:
-                            norm_pt = (c[0] / float(w_orig), c[1] / float(h_orig))
-                            in_any = False
-                            for poly in self._cached_roi_polygons:
-                                if _point_in_polygon(norm_pt, poly["points"]):
-                                    in_any = True
+                    curr_time = time.time()
+                    queue_polygons = [p for p in self._cached_roi_polygons if p.get("type") in ("QUEUE_ROI", "QUEUE_AREA")]
+
+                    # For each detected person in new_crowd_boxes, check if they are in the queue polygon
+                    queue_detections = []
+                    for det in new_crowd_boxes:
+                        x1, y1, x2, y2 = det["bbox"]
+                        cx = (x1 + x2) // 2
+                        cy = (y1 + y2) // 2
+                        bc = (cx, y2)  # ground contact / feet
+                        hip = (cx, int(y1 * 0.35 + y2 * 0.65))  # lower body
+                        det["bottom_center"] = bc
+                        det["height"] = max(10, y2 - y1)
+
+                        if queue_polygons:
+                            norm_c = (cx / float(w_orig), cy / float(h_orig))
+                            norm_bc = (cx / float(w_orig), y2 / float(h_orig))
+                            norm_hip = (cx / float(w_orig), hip[1] / float(h_orig))
+                            in_q = False
+                            for poly in queue_polygons:
+                                pts = poly["points"]
+                                if _point_in_polygon(norm_c, pts) or _point_in_polygon(norm_bc, pts) or _point_in_polygon(norm_hip, pts):
+                                    in_q = True
                                     break
-                            if in_any:
-                                queue_centroids.append(c)
-                    else:
-                        queue_centroids = list(curr_centroids)
+                            det["in_queue"] = in_q
+                        else:
+                            det["in_queue"] = True
 
-                    # Compute movement displacement against previous frame
-                    if self._prev_queue_centroids and queue_centroids:
-                        displacements = []
-                        for curr_p in queue_centroids:
-                            min_d = 100.0
-                            best_prev = None
-                            for prev_p in self._prev_queue_centroids:
-                                d = math.hypot(curr_p[0] - prev_p[0], curr_p[1] - prev_p[1])
-                                if d < min_d:
-                                    min_d = d
-                                    best_prev = prev_p
-                            if best_prev is not None:
-                                displacements.append(min_d)
+                        if det["in_queue"]:
+                            queue_detections.append(det)
 
-                        if displacements:
-                            avg_disp = sum(displacements) / len(displacements)
-                            self._queue_displacement_history.append(avg_disp)
-                            mean_disp = float(np.mean(self._queue_displacement_history))
-                            if mean_disp < 3.0:
-                                self.state.queue_movement_status = "STOPPED"
-                            elif mean_disp <= 12.0:
-                                self.state.queue_movement_status = "SLOW"
+                    # Match queue detections to persistent queue tracks (IoU + ground position)
+                    matched_q_tids = set()
+                    for det in queue_detections:
+                        det_box = det["bbox"]
+                        det_bc = det["bottom_center"]
+                        det_c = det["centroid"]
+                        det_h = det["height"]
+
+                        best_tid = None
+                        best_score = -1.0
+                        for q_tid, trk in list(self._queue_tracks.items()):
+                            if q_tid in matched_q_tids:
+                                continue
+                            iou = _box_iou(det_box, trk["bbox"])
+                            dist_bc = math.hypot(det_bc[0] - trk["ground"][0], det_bc[1] - trk["ground"][1])
+                            dist_c = math.hypot(det_c[0] - trk["centroid"][0], det_c[1] - trk["centroid"][1])
+                            max_d = max(160.0, det_h * 0.9)
+                            if iou > 0.20:
+                                score = 2.0 + iou
+                            elif min(dist_bc, dist_c) < max_d:
+                                score = 1.0 - (min(dist_bc, dist_c) / max_d)
                             else:
-                                self.state.queue_movement_status = "FAST"
+                                score = -1.0
+
+                            if score > best_score:
+                                best_score = score
+                                best_tid = q_tid
+
+                        if best_tid is not None:
+                            matched_q_tids.add(best_tid)
+                            trk = self._queue_tracks[best_tid]
+                            trk["bbox"] = det_box
+                            trk["centroid"] = det_c
+                            trk["ground"] = det_bc
+                            trk["height"] = det_h
+                            trk["last_seen"] = curr_time
+                            trk["history"].append((curr_time, det_bc[0], det_bc[1], det_c[0], det_c[1], det_h))
+                        else:
+                            new_tid = self._next_queue_track_id
+                            self._next_queue_track_id += 1
+                            matched_q_tids.add(new_tid)
+                            hist = deque(maxlen=25)
+                            hist.append((curr_time, det_bc[0], det_bc[1], det_c[0], det_c[1], det_h))
+                            self._queue_tracks[new_tid] = {
+                                "track_id": new_tid,
+                                "bbox": det_box,
+                                "centroid": det_c,
+                                "ground": det_bc,
+                                "height": det_h,
+                                "last_seen": curr_time,
+                                "history": hist,
+                                "movement_state": "STOPPED",
+                                "speed_px": 0.0,
+                            }
+                            trk = self._queue_tracks[new_tid]
+
+                        # Compute net locomotion velocity (filtering out hand, head, and upper-body gestures)
+                        hist = trk["history"]
+                        best_sample = None
+                        for s in hist:
+                            dt = curr_time - s[0]
+                            if 0.6 <= dt <= 1.8:
+                                best_sample = s
+                                break
+                        if best_sample is None and len(hist) >= 4:
+                            best_sample = hist[0]
+
+                        if best_sample is not None:
+                            dt = curr_time - best_sample[0]
+                            if dt >= 0.5:
+                                # Net ground displacement (feet position)
+                                d_ground = math.hypot(det_bc[0] - best_sample[1], det_bc[1] - best_sample[2])
+                                # Net centroid displacement
+                                d_c = math.hypot(det_c[0] - best_sample[3], det_c[1] - best_sample[4])
+                                # Weighted displacement (feet 65%, centroid 35%)
+                                net_disp = 0.65 * d_ground + 0.35 * d_c
+                                speed_px_s = net_disp / dt
+                                norm_speed = speed_px_s / max(50.0, det_h)
+
+                                # Path length across samples to check directional efficiency (net vs total jitter)
+                                path_len = 0.0
+                                sample_list = [s for s in hist if s[0] >= best_sample[0]]
+                                for i in range(1, len(sample_list)):
+                                    path_len += math.hypot(sample_list[i][1] - sample_list[i-1][1], sample_list[i][2] - sample_list[i-1][2])
+                                coherence = net_disp / max(1.0, path_len)
+
+                                trk["speed_px"] = speed_px_s
+
+                                # Classification:
+                                # STANDING: hand waves, phone talks, head turns, body shake stay in place
+                                # SLOW: slow walking / inching in queue
+                                # MOVING: actual walking locomotion
+                                if speed_px_s < 25.0 or net_disp < 20.0 or norm_speed < 0.07 or coherence < 0.35:
+                                    trk["movement_state"] = "STOPPED"
+                                elif speed_px_s < 65.0 or norm_speed < 0.22:
+                                    trk["movement_state"] = "SLOW"
+                                else:
+                                    trk["movement_state"] = "MOVING"
+
+                        det["movement_state"] = trk.get("movement_state", "STOPPED")
+
+                    # Prune stale queue tracks (not seen for > 1.5s)
+                    stale_q_tids = [tid for tid, trk in self._queue_tracks.items() if (curr_time - trk["last_seen"]) > 1.5]
+                    for tid in stale_q_tids:
+                        del self._queue_tracks[tid]
+
+                    # Aggregate queue-level movement status
+                    q_count = len(queue_detections)
+                    self.state.occupancy_count = q_count
+
+                    if q_count == 0:
+                        self.state.queue_movement_status = "EMPTY"
                     else:
-                        if len(queue_centroids) == 0:
-                            self.state.queue_movement_status = "EMPTY"
+                        active_states = [trk.get("movement_state", "STOPPED") for tid, trk in self._queue_tracks.items() if (curr_time - trk["last_seen"]) <= 0.8]
+                        if not active_states:
+                            active_states = ["STOPPED"]
+
+                        if "MOVING" in active_states:
+                            self.state.queue_movement_status = "MOVING"
+                        elif "SLOW" in active_states:
+                            self.state.queue_movement_status = "SLOW"
                         else:
                             self.state.queue_movement_status = "STOPPED"
 
-                    self._prev_queue_centroids = queue_centroids
-                    self.state.occupancy_count = len(queue_centroids)
+                    if q_count > 0:
+                        logger.info(f"[Crowd-AI-Worker:{self.state.camera_id}] QUEUE: {q_count} person(s), Status: {self.state.queue_movement_status}")
+
+                    # Periodic queue persistence (every 8s or status change)
+                    if (curr_time - getattr(self, "_last_queue_persist", 0.0)) > 8.0 or self.state.queue_movement_status != getattr(self, "_last_queue_status", ""):
+                        self._last_queue_persist = curr_time
+                        self._last_queue_status = self.state.queue_movement_status
+                        _persist_queue_snapshot_threadsafe(
+                            camera_code=self.state.camera_id,
+                            headcount=q_count,
+                            movement_status=self.state.queue_movement_status,
+                            zone_code_override=getattr(self.state, "zone_code", "ZONE-A"),
+                        )
+                        _emit_frs_event_threadsafe("queue_update", {
+                            "camera_id": self.state.camera_id,
+                            "camera_code": self.state.camera_id,
+                            "zone_code": getattr(self.state, "zone_code", "ZONE-A"),
+                            "headcount": q_count,
+                            "occupancy": q_count,
+                            "queue_movement_status": self.state.queue_movement_status,
+                            "timestamp": datetime.now(timezone.utc).isoformat(),
+                        })
 
                 self._prev_centroids = curr_centroids
                 with self._crowd_boxes_lock:
@@ -863,7 +1442,7 @@ class RTSPCameraWorker:
                 self.state.detections_count = len(new_crowd_boxes)
 
             except Exception as e:
-                logger.debug(f"[Crowd-AI-Worker] Inference loop warning: {e}")
+                logger.warning(f"[Crowd-AI-Worker:{self.state.camera_id}] Inference loop warning: {type(e).__name__}: {e}")
 
             time.sleep(0.12)
 
@@ -959,34 +1538,54 @@ class RTSPCameraWorker:
                     # -------------------------------------------------------
                     # A. ENTRY / EXIT COUNTING OVERLAY
                     # -------------------------------------------------------
-                    if "ENTRY_EXIT" in purposes:
-                        # Draw person boxes (emerald green)
+                    is_entry = "ENTRY" in purposes and "EXIT" not in purposes
+                    is_exit = "EXIT" in purposes and "ENTRY" not in purposes
+                    if is_entry or is_exit or "ENTRY_EXIT" in purposes:
+                        # Draw person boxes
+                        box_col = (46, 204, 113) if is_entry else ((0, 80, 245) if is_exit else (46, 204, 113))
                         for cb in cboxes:
                             x1, y1, x2, y2 = cb["bbox"]
-                            cv2.rectangle(bgr_crowd, (x1, y1), (x2, y2), (46, 204, 113), 2)
+                            cv2.rectangle(bgr_crowd, (x1, y1), (x2, y2), box_col, 2)
                             clbl = cb["label"]
                             (lw, lh), _ = cv2.getTextSize(clbl, cv2.FONT_HERSHEY_SIMPLEX, 0.45, 1)
                             top_y = max(lh + 6, y1)
-                            cv2.rectangle(bgr_crowd, (x1, top_y - lh - 6), (x1 + lw + 6, top_y + 2), (46, 204, 113), -1)
+                            cv2.rectangle(bgr_crowd, (x1, top_y - lh - 6), (x1 + lw + 6, top_y + 2), box_col, -1)
                             cv2.putText(bgr_crowd, clbl, (x1 + 3, top_y - 3), cv2.FONT_HERSHEY_SIMPLEX, 0.45, (0, 0, 0), 1, cv2.LINE_AA)
 
                         # Draw configured counting lines
                         for line in self._cached_roi_lines:
                             l1 = (int(line["start"]["x"] * w), int(line["start"]["y"] * h))
                             l2 = (int(line["end"]["x"] * w), int(line["end"]["y"] * h))
-                            line_color = (0, 215, 255) if "ENTRY" in line["type"] else ((255, 100, 50) if "EXIT" in line["type"] else (255, 200, 0))
+                            line_type = str(line.get("type") or "").upper()
+                            if is_entry or line_type == "ENTRY_LINE":
+                                line_color = (46, 204, 113)  # Green
+                                tag = f"ENTRY LINE | TOTAL IN: {self.state.in_count}"
+                            elif is_exit or line_type == "EXIT_LINE":
+                                line_color = (0, 0, 235)  # Red
+                                tag = f"EXIT LINE | TOTAL OUT: {self.state.out_count}"
+                            else:
+                                line_color = (0, 215, 255) if "ENTRY" in line_type else ((255, 100, 50) if "EXIT" in line_type else (255, 200, 0))
+                                tag = f"{line.get('name', 'LINE')} | IN: {self.state.in_count} | OUT: {self.state.out_count}"
+
                             cv2.line(bgr_crowd, l1, l2, line_color, 3, cv2.LINE_AA)
                             cv2.circle(bgr_crowd, l1, 6, line_color, -1)
                             cv2.circle(bgr_crowd, l2, 6, line_color, -1)
                             mx = (l1[0] + l2[0]) // 2
                             my = (l1[1] + l2[1]) // 2
-                            tag = f"{line.get('name', 'LINE')} | IN: {self.state.in_count} | OUT: {self.state.out_count}"
                             cv2.putText(bgr_crowd, tag, (max(10, mx - 100), max(22, my - 8)), cv2.FONT_HERSHEY_SIMPLEX, 0.45, (255, 255, 255), 1, cv2.LINE_AA)
 
-                        # Top HUD bar for Entry/Exit Counting
+                        # Top HUD bar for Entry / Exit Counting
                         cv2.rectangle(bgr_crowd, (0, 0), (w, 30), (15, 23, 42), -1)
-                        hud = f"YOLO11x ACTIVE | ENTRY/EXIT COUNTING | IN: {self.state.in_count} | OUT: {self.state.out_count} | OCCUPANCY: {self.state.occupancy_count}"
-                        cv2.putText(bgr_crowd, hud, (12, 20), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 140, 188), 2, cv2.LINE_AA)
+                        if is_entry:
+                            hud = f"YOLO11x ACTIVE | ENTRY GATE | TOTAL IN: {self.state.in_count}"
+                            hud_col = (46, 204, 113)
+                        elif is_exit:
+                            hud = f"YOLO11x ACTIVE | EXIT GATE | TOTAL OUT: {self.state.out_count}"
+                            hud_col = (0, 0, 235)
+                        else:
+                            hud = f"YOLO11x ACTIVE | ENTRY/EXIT | IN: {self.state.in_count} | OUT: {self.state.out_count} | OCCUPANCY: {self.state.occupancy_count}"
+                            hud_col = (255, 140, 188)
+                        cv2.putText(bgr_crowd, hud, (12, 20), cv2.FONT_HERSHEY_SIMPLEX, 0.5, hud_col, 2, cv2.LINE_AA)
 
                     # -------------------------------------------------------
                     # B. ZONE DENSITY MANAGEMENT OVERLAY (Polygons + Head Dots)
@@ -1051,6 +1650,8 @@ class RTSPCameraWorker:
                     elif "QUEUE" in purposes:
                         # Draw Queue Polygons / Area Box in Amber
                         for poly in self._cached_roi_polygons:
+                            if poly.get("type") not in ("QUEUE_ROI", "QUEUE_AREA"):
+                                continue
                             pts = poly["points"]
                             if len(pts) >= 3:
                                 poly_arr = np.array(
@@ -1060,42 +1661,70 @@ class RTSPCameraWorker:
                                 cv2.polylines(bgr_crowd, [poly_arr], True, (34, 153, 210), 3, cv2.LINE_AA)
                                 for pt in poly_arr:
                                     cv2.circle(bgr_crowd, tuple(pt), 5, (34, 153, 210), -1)
+                                p0 = poly_arr[0]
+                                cv2.putText(bgr_crowd, "QUEUE AREA", (max(10, p0[0]), max(20, p0[1] - 8)), cv2.FONT_HERSHEY_SIMPLEX, 0.45, (34, 153, 210), 1, cv2.LINE_AA)
 
-                        # Draw direction lines if any
+                        # Draw direction lines if any (only DIRECTION_LINE type)
                         for line in self._cached_roi_lines:
+                            if line.get("type") != "DIRECTION_LINE":
+                                continue
                             l1 = (int(line["start"]["x"] * w), int(line["start"]["y"] * h))
                             l2 = (int(line["end"]["x"] * w), int(line["end"]["y"] * h))
-                            cv2.line(bgr_crowd, l1, l2, (34, 153, 210), 3, cv2.LINE_AA)
-                            cv2.circle(bgr_crowd, l1, 5, (34, 153, 210), -1)
-                            cv2.circle(bgr_crowd, l2, 5, (34, 153, 210), -1)
-                            mx = (l1[0] + l2[0]) // 2
-                            my = (l1[1] + l2[1]) // 2
-                            cv2.putText(bgr_crowd, line.get('name', 'Queue Line'), (max(10, mx - 60), max(22, my - 8)), cv2.FONT_HERSHEY_SIMPLEX, 0.45, (34, 153, 210), 1, cv2.LINE_AA)
+                            cv2.line(bgr_crowd, l1, l2, (34, 153, 210), 2, cv2.LINE_AA)
+                            cv2.circle(bgr_crowd, l1, 4, (34, 153, 210), -1)
+                            cv2.circle(bgr_crowd, l2, 4, (34, 153, 210), -1)
 
-                        # Draw person boxes & head indicators
+                        # Draw person boxes & status indicators
                         for cb in cboxes:
                             x1, y1, x2, y2 = cb["bbox"]
-                            cv2.rectangle(bgr_crowd, (x1, y1), (x2, y2), (34, 153, 210), 2)
+                            in_q = cb.get("in_queue", False)
+                            p_state = cb.get("movement_state", "STOPPED")
+
+                            if not in_q:
+                                box_color = (160, 160, 160)
+                                tag = "HUMAN"
+                            elif p_state == "MOVING":
+                                box_color = (46, 204, 113)  # Bright Green
+                                tag = "WALKING"
+                            elif p_state == "SLOW":
+                                box_color = (34, 153, 210)  # Amber
+                                tag = "SLOW WALK"
+                            else:
+                                box_color = (0, 100, 235)  # Red/Amber
+                                tag = "STANDING"
+
+                            cv2.rectangle(bgr_crowd, (x1, y1), (x2, y2), box_color, 2)
+                            (tw, th), _ = cv2.getTextSize(tag, cv2.FONT_HERSHEY_SIMPLEX, 0.42, 1)
+                            top_y = max(th + 6, y1)
+                            cv2.rectangle(bgr_crowd, (x1, top_y - th - 6), (x1 + tw + 6, top_y + 2), box_color, -1)
+                            cv2.putText(bgr_crowd, tag, (x1 + 3, top_y - 2), cv2.FONT_HERSHEY_SIMPLEX, 0.42, (0, 0, 0), 1, cv2.LINE_AA)
+
+                            # Head indicator
                             hx, hy = cb.get("head", ((x1 + x2) // 2, y1 + 10))
-                            cv2.circle(bgr_crowd, (hx, hy), 6, (0, 255, 255), -1, cv2.LINE_AA)
+                            cv2.circle(bgr_crowd, (hx, hy), 4, (0, 255, 255), -1, cv2.LINE_AA)
+
+                            # Ground / Feet indicator for queue members
+                            if in_q:
+                                gx, gy = cb.get("bottom_center", ((x1 + x2) // 2, y2))
+                                cv2.circle(bgr_crowd, (gx, gy), 4, box_color, -1, cv2.LINE_AA)
 
                         # Top HUD bar for Queue Management with movement speed status
                         q_status = getattr(self.state, "queue_movement_status", "STOPPED")
-                        if q_status == "FAST":
+                        if q_status in ("FAST", "MOVING"):
                             stat_color = (63, 185, 80)
-                            stat_label = "FAST FLOW (ACTIVE)"
+                            stat_label = "MOVING (WALKING)"
                         elif q_status == "SLOW":
                             stat_color = (34, 153, 210)
-                            stat_label = "SLOW QUEUE (MODERATE)"
+                            stat_label = "SLOW (INCHING)"
                         elif q_status == "EMPTY":
                             stat_color = (180, 180, 180)
                             stat_label = "EMPTY"
                         else:
                             stat_color = (0, 0, 235)
-                            stat_label = "STOPPED / CONGESTED"
+                            stat_label = "STOPPED (STANDING)"
 
                         cv2.rectangle(bgr_crowd, (0, 0), (w, 30), (15, 23, 42), -1)
-                        hud = f"YOLO11x ACTIVE | QUEUE MANAGEMENT | WAITING: {self.state.occupancy_count} | FLOW: {stat_label}"
+                        hud = f"YOLO11x ACTIVE | QUEUE: {self.state.occupancy_count} PERSON(S) | FLOW: {stat_label}"
                         cv2.putText(bgr_crowd, hud, (12, 20), cv2.FONT_HERSHEY_SIMPLEX, 0.5, stat_color, 2, cv2.LINE_AA)
 
                     ok_cr, crowd_buf = cv2.imencode(".jpg", bgr_crowd, [cv2.IMWRITE_JPEG_QUALITY, 72])
@@ -1133,6 +1762,7 @@ class AddCameraRequest(BaseModel):
     camera_type: str = "FRS"  # "FRS" or "CROWD"
     is_frs: bool = True
     ai_purposes: Optional[List[str]] = Field(default_factory=lambda: ["ENTRY_EXIT", "ZONE"])
+    zone_code: Optional[str] = "ZONE-A"
 
 
 class CameraInfo(BaseModel):
@@ -1150,6 +1780,9 @@ class CameraInfo(BaseModel):
     out_count: int = 0
     occupancy_count: int = 0
     ai_purposes: List[str] = Field(default_factory=list)
+    queue_movement_status: Optional[str] = "STOPPED"
+    zone_data: Optional[List[dict]] = Field(default_factory=list)
+    zone_code: Optional[str] = "ZONE-A"
 
 
 # ── POST /cameras ────────────────────────────────────────────────────────────
@@ -1160,6 +1793,7 @@ async def add_frs_camera(req: AddCameraRequest):
     cam_id = req.camera_id or "CAM-KHB-345"
     is_frs = req.is_frs if req.camera_type == "FRS" else False
     ai_purp = req.ai_purposes or (["ENTRY_EXIT", "ZONE"] if req.camera_type == "CROWD" else ["FRS"])
+    zone_cd = (req.zone_code or "ZONE-A").upper().strip()
 
     with _workers_lock:
         # Check if an existing worker matches by ID or by same RTSP stream URL
@@ -1178,9 +1812,29 @@ async def add_frs_camera(req: AddCameraRequest):
             state.is_frs = is_frs
             state.camera_type = req.camera_type
             state.ai_purposes = ai_purp
+            state.zone_code = zone_cd
             if req.name and req.name != "Camera":
                 state.name = req.name
-            logger.info(f"[FRS-Engine] Re-keyed and updated worker for {cam_id} ({req.camera_type}) with purposes {ai_purp}")
+            logger.info(f"[FRS-Engine] Re-keyed and updated worker for {cam_id} ({req.camera_type}) in zone {zone_cd} with purposes {ai_purp}")
+
+            # DB sync
+            try:
+                from app.db.session import AsyncSessionLocal
+                from app.models.camera import Camera
+                from sqlalchemy import select
+                async def _sync_cam_db():
+                    async with AsyncSessionLocal() as pg_db:
+                        clean_id = cam_id.replace("-FRS", "").replace("-CROWD", "")
+                        stmt = select(Camera).where(Camera.camera_code.in_([cam_id, clean_id]))
+                        res = await pg_db.execute(stmt)
+                        for c in res.scalars().all():
+                            c.zone_code = zone_cd
+                        await pg_db.commit()
+                if _main_loop and _main_loop.is_running():
+                    asyncio.run_coroutine_threadsafe(_sync_cam_db(), _main_loop)
+            except Exception:
+                pass
+
             return CameraInfo(
                 camera_id=cam_id,
                 name=state.name,
@@ -1196,6 +1850,9 @@ async def add_frs_camera(req: AddCameraRequest):
                 out_count=getattr(state, "out_count", 0),
                 occupancy_count=getattr(state, "occupancy_count", 0),
                 ai_purposes=state.ai_purposes,
+                queue_movement_status=getattr(state, "queue_movement_status", "STOPPED"),
+                zone_data=getattr(state, "zone_data", []),
+                zone_code=getattr(state, "zone_code", "ZONE-A"),
             )
 
         state = CameraWorkerState(
@@ -1205,6 +1862,7 @@ async def add_frs_camera(req: AddCameraRequest):
             is_frs=is_frs,
             camera_type=req.camera_type,
             ai_purposes=ai_purp,
+            zone_code=zone_cd,
         )
         worker = RTSPCameraWorker(state)
         state.running = True
@@ -1218,7 +1876,25 @@ async def add_frs_camera(req: AddCameraRequest):
         _camera_workers[cam_id] = state
         t.start()
 
-    logger.info(f"[FRS-Engine] Camera added: {cam_id} ({req.camera_type}) -> {req.rtsp_url[:40]}...")
+    logger.info(f"[FRS-Engine] Camera added: {cam_id} ({req.camera_type}) in {zone_cd} -> {req.rtsp_url[:40]}...")
+
+    # DB sync
+    try:
+        from app.db.session import AsyncSessionLocal
+        from app.models.camera import Camera
+        from sqlalchemy import select
+        async def _sync_new_cam_db():
+            async with AsyncSessionLocal() as pg_db:
+                clean_id = cam_id.replace("-FRS", "").replace("-CROWD", "")
+                stmt = select(Camera).where(Camera.camera_code.in_([cam_id, clean_id]))
+                res = await pg_db.execute(stmt)
+                for c in res.scalars().all():
+                    c.zone_code = zone_cd
+                await pg_db.commit()
+        if _main_loop and _main_loop.is_running():
+            asyncio.run_coroutine_threadsafe(_sync_new_cam_db(), _main_loop)
+    except Exception:
+        pass
 
     return CameraInfo(
         camera_id=cam_id,
@@ -1230,6 +1906,7 @@ async def add_frs_camera(req: AddCameraRequest):
         stream_url=f"/api/v1/frs-engine/cameras/{cam_id}/stream",
         is_frs=is_frs,
         camera_type=req.camera_type,
+        zone_code=zone_cd,
     )
 
 
@@ -1255,12 +1932,16 @@ async def list_frs_engine_cameras():
                 in_count=getattr(state, "in_count", 0),
                 out_count=getattr(state, "out_count", 0),
                 occupancy_count=getattr(state, "occupancy_count", 0),
-                ai_purposes=getattr(state, "ai_purposes", ["ENTRY_EXIT", "ZONE"] if state.camera_type == "CROWD" else ["FRS"]),
+                ai_purposes=state.ai_purposes,
+                queue_movement_status=getattr(state, "queue_movement_status", "STOPPED"),
+                zone_data=getattr(state, "zone_data", []),
+                zone_code=getattr(state, "zone_code", "ZONE-A"),
             ))
     return result
 
 
 # ── DELETE /cameras/{id} ─────────────────────────────────────────────────────
+
 
 @router.delete("/cameras/{camera_id}", status_code=204)
 async def remove_frs_camera(camera_id: str):
@@ -1368,6 +2049,12 @@ def sync_worker_roi_lines(camera_code_or_id: str) -> bool:
         state.crowd_ai_active = True
         state.is_frs = False
         state.camera_type = "CROWD"
+        if hasattr(state, "worker") and state.worker:
+            state.worker._roi_lines_last_fetch = 0.0
+            if hasattr(state.worker, "_queue_tracks"):
+                state.worker._queue_tracks.clear()
+            if hasattr(state.worker, "_crowd_tracks"):
+                state.worker._crowd_tracks.clear()
         logger.info(f"[FRS-Engine] Camera {camera_code_or_id} synced ROI lines & activated YOLO11x Crowd AI")
         return True
     return False
@@ -1433,7 +2120,7 @@ async def api_reassign_camera_purpose(camera_id: str, new_purpose: str):
     permanently deletes old ROI geometries from PostgreSQL,
     and reassigns to the new purpose (ENTRY_EXIT, ZONE, or QUEUE).
     """
-    valid_purposes = {"ENTRY_EXIT", "ZONE", "QUEUE"}
+    valid_purposes = {"ENTRY", "EXIT", "ENTRY_EXIT", "ZONE", "QUEUE"}
     new_purpose = new_purpose.upper().strip()
     if new_purpose not in valid_purposes:
         raise HTTPException(
@@ -1511,7 +2198,55 @@ async def api_reassign_camera_purpose(camera_id: str, new_purpose: str):
     }
 
 
+@router.patch("/cameras/{camera_id}/assign-zone")
+async def api_assign_camera_zone(camera_id: str, zone_code: str):
+    """
+    Dynamically reassigns a camera to a specific zone (ZONE-A, ZONE-B, ZONE-C, ZONE-D),
+    updates PostgreSQL cameras table, and updates active worker state.
+    """
+    valid_zones = {"ZONE-A", "ZONE-B", "ZONE-C", "ZONE-D", "ZONE-E", "ZONE-F", "ZONE-G", "ZONE-H", "ZONE-I", "ZONE-J", "ZONE-K", "ZONE-L"}
+    zone_code = zone_code.upper().strip()
+    norm_map = {"ZONE A": "ZONE-A", "ZONE B": "ZONE-B", "ZONE C": "ZONE-C", "ZONE D": "ZONE-D"}
+    zone_code = norm_map.get(zone_code, zone_code)
+
+    state = get_worker_for_camera(camera_id)
+    if state:
+        state.zone_code = zone_code
+
+    clean_id = camera_id.replace("-FRS", "").replace("-CROWD", "")
+
+    # Persist in PostgreSQL cameras table
+    try:
+        from app.db.session import AsyncSessionLocal
+        from app.models.camera import Camera
+        from sqlalchemy import select
+
+        async with AsyncSessionLocal() as pg_db:
+            stmt = select(Camera).where(Camera.camera_code.in_([camera_id, clean_id]))
+            res = await pg_db.execute(stmt)
+            cams = res.scalars().all()
+            for cam in cams:
+                cam.zone_code = zone_code
+            await pg_db.commit()
+    except Exception as e:
+        logger.warning(f"[FRS-Engine] DB error updating camera zone for {camera_id}: {e}")
+
+    _emit_frs_event_threadsafe("camera_zone_changed", {
+        "camera_id": camera_id,
+        "zone_code": zone_code,
+        "timestamp": datetime.now(timezone.utc).isoformat(),
+    })
+
+    logger.info(f"[FRS-Engine] Camera {camera_id} assigned to zone: {zone_code}")
+    return {
+        "status": "success",
+        "camera_id": camera_id,
+        "zone_code": zone_code,
+    }
+
+
 @router.get("/cameras/{camera_id}/raw-stream")
+
 async def stream_camera_raw(camera_id: str):
     """Clean MJPEG stream without any FRS annotations, YOLO boxes, or counting lines."""
     state = get_worker_for_camera(camera_id)
@@ -1591,7 +2326,7 @@ async def enroll_person_api(
     if not name_clean:
         raise HTTPException(status_code=400, detail="Name cannot be empty")
 
-    enroll_dir = os.path.join(os.getcwd(), "backend", "data", "enrollment")
+    enroll_dir = str(_DATA_ENROLLMENT_DIR)
     os.makedirs(enroll_dir, exist_ok=True)
 
     # Save uploaded file
@@ -1779,7 +2514,7 @@ async def enroll_from_camera_api(req: CameraEnrollRequest):
     emb = best_face.embedding
 
     # Save cropped face portrait (square portrait with 25% margin)
-    enroll_dir = os.path.join(os.getcwd(), "backend", "data", "enrollment")
+    enroll_dir = str(_DATA_ENROLLMENT_DIR)
     os.makedirs(enroll_dir, exist_ok=True)
     filename = f"{name_clean.lower()}_{str(uuid.uuid4())[:6]}.jpg"
     dest_path = os.path.join(enroll_dir, filename)
@@ -1903,8 +2638,10 @@ async def frs_stream_websocket(websocket: WebSocket):
 
 def auto_start_main_camera():
     """
-    Auto-start the main CAM-KHB-001 FRS camera on backend startup.
-    RTSP URL from .env or hardcoded default.
+    Auto-start the main camera on backend startup.
+    Reads camera type from CAMERA_TYPE env var (default: CROWD).
+    CROWD cameras start with is_frs=False + crowd_ai_active=True so
+    the YOLO11x line-crossing detection loop activates immediately.
     """
     import os
     rtsp_url = os.getenv("RTSP_URL", RTSP_URL_DEFAULT)
@@ -1913,6 +2650,10 @@ def auto_start_main_camera():
         return
 
     cam_id = os.getenv("PHYSICAL_CAMERA_ID", "CAM-KHB-345")
+    # Read camera type from env; default to CROWD for Khairatabad deployment
+    cam_type = os.getenv("CAMERA_TYPE", "CROWD").upper()
+    is_frs = cam_type == "FRS"
+
     with _workers_lock:
         if cam_id in _camera_workers:
             return  # Already running
@@ -1921,9 +2662,21 @@ def auto_start_main_camera():
             camera_id=cam_id,
             rtsp_url=rtsp_url,
             name="Khairatabad Central Gate",
-            is_frs=True,
-            camera_type="FRS",
+            is_frs=is_frs,
+            camera_type=cam_type,
         )
+        # Set ai_purposes from env (default: ENTRY_EXIT for the gate camera)
+        cam_purpose = os.getenv("CAMERA_PURPOSE", "ENTRY_EXIT").upper()
+        state.ai_purposes = [cam_purpose]
+        # For CROWD cameras, activate crowd AI immediately so detection loop runs
+        if not is_frs:
+            state.crowd_ai_active = True
+            state.is_frs = False
+            state.camera_type = "CROWD"
+            logger.info(f"[FRS-Engine] Camera {cam_id} starting in CROWD AI mode (line-crossing enabled)")
+        else:
+            logger.info(f"[FRS-Engine] Camera {cam_id} starting in FRS mode")
+
         worker = RTSPCameraWorker(state)
         state.running = True
 
@@ -1936,4 +2689,4 @@ def auto_start_main_camera():
         _camera_workers[cam_id] = state
         t.start()
 
-    logger.info(f"[FRS-Engine] Auto-started main camera: {cam_id} -> {rtsp_url[:40]}...")
+    logger.info(f"[FRS-Engine] Auto-started main camera: {cam_id} ({cam_type}) -> {rtsp_url[:40]}...")

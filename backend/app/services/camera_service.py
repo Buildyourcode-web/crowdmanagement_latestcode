@@ -144,6 +144,8 @@ class CameraService:
         is_frs: Optional[bool] = None,
         search: Optional[str] = None,
         enabled_only: Optional[bool] = None,
+        event_id: Optional[uuid.UUID] = None,
+        allowed_site_ids: Optional[List[uuid.UUID]] = None,
         page: int = 1,
         page_size: int = 100,
     ) -> Tuple[List[CameraRead], int]:
@@ -155,10 +157,13 @@ class CameraService:
             is_frs=is_frs,
             search=search,
             enabled_only=enabled_only,
+            event_id=event_id,
+            allowed_site_ids=allowed_site_ids,
             skip=skip,
             limit=page_size,
         )
         return [self._build_camera_read(c) for c in cameras], total
+
 
     async def get_camera_by_code(self, camera_code: str) -> CameraRead:
         camera = await self.camera_repo.get_by_code(camera_code)

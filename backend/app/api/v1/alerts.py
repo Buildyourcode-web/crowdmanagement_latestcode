@@ -1,8 +1,9 @@
 from typing import List, Optional
 from fastapi import APIRouter, Depends, Query, status
 from sqlalchemy.ext.asyncio import AsyncSession
-from app.dependencies import get_current_user, get_db, require_permission
+from app.dependencies import get_current_user, get_db, get_event_context, require_permission, EventContext
 from app.models.user import User
+
 from app.schemas.alert import AlertActionRequest, AlertRead, AlertStatsResponse
 from app.schemas.common import StandardResponse
 from app.security.permissions import Permissions
@@ -22,10 +23,11 @@ async def list_alerts(
     search: Optional[str] = Query(None, description="Search alert title or message"),
     page: int = Query(1, ge=1),
     page_size: int = Query(50, ge=1, le=100),
+    ctx: EventContext = Depends(get_event_context),
     db: AsyncSession = Depends(get_db),
     current_user: User = Depends(require_permission(Permissions.ALERT_READ)),
 ):
-    """Retrieve operational alerts with multi-criteria filtering."""
+    """Retrieve operational alerts with multi-criteria filtering and event context isolation."""
     service = AlertService(db)
     alerts, total = await service.list_alerts(
         severity=severity,
@@ -34,9 +36,11 @@ async def list_alerts(
         camera_code=camera,
         status_filter=status,
         search=search,
+        event_id=ctx.event_id,
         page=page,
         page_size=page_size,
     )
+
     meta = ResponseMeta(
         page=page,
         page_size=page_size,

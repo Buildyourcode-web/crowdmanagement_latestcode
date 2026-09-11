@@ -1,194 +1,42 @@
-// Dashboard — Main command center screen (Real backend integration)
-import { useEffect, useState, useRef } from "react";
+// Dashboard — Clean BYC AI Command Center Dashboard
+import { useEffect, useState, useCallback, useRef, useMemo } from "react";
 import { useNavigate } from "react-router-dom";
-import KpiCard from "../components/common/KpiCard.jsx";
-import ActionCenter from "../components/alerts/ActionCenter.jsx";
-import { useCrowdStore } from "../store/useCrowdStore.js";
-import { useAlertStore } from "../store/useAlertStore.js";
-import { getCrowdSummary } from "../services/crowdService.js";
-import { getCameras, getCameraStats } from "../services/cameraService.js";
-import { getAlerts } from "../services/alertService.js";
-import { getMissingPersons } from "../services/frsService.js";
-import { LoadingState } from "../components/common/States.jsx";
+import ReactECharts from "echarts-for-react";
+import { getDashboardSummary } from "../services/dashboardService.js";
+import { realtimeService } from "../services/realtimeService.js";
+import { useDashboardStore } from "../store/useDashboardStore.js";
+import { useAppStore } from "../store/useAppStore.js";
+import { getChartTheme } from "../utils/chartTheme.js";
 
-// --- CCTV overlay with zero-overhead GPU-accelerated CSS scanlines -----------
-function ScanlineFeed({ cameraId, label, zone, people, aiLabel, severity, status, fps, ptzActive, onClick }) {
-  const borderColor = {
-    critical: "var(--cc-red)",
-    high: "var(--cc-orange)",
-    medium: "var(--cc-yellow)",
-    normal: "var(--cc-green)",
-    offline: "var(--cc-text-muted)",
-    degraded: "var(--cc-yellow)",
-  }[severity] || "var(--cc-border)";
+const DATE_RANGE_OPTIONS = [
+  { id: "today", label: "TODAY" },
+  { id: "yesterday", label: "YESTERDAY" },
+  { id: "7days", label: "LAST 7 DAYS" },
+  { id: "festival", label: "FESTIVAL" },
+];
 
-  const bgPattern = status === "offline"
-    ? "repeating-linear-gradient(45deg, #0a0a0a 0px, #0a0a0a 10px, #111 10px, #111 20px)"
-    : undefined;
-
-  return (
-    <div
-      onClick={onClick}
-      style={{
-        position: "relative",
-        background: status === "offline" ? undefined : "#050e18",
-        backgroundImage: bgPattern,
-        border: `1.5px solid ${borderColor}`,
-        borderRadius: 6,
-        overflow: "hidden",
-        cursor: "pointer",
-        minHeight: 160,
-        flex: "1 1 280px",
-        maxWidth: "calc(33.33% - 6px)",
-        transition: "border-color 0.3s",
-        display: "flex",
-        flexDirection: "column",
-      }}
-    >
-      {status === "online" && (
-        <div
-          style={{
-            position: "absolute",
-            inset: 0,
-            pointerEvents: "none",
-            zIndex: 2,
-            background: "repeating-linear-gradient(0deg, rgba(0,0,0,0.18) 0px, rgba(0,0,0,0.18) 1px, transparent 1px, transparent 4px)",
-            opacity: 0.7,
-          }}
-        />
-      )}
-
-      <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", padding: "5px 8px", background: "rgba(0,0,0,0.7)", zIndex: 3 }}>
-        <span style={{ fontFamily: "var(--cc-font-mono)", fontSize: 10, color: "var(--cc-text-muted)", letterSpacing: "0.06em" }}>
-          {cameraId}
-        </span>
-        <div style={{ display: "flex", gap: 5, alignItems: "center" }}>
-          {ptzActive && (
-            <span style={{ fontSize: 9, color: "var(--cc-yellow)", background: "rgba(210,153,34,0.15)", border: "1px solid var(--cc-yellow)", borderRadius: 3, padding: "1px 5px", letterSpacing: "0.08em" }}>PTZ</span>
-          )}
-          <span style={{
-            width: 7, height: 7, borderRadius: "50%",
-            background: status === "online" ? "var(--cc-green)" : "var(--cc-text-muted)",
-            boxShadow: status === "online" ? "0 0 6px var(--cc-green)" : "none",
-            animation: status === "online" ? "cc-pulse-dot 2s infinite" : "none",
-          }} />
-          <span style={{ fontSize: 9, color: status === "online" ? "var(--cc-green)" : "var(--cc-text-muted)", fontFamily: "var(--cc-font-mono)" }}>
-            {status === "online" ? `${fps || 24}fps` : status?.toUpperCase() || "OFFLINE"}
-          </span>
-        </div>
-      </div>
-
-      <div style={{ flex: 1, position: "relative", minHeight: 90, display: "flex", alignItems: "center", justifyContent: "center", zIndex: 3 }}>
-        {status === "offline" ? (
-          <div style={{ textAlign: "center", color: "var(--cc-text-muted)" }}>
-            <i className="bi bi-camera-video-off" style={{ fontSize: 32, display: "block", marginBottom: 6 }} />
-            <div style={{ fontSize: 11, fontFamily: "var(--cc-font-mono)", letterSpacing: "0.1em" }}>NO SIGNAL</div>
-          </div>
-        ) : (
-          <div style={{ width: "100%", height: "100%", position: "relative", padding: "8px 10px" }}>
-            <div style={{
-              position: "absolute", top: "20%", left: "15%", width: 28, height: 48,
-              border: `1px solid ${borderColor}`, borderRadius: 2,
-              boxShadow: `0 0 4px ${borderColor}`,
-              pointerEvents: "none",
-            }}>
-              <div style={{ position: "absolute", top: -14, left: 0, fontSize: 8, color: borderColor, fontFamily: "var(--cc-font-mono)", whiteSpace: "nowrap" }}>
-                {Math.floor(87 + Math.random() * 11)}%
-              </div>
-            </div>
-            <div style={{
-              position: "absolute", bottom: 6, left: "50%", transform: "translateX(-50%)",
-              background: "rgba(0,0,0,0.7)", borderRadius: 4, padding: "3px 10px",
-              fontFamily: "var(--cc-font-mono)", fontSize: 18, fontWeight: 700,
-              color: borderColor,
-              textShadow: `0 0 8px ${borderColor}`,
-              letterSpacing: "0.08em",
-            }}>
-              {(people || 0).toLocaleString()}
-              <span style={{ fontSize: 10, color: "var(--cc-text-muted)", marginLeft: 4 }}>pax</span>
-            </div>
-            <div style={{
-              position: "absolute", bottom: 6, right: 8,
-              fontFamily: "var(--cc-font-mono)", fontSize: 9, color: "rgba(255,255,255,0.4)",
-            }}>
-              {new Date().toLocaleTimeString("en-IN", { hour12: false, timeZone: "Asia/Kolkata" })}
-            </div>
-          </div>
-        )}
-      </div>
-
-      <div style={{ padding: "5px 8px", background: "rgba(0,0,0,0.6)", zIndex: 3, borderTop: `1px solid rgba(255,255,255,0.05)` }}>
-        <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center" }}>
-          <span style={{ fontSize: 10, color: "var(--cc-text-secondary)", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap", maxWidth: "65%" }}>
-            {zone || label}
-          </span>
-          <span style={{ fontSize: 9, color: borderColor, fontFamily: "var(--cc-font-mono)", letterSpacing: "0.05em" }}>
-            {aiLabel || (status === "offline" ? "?? Offline" : "? Online")}
-          </span>
-        </div>
-      </div>
-
-      <div style={{
-        position: "absolute", inset: 0, background: "rgba(88,166,255,0.04)",
-        opacity: 0, transition: "opacity 0.2s",
-        zIndex: 4,
-      }}
-        onMouseEnter={(e) => (e.currentTarget.style.opacity = 1)}
-        onMouseLeave={(e) => (e.currentTarget.style.opacity = 0)}
-      />
-    </div>
-  );
-}
-
-// --- Main Dashboard -----------------------------------------------------------
 export default function Dashboard() {
   const navigate = useNavigate();
-  const { totalCrowd, inflowPerMin, outflowPerMin, setCrowdFromAPI } = useCrowdStore();
-  const { alerts, setAlerts } = useAlertStore();
-  const [summary, setSummary] = useState(null);
-  const [camStats, setCamStats] = useState(null);
-  const [cameras, setCameras] = useState([]);
-  const [missingPersons, setMissingPersons] = useState([]);
-  const [loading, setLoading] = useState(true);
-  const [error, setError] = useState(null);
-  const [flashClass, setFlashClass] = useState("");
-  const [feedFilter, setFeedFilter] = useState("all");
+  const theme = useAppStore((s) => s.theme);
+  const ct = getChartTheme(theme);
+
+  // Zustand State Selectors (fine-grained to prevent redundant renders)
+  const dateRange = useDashboardStore((s) => s.dateRange);
+  const data = useDashboardStore((s) => s.data);
+  const loading = useDashboardStore((s) => s.loading);
+  const isRefreshing = useDashboardStore((s) => s.isRefreshing);
+  const error = useDashboardStore((s) => s.error);
+  const dataStatus = useDashboardStore((s) => s.dataStatus);
+  const setDateRange = useDashboardStore((s) => s.setDateRange);
+
+  const [selectedZoneCode, setSelectedZoneCode] = useState("all");
   const [clockStr, setClockStr] = useState("");
+  const inFlightRef = useRef(false);
+  const pendingRef = useRef(false);
+  const timerRef = useRef(null);
+  const isMountedRef = useRef(true);
 
-  useEffect(() => {
-    Promise.allSettled([
-      getCrowdSummary(),
-      getCameraStats(),
-      getCameras({ page_size: 12 }),
-      getAlerts({ page_size: 50 }),
-      getMissingPersons({ status: "searching" }),
-    ])
-      .then(([sRes, csRes, camsRes, alertsRes, mpRes]) => {
-        const s = sRes.status === "fulfilled" ? sRes.value : null;
-        const cs = csRes.status === "fulfilled" ? csRes.value : null;
-        const cams = camsRes.status === "fulfilled" ? camsRes.value : [];
-        const alertsData = alertsRes.status === "fulfilled" ? alertsRes.value : [];
-        const mpData = mpRes.status === "fulfilled" ? mpRes.value : [];
-
-        if (s) {
-          setSummary(s);
-          const d = s?.data ?? s ?? {};
-          setCrowdFromAPI(d);
-        }
-        if (cs) setCamStats(cs);
-        setCameras(Array.isArray(cams) ? cams : (cams?.data || []));
-        const alertList = Array.isArray(alertsData) ? alertsData : (alertsData?.data || []);
-        setAlerts(alertList);
-        setMissingPersons(Array.isArray(mpData) ? mpData : (mpData?.data || []));
-        setLoading(false);
-      })
-      .catch((err) => {
-        console.warn("[Dashboard] Data load notice:", err);
-        setLoading(false);
-      });
-  }, []);
-
-  // Live clock
+  // 1. Live Clock
   useEffect(() => {
     const tick = () =>
       setClockStr(new Date().toLocaleTimeString("en-IN", { hour12: false, timeZone: "Asia/Kolkata" }));
@@ -197,272 +45,885 @@ export default function Dashboard() {
     return () => clearInterval(iv);
   }, []);
 
-  // Flash on live update
+  // 2. Fetch authoritative dashboard summary with stable callback
+  const loadData = useCallback(async (silent = false) => {
+    if (inFlightRef.current) {
+      pendingRef.current = true;
+      return;
+    }
+    inFlightRef.current = true;
+    const store = useDashboardStore.getState();
+    if (!silent && !store.data) store.setLoading(true);
+    if (!silent) store.setIsRefreshing(true);
+
+    try {
+      const range = (store.dateRange || "today").toLowerCase();
+      const res = await getDashboardSummary(range);
+      if (!isMountedRef.current) return;
+      store.setDashboardData(res);
+    } catch (err) {
+      console.error("[Dashboard] Fetch error:", err);
+      if (!isMountedRef.current) return;
+      if (!useDashboardStore.getState().data) {
+        useDashboardStore.getState().setError("Failed to load Command Center summary.");
+      }
+    } finally {
+      if (isMountedRef.current) {
+        useDashboardStore.getState().setLoading(false);
+        useDashboardStore.getState().setIsRefreshing(false);
+      }
+      inFlightRef.current = false;
+      if (pendingRef.current && isMountedRef.current) {
+        pendingRef.current = false;
+        setTimeout(() => {
+          if (isMountedRef.current) loadData(true);
+        }, 1000);
+      }
+    }
+  }, []);
+
+  // 3. Mount & Polling with Tab Visibility Awareness
   useEffect(() => {
-    setFlashClass("cc-data-updated");
-    const t = setTimeout(() => setFlashClass(""), 800);
-    return () => clearTimeout(t);
-  }, [totalCrowd]);
+    isMountedRef.current = true;
+    loadData();
 
-  const criticalAlerts = alerts.filter((a) => a.severity === "critical").length;
-  const frsAlerts = alerts.filter((a) => a.type === "frs" || a.alert_type === "frs").length;
-  const medicalAlerts = alerts.filter((a) => a.type === "medical" || a.alert_type === "medical").length;
-  const criticalZones = summary?.critical_zones || summary?.criticalZones || 0;
-  const missingCount = missingPersons.length;
-  const blockedRoutes = summary?.blocked_routes || summary?.blockedRoutes || 0;
+    const scheduleNext = () => {
+      clearTimeout(timerRef.current);
+      if (typeof document !== "undefined" && document.visibilityState === "hidden") return;
+      timerRef.current = setTimeout(async () => {
+        if (isMountedRef.current && document.visibilityState === "visible") {
+          await loadData(true);
+          scheduleNext();
+        }
+      }, 5000);
+    };
 
-  // Map camera data to feed format
-  const cameraFeeds = cameras.map((cam) => ({
-    id: cam.code || cam.id,
-    label: cam.name || cam.label || cam.code,
-    zone: cam.zone_code || cam.zone || "",
-    status: cam.status || "unknown",
-    people: cam.current_count || cam.people || 0,
-    severity: cam.ai_severity || cam.severity || (cam.status === "offline" ? "offline" : "normal"),
-    fps: cam.fps || cam.current_fps || 24,
-    ai: cam.ai_event || "normal",
-    aiLabel: cam.ai_label || (cam.status === "offline" ? "?? Offline" : "? Online"),
-    ptzActive: cam.is_ptz || cam.ptz_active || false,
-  }));
+    scheduleNext();
 
-  // Filter feeds
-  const filteredFeeds = feedFilter === "all"
-    ? cameraFeeds
-    : feedFilter === "alerts"
-    ? cameraFeeds.filter((f) => ["critical", "high"].includes(f.severity))
-    : cameraFeeds.filter((f) => f.status === feedFilter);
+    const handleVisibilityChange = () => {
+      if (document.visibilityState === "visible") {
+        loadData(true);
+        scheduleNext();
+      } else {
+        clearTimeout(timerRef.current);
+      }
+    };
 
-  if (loading) return <LoadingState message="Loading command dashboard..." />;
+    document.addEventListener("visibilitychange", handleVisibilityChange);
 
-  if (error) {
-    return (
-      <div className="cc-page" style={{ alignItems: "center", justifyContent: "center" }}>
-        <div style={{ textAlign: "center", color: "var(--cc-red)", padding: 40 }}>
-          <i className="bi bi-exclamation-triangle-fill" style={{ fontSize: 40, display: "block", marginBottom: 12 }} />
-          <div style={{ fontSize: 14, fontWeight: 600 }}>{error}</div>
-          <button className="cc-btn" style={{ marginTop: 16 }} onClick={() => window.location.reload()}>
-            <i className="bi bi-arrow-clockwise" /> Retry
-          </button>
-        </div>
-      </div>
-    );
-  }
+    // 4. WebSocket Real-time event listener
+    const unsubWs = realtimeService.subscribe((msg, eventType, payload) => {
+      const type = eventType || msg?.type;
+      const dataPayload = payload || msg?.payload || msg;
+      if (type === "zone_update") {
+        if (dataPayload?.zone_code) {
+          useDashboardStore.getState().patchZoneDensity(
+            dataPayload.zone_code,
+            dataPayload.current_people,
+            dataPayload.capacity,
+            dataPayload.status,
+            dataPayload.density_pct
+          );
+        }
+        loadData(true);
+      } else if (type === "crowd_update" || type === "queue_update") {
+        if (dataPayload?.total_visitors_festival !== undefined) {
+          useDashboardStore.getState().patchDashboardMetrics({
+            total_visitors_festival: dataPayload.total_visitors_festival,
+            today_entries: dataPayload.today_entries,
+            today_exits: dataPayload.today_exits,
+            current_occupancy: dataPayload.current_occupancy,
+          });
+        } else {
+          loadData(true);
+        }
+      } else if (
+        type === "new_alert" ||
+        type === "frs_candidate" ||
+        type === "pipeline_state_changed" ||
+        type === "PIPELINE_STARTED" ||
+        type === "PIPELINE_STOPPED"
+      ) {
+        loadData(true);
+      }
+    });
+
+    const unsubStatus = realtimeService.subscribeStatus((status) => {
+      useDashboardStore.getState().setDataStatus(status);
+    });
+
+    return () => {
+      isMountedRef.current = false;
+      clearTimeout(timerRef.current);
+      document.removeEventListener("visibilitychange", handleVisibilityChange);
+      unsubWs();
+      unsubStatus();
+    };
+  }, [loadData]);
+
+  // 5. Reload when dateRange changes
+  useEffect(() => {
+    loadData();
+  }, [dateRange, loadData]);
+
+  // Handle Date Range Change
+  const handleDateRangeChange = (rangeId) => {
+    setDateRange(rangeId.toUpperCase());
+  };
+
+  // Memoized Chart Options
+  const hourlyChartOption = useMemo(() => {
+    if (!data?.hourly_flow || data.hourly_flow.length === 0) return null;
+
+    const hours = data.hourly_flow.map((p) => p.hour);
+    const entries = data.hourly_flow.map((p) => p.entry);
+    const exits = data.hourly_flow.map((p) => p.exit);
+
+    return {
+      backgroundColor: "transparent",
+      textStyle: ct.textStyle,
+      legend: {
+        top: 6,
+        right: 16,
+        textStyle: ct.legendText,
+        data: ["ENTRY", "EXIT"],
+        icon: "roundRect",
+      },
+      grid: { top: 40, right: 20, bottom: 30, left: 50 },
+      tooltip: {
+        trigger: "axis",
+        backgroundColor: "rgba(13, 17, 23, 0.95)",
+        borderColor: "rgba(255, 255, 255, 0.15)",
+        borderWidth: 1,
+        textStyle: { color: "#fff", fontSize: 12 },
+        formatter: (params) => {
+          let str = `<div style="font-weight:700;margin-bottom:4px;color:#8b949e">${params[0]?.axisValueLabel || ""}</div>`;
+          params.forEach((p) => {
+            const col = p.seriesName === "ENTRY" ? "#3fb950" : "#58a6ff";
+            str += `<div style="display:flex;justify-content:space-between;gap:16px;color:${col}">
+              <span>${p.seriesName}:</span>
+              <span style="font-family:monospace;font-weight:700">${p.value?.toLocaleString()} pax</span>
+            </div>`;
+          });
+          const ent = params.find((p) => p.seriesName === "ENTRY")?.value || 0;
+          const ext = params.find((p) => p.seriesName === "EXIT")?.value || 0;
+          const net = ent - ext;
+          const netCol = net >= 0 ? "#3fb950" : "#f85149";
+          str += `<div style="margin-top:4px;padding-top:4px;border-top:1px solid rgba(255,255,255,0.1);display:flex;justify-content:space-between;color:${netCol}">
+            <span>NET FLOW:</span>
+            <span style="font-family:monospace;font-weight:700">${net > 0 ? "+" : ""}${net.toLocaleString()} pax</span>
+          </div>`;
+          return str;
+        },
+      },
+      xAxis: {
+        type: "category",
+        data: hours,
+        axisLine: ct.axisLine,
+        axisTick: { show: false },
+        axisLabel: { color: ct.axisLabelColor, fontSize: 10 },
+        splitLine: { show: false },
+      },
+      yAxis: {
+        type: "value",
+        axisLine: ct.axisLine,
+        splitLine: ct.splitLine,
+        axisLabel: {
+          formatter: (v) => (v >= 1000 ? `${(v / 1000).toFixed(0)}k` : v),
+          color: ct.axisLabelColor,
+          fontSize: 10,
+        },
+      },
+      series: [
+        {
+          name: "ENTRY",
+          type: "line",
+          data: entries,
+          smooth: true,
+          showSymbol: false,
+          lineStyle: { color: "#3fb950", width: 2.5 },
+          areaStyle: {
+            color: {
+              type: "linear",
+              x: 0,
+              y: 0,
+              x2: 0,
+              y2: 1,
+              colorStops: [
+                { offset: 0, color: "rgba(63, 185, 80, 0.35)" },
+                { offset: 1, color: "rgba(63, 185, 80, 0.0)" },
+              ],
+            },
+          },
+        },
+        {
+          name: "EXIT",
+          type: "line",
+          data: exits,
+          smooth: true,
+          showSymbol: false,
+          lineStyle: { color: "#58a6ff", width: 2.5 },
+          areaStyle: {
+            color: {
+              type: "linear",
+              x: 0,
+              y: 0,
+              x2: 0,
+              y2: 1,
+              colorStops: [
+                { offset: 0, color: "rgba(88, 166, 255, 0.35)" },
+                { offset: 1, color: "rgba(88, 166, 255, 0.0)" },
+              ],
+            },
+          },
+        },
+      ],
+    };
+  }, [data?.hourly_flow, ct]);
+
+  // Daily Trend Table / Chart Option
+  const statusColor = dataStatus === "LIVE DATA" ? "#3fb950" : dataStatus === "DEGRADED" ? "#e3b341" : "#8b949e";
 
   return (
-    <div className="cc-page" style={{ gap: 10 }}>
-      {/* Page header */}
-      <div className="cc-page-header">
+    <div className="cc-page" style={{ gap: 14, paddingBottom: 30 }}>
+      {/* ========================================================================= */}
+      {/* SECTION 1: TOP HEADER */}
+      {/* ========================================================================= */}
+      <div className="cc-page-header" style={{ marginBottom: 0, paddingBottom: 10, borderBottom: "1px solid var(--cc-border)" }}>
         <div>
-          <div className="cc-page-title">Command Dashboard</div>
-          <div className="cc-page-subtitle">Khairatabad Ganesh Festival 2026 Live Operations</div>
-        </div>
-        <div style={{ display: "flex", gap: 6, alignItems: "center" }}>
-          <span style={{ fontFamily: "var(--cc-font-mono)", fontSize: 12, color: "var(--cc-text-muted)", marginRight: 6 }}>
-            {clockStr} IST
-          </span>
-          <button className="cc-btn" onClick={() => navigate("/cameras")}>
-            <i className="bi bi-camera-video-fill" /> All Cameras
-          </button>
-          <button className="cc-btn" onClick={() => navigate("/alerts")}>
-            <i className="bi bi-exclamation-triangle" /> All Alerts
-          </button>
-        </div>
-      </div>
-
-      {/* KPI Row 1 */}
-      <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
-        <KpiCard
-          label="Total Visitors Today"
-          value={(summary?.total_visitors_today || summary?.totalVisitorsToday || 0).toLocaleString()}
-          icon="bi-people-fill"
-          severity="normal"
-        />
-        <KpiCard
-          label="Current Crowd"
-          value={totalCrowd.toLocaleString()}
-          icon="bi-person-fill"
-          severity={totalCrowd > 38000 ? "critical" : totalCrowd > 32000 ? "high" : "normal"}
-          trend={Math.round(inflowPerMin - outflowPerMin)}
-          sub={`${summary?.occupancy || summary?.occupancy_pct || 0}% occupancy`}
-        />
-        <KpiCard
-          label="Active Queues"
-          value={summary?.active_queues || summary?.activeQueues || 0}
-          icon="bi-list-ol"
-          severity="medium"
-          sub={`Avg wait: ${summary?.avg_queue_wait || summary?.avgQueueWait || 0} min`}
-        />
-        <KpiCard
-          label="Critical Zones"
-          value={criticalZones}
-          icon="bi-hexagon-fill"
-          severity={criticalZones > 0 ? "critical" : "normal"}
-        />
-        <KpiCard
-          label="Active Alerts"
-          value={alerts.filter((a) => !a.acknowledged).length}
-          icon="bi-exclamation-triangle-fill"
-          severity={criticalAlerts > 0 ? "critical" : "high"}
-          sub={`${criticalAlerts} critical`}
-        />
-        <KpiCard
-          label="FRS Alerts"
-          value={frsAlerts}
-          icon="bi-person-bounding-box"
-          severity={frsAlerts > 0 ? "high" : "normal"}
-          sub="Requires review"
-        />
-      </div>
-
-      {/* KPI Row 2 */}
-      <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
-        <KpiCard
-          label="Inflow / min"
-          value={inflowPerMin.toLocaleString()}
-          icon="bi-arrow-down-circle-fill"
-          severity="normal"
-        />
-        <KpiCard
-          label="Outflow / min"
-          value={outflowPerMin.toLocaleString()}
-          icon="bi-arrow-up-circle-fill"
-          severity="normal"
-        />
-        <KpiCard
-          label="Cameras Online"
-          value={camStats ? `${camStats.online || 0}/${camStats.total || 0}` : "—"}
-          icon="bi-camera-video-fill"
-          severity={camStats?.offline > 5 ? "high" : camStats?.offline > 0 ? "medium" : "normal"}
-          sub={camStats ? `${camStats.offline || 0} offline` : ""}
-        />
-        <KpiCard
-          label="Medical Incidents"
-          value={medicalAlerts}
-          icon="bi-heart-pulse-fill"
-          severity={medicalAlerts > 2 ? "high" : "normal"}
-        />
-        <KpiCard
-          label="Missing Persons"
-          value={missingCount}
-          icon="bi-person-exclamation"
-          severity={missingCount > 0 ? "medium" : "normal"}
-          sub={missingCount > 0 ? "Searching" : "None active"}
-        />
-        <KpiCard
-          label="Emerg. Routes Blocked"
-          value={blockedRoutes}
-          icon="bi-sign-stop-fill"
-          severity={blockedRoutes > 0 ? "critical" : "normal"}
-        />
-      </div>
-
-      {/* Live indicator */}
-      <div style={{ display: "flex", alignItems: "center", gap: 8, fontSize: 11 }}>
-        <span className="cc-live-dot" />
-        <span style={{ color: "var(--cc-text-muted)" }}>Live AI video monitoring-real-time crowd detection active</span>
-      </div>
-
-      {/* Main content: Live Feeds + Action Center */}
-      <div style={{ display: "flex", gap: 10, flex: 1, minHeight: 0, minHeight: 520 }}>
-
-        {/* Live Camera Feeds */}
-        <div className={`cc-card ${flashClass}`} style={{ flex: 1, padding: 0, overflow: "hidden", display: "flex", flexDirection: "column" }}>
-          {/* Feed header */}
-          <div className="cc-section-header" style={{ padding: "8px 12px", flexShrink: 0 }}>
-            <div className="cc-section-title">
-              <span style={{ position: "relative", display: "inline-block", marginRight: 8 }}>
-                <i className="bi bi-camera-reels-fill" style={{ color: "var(--cc-red)" }} />
-                <span style={{
-                  position: "absolute", top: -2, right: -4, width: 6, height: 6,
-                  borderRadius: "50%", background: "var(--cc-red)",
-                  animation: "cc-pulse-dot 1.2s infinite",
-                }} />
-              </span>
-              Live Camera Feeds Critical Monitoring
+          <div style={{ display: "flex", alignItems: "center", gap: 10 }}>
+            <h1 className="cc-page-title" style={{ fontSize: 20, letterSpacing: "0.04em", margin: 0 }}>
+              COMMAND CENTER
+            </h1>
+            <div
+              style={{
+                display: "inline-flex",
+                alignItems: "center",
+                gap: 6,
+                padding: "2px 8px",
+                background: "rgba(255, 255, 255, 0.04)",
+                border: "1px solid var(--cc-border)",
+                borderRadius: 12,
+                fontSize: 10,
+                fontFamily: "var(--cc-font-mono)",
+                color: statusColor,
+              }}
+            >
+              <span
+                style={{
+                  width: 6,
+                  height: 6,
+                  borderRadius: "50%",
+                  backgroundColor: statusColor,
+                  boxShadow: `0 0 6px ${statusColor}`,
+                }}
+              />
+              {dataStatus}
             </div>
-            <div style={{ display: "flex", gap: 6, alignItems: "center" }}>
-              {[
-                { key: "all", label: "All" },
-                { key: "alerts", label: "? Alerts" },
-                { key: "online", label: "Online" },
-                { key: "offline", label: "Offline" },
-              ].map((f) => (
-                <button
-                  key={f.key}
-                  className="cc-btn"
-                  style={{
-                    fontSize: 10,
-                    padding: "3px 10px",
-                    background: feedFilter === f.key ? "var(--cc-accent)" : undefined,
-                    color: feedFilter === f.key ? "#fff" : undefined,
-                    borderColor: feedFilter === f.key ? "var(--cc-accent)" : undefined,
-                  }}
-                  onClick={() => setFeedFilter(f.key)}
-                >
-                  {f.label}
-                </button>
-              ))}
-              <button className="cc-btn" style={{ fontSize: 10 }} onClick={() => navigate("/cameras")}>
-                <i className="bi bi-arrows-fullscreen" /> Full Grid
+          </div>
+          <div className="cc-page-subtitle" style={{ fontSize: 12, color: "var(--cc-text-muted)", marginTop: 2 }}>
+            Khairatabad Ganesh Festival 2026 — Live Operations
+          </div>
+        </div>
+
+        <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
+          <div style={{ fontSize: 11, fontFamily: "var(--cc-font-mono)", color: "var(--cc-text-muted)", marginRight: 6 }}>
+            {clockStr} IST
+          </div>
+          <button className="cc-btn cc-btn-sm" onClick={() => loadData(false)} disabled={isRefreshing} title="Refresh Live Data">
+            <i className={`bi bi-arrow-clockwise ${isRefreshing ? "cc-spin" : ""}`} />
+            {isRefreshing ? "Updating..." : "Refresh"}
+          </button>
+          <button className="cc-btn cc-btn-sm" onClick={() => navigate("/cameras")}>
+            <i className="bi bi-camera-video-fill" /> Cameras
+          </button>
+          <button className="cc-btn cc-btn-sm" onClick={() => navigate("/crowd-management")}>
+            <i className="bi bi-people-fill" /> Crowd & Zones
+          </button>
+        </div>
+      </div>
+
+      {error && !data && (
+        <div style={{ padding: 12, background: "rgba(248, 81, 73, 0.1)", border: "1px solid var(--cc-red)", borderRadius: 6, color: "var(--cc-red)", fontSize: 13, display: "flex", justifyContent: "space-between", alignItems: "center" }}>
+          <span>{error}</span>
+          <button className="cc-btn cc-btn-sm" onClick={() => loadData(false)}>Retry</button>
+        </div>
+      )}
+
+      {/* ========================================================================= */}
+      {/* SECTION 2 & 9: HERO KPI + PEOPLE MOVEMENT PANEL */}
+      {/* ========================================================================= */}
+      <div style={{ display: "grid", gridTemplateColumns: "1.4fr 1fr 1fr 1fr 1.2fr", gap: 10 }}>
+        {/* HERO KPI */}
+        <div
+          className="cc-card"
+          onClick={() => navigate("/crowd-management")}
+          style={{
+            cursor: "pointer",
+            background: "linear-gradient(135deg, rgba(56, 139, 253, 0.12) 0%, rgba(13, 17, 23, 0.95) 100%)",
+            border: "1.5px solid rgba(88, 166, 255, 0.4)",
+            display: "flex",
+            flexDirection: "column",
+            justifyContent: "space-between",
+            padding: "12px 14px",
+          }}
+        >
+          <div style={{ display: "flex", justifyContent: "space-between", alignItems: "flex-start" }}>
+            <span style={{ fontSize: 11, fontWeight: 600, color: "var(--cc-text-muted)", letterSpacing: "0.05em", textTransform: "uppercase" }}>
+              Total Visitors — All Days
+            </span>
+            <span style={{ fontSize: 10, background: "rgba(56, 139, 253, 0.2)", border: "1px solid rgba(56, 139, 253, 0.4)", color: "var(--cc-blue)", padding: "1px 6px", borderRadius: 4, fontFamily: "var(--cc-font-mono)" }}>
+              {data?.festival_day_label || "Day 1 of 10"}
+            </span>
+          </div>
+
+          <div style={{ margin: "6px 0" }}>
+            <div style={{ fontSize: 28, fontWeight: 800, fontFamily: "var(--cc-font-mono)", color: "#fff", letterSpacing: "0.02em" }}>
+              {loading && !data ? "—" : (data?.total_visitors_festival || 0).toLocaleString()}
+            </div>
+            <div style={{ fontSize: 11, color: "var(--cc-text-muted)" }}>
+              Today: <strong style={{ color: "#3fb950" }}>{(data?.today_entries || 0).toLocaleString()}</strong> entries
+            </div>
+          </div>
+        </div>
+
+        {/* PEOPLE MOVEMENT: ENTRY */}
+        <div className="cc-card" style={{ padding: "12px 14px", display: "flex", flexDirection: "column", justifyContent: "space-between" }}>
+          <span style={{ fontSize: 11, fontWeight: 600, color: "var(--cc-text-muted)", letterSpacing: "0.05em", textTransform: "uppercase" }}>
+            Total Entry
+          </span>
+          <div style={{ fontSize: 24, fontWeight: 700, fontFamily: "var(--cc-font-mono)", color: "#3fb950" }}>
+            {loading && !data ? "—" : (data?.today_entries || 0).toLocaleString()}
+          </div>
+          <span style={{ fontSize: 10, color: "var(--cc-text-muted)" }}>Valid line IN crossings</span>
+        </div>
+
+        {/* PEOPLE MOVEMENT: EXIT */}
+        <div className="cc-card" style={{ padding: "12px 14px", display: "flex", flexDirection: "column", justifyContent: "space-between" }}>
+          <span style={{ fontSize: 11, fontWeight: 600, color: "var(--cc-text-muted)", letterSpacing: "0.05em", textTransform: "uppercase" }}>
+            Total Exit
+          </span>
+          <div style={{ fontSize: 24, fontWeight: 700, fontFamily: "var(--cc-font-mono)", color: "#58a6ff" }}>
+            {loading && !data ? "—" : (data?.today_exits || 0).toLocaleString()}
+          </div>
+          <span style={{ fontSize: 10, color: "var(--cc-text-muted)" }}>Valid line OUT crossings</span>
+        </div>
+
+        {/* PEOPLE MOVEMENT: NET FLOW */}
+        <div className="cc-card" style={{ padding: "12px 14px", display: "flex", flexDirection: "column", justifyContent: "space-between" }}>
+          <span style={{ fontSize: 11, fontWeight: 600, color: "var(--cc-text-muted)", letterSpacing: "0.05em", textTransform: "uppercase" }}>
+            Net Flow
+          </span>
+          <div style={{ fontSize: 24, fontWeight: 700, fontFamily: "var(--cc-font-mono)", color: (data?.net_flow || 0) >= 0 ? "#3fb950" : "#f85149" }}>
+            {loading && !data ? "—" : `${(data?.net_flow || 0) > 0 ? "+" : ""}${(data?.net_flow || 0).toLocaleString()}`}
+          </div>
+          <span style={{ fontSize: 10, color: "var(--cc-text-muted)" }}>Entry minus Exit delta</span>
+        </div>
+
+        {/* PEOPLE MOVEMENT: CURRENT OCCUPANCY */}
+        <div className="cc-card" style={{ padding: "12px 14px", display: "flex", flexDirection: "column", justifyContent: "space-between", borderLeft: "3px solid #e3b341" }}>
+          <span style={{ fontSize: 11, fontWeight: 600, color: "var(--cc-text-muted)", letterSpacing: "0.05em", textTransform: "uppercase" }}>
+            Current Occupancy
+          </span>
+          <div style={{ fontSize: 24, fontWeight: 700, fontFamily: "var(--cc-font-mono)", color: "#e3b341" }}>
+            {loading && !data ? "—" : (data?.current_occupancy || 0).toLocaleString()}
+          </div>
+          <span style={{ fontSize: 10, color: "var(--cc-text-muted)" }}>Active tracked people inside</span>
+        </div>
+      </div>
+
+      {/* ========================================================================= */}
+      {/* SECTION 3 & 4: HOURLY VISITOR FLOW & DATE RANGE SELECTOR */}
+      {/* ========================================================================= */}
+      <div className="cc-card" style={{ padding: 0, overflow: "hidden" }}>
+        <div className="cc-section-header" style={{ padding: "10px 14px", display: "flex", justifyContent: "space-between", alignItems: "center" }}>
+          <div style={{ display: "flex", alignItems: "center", gap: 12 }}>
+            <span style={{ fontWeight: 700, fontSize: 13, color: "var(--cc-text-primary)", letterSpacing: "0.04em" }}>
+              VISITOR FLOW — HOURLY
+            </span>
+            {data?.peak_hour && data.peak_hour !== "—" && (
+              <span style={{ fontSize: 10, background: "rgba(227, 179, 65, 0.15)", border: "1px solid var(--cc-yellow)", color: "var(--cc-yellow)", padding: "1px 6px", borderRadius: 4, fontFamily: "var(--cc-font-mono)" }}>
+                Peak: {data.peak_hour}
+              </span>
+            )}
+          </div>
+
+          <div style={{ display: "flex", gap: 4 }}>
+            {DATE_RANGE_OPTIONS.map((opt) => (
+              <button
+                key={opt.id}
+                onClick={() => handleDateRangeChange(opt.id)}
+                style={{
+                  padding: "3px 8px",
+                  fontSize: 10,
+                  fontFamily: "var(--cc-font-mono)",
+                  fontWeight: dateRange === opt.id.toUpperCase() ? 700 : 500,
+                  background: dateRange === opt.id.toUpperCase() ? "var(--cc-blue)" : "rgba(255,255,255,0.04)",
+                  color: dateRange === opt.id.toUpperCase() ? "#fff" : "var(--cc-text-secondary)",
+                  border: "1px solid var(--cc-border)",
+                  borderRadius: 4,
+                  cursor: "pointer",
+                }}
+              >
+                {opt.label}
+              </button>
+            ))}
+          </div>
+        </div>
+
+        <div style={{ padding: "0 10px 6px 10px" }}>
+          {loading && !data ? (
+            <div style={{ height: 200, display: "flex", alignItems: "center", justifyContent: "center", color: "var(--cc-text-muted)" }}>
+              Loading Hourly Visitor Flow...
+            </div>
+          ) : hourlyChartOption ? (
+            <ReactECharts option={hourlyChartOption} style={{ height: 210, width: "100%" }} notMerge={true} lazyUpdate={true} />
+          ) : (
+            <div style={{ height: 200, display: "flex", alignItems: "center", justifyContent: "center", color: "var(--cc-text-muted)" }}>
+              NO DATA FOR SELECTED PERIOD
+            </div>
+          )}
+        </div>
+      </div>
+
+      {/* ========================================================================= */}
+      {/* SECTION 5 & 7: QUEUE STATUS & FLOW + ZONE DENSITY */}
+      {/* ========================================================================= */}
+      <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 10 }}>
+        {/* QUEUE STATUS & FLOW */}
+        <div className="cc-card" style={{ padding: 0, overflow: "hidden", display: "flex", flexDirection: "column" }}>
+          <div className="cc-section-header" style={{ padding: "10px 14px", display: "flex", justifyContent: "space-between", alignItems: "center" }}>
+            <span style={{ fontWeight: 700, fontSize: 13, color: "var(--cc-text-primary)", letterSpacing: "0.04em" }}>
+              QUEUE STATUS & FLOW
+            </span>
+            <button className="cc-btn cc-btn-sm" style={{ fontSize: 10 }} onClick={() => navigate("/crowd-management")}>
+              View All Queues
+            </button>
+          </div>
+
+          <div style={{ padding: "8px 12px", flex: 1, display: "flex", flexDirection: "column", gap: 6 }}>
+            {loading && !data ? (
+              <div style={{ padding: 20, textAlign: "center", color: "var(--cc-text-muted)" }}>Loading Queue Status...</div>
+            ) : !data?.queues || data.queues.length === 0 ? (
+              <div style={{ padding: 24, textAlign: "center", color: "var(--cc-text-muted)", fontSize: 12 }}>
+                <i className="bi bi-inbox" style={{ fontSize: 24, display: "block", marginBottom: 6 }} />
+                NO ACTIVE QUEUES CONFIGURED
+              </div>
+            ) : (
+              data.queues.map((q, idx) => {
+                const statusBadge = {
+                  FAST: { color: "#3fb950", bg: "rgba(63, 185, 80, 0.15)", border: "#3fb950" },
+                  NORMAL: { color: "#58a6ff", bg: "rgba(88, 166, 255, 0.15)", border: "#58a6ff" },
+                  SLOW: { color: "#f0883e", bg: "rgba(240, 136, 62, 0.15)", border: "#f0883e" },
+                  STOPPED: { color: "#f85149", bg: "rgba(248, 81, 73, 0.15)", border: "#f85149" },
+                }[q.flow_status] || { color: "#8b949e", bg: "rgba(255,255,255,0.05)", border: "#8b949e" };
+
+                return (
+                  <div
+                    key={idx}
+                    onClick={() => navigate("/crowd-management")}
+                    style={{
+                      display: "flex",
+                      alignItems: "center",
+                      justifyContent: "space-between",
+                      padding: "8px 10px",
+                      background: "rgba(255, 255, 255, 0.02)",
+                      border: "1px solid var(--cc-border)",
+                      borderRadius: 6,
+                      cursor: "pointer",
+                    }}
+                  >
+                    <div>
+                      <div style={{ fontWeight: 600, fontSize: 12, color: "var(--cc-text-primary)" }}>{q.queue_name}</div>
+                      <div style={{ fontSize: 10, color: "var(--cc-text-muted)", fontFamily: "var(--cc-font-mono)" }}>{q.camera_code}</div>
+                    </div>
+
+                    <div style={{ display: "flex", alignItems: "center", gap: 14 }}>
+                      <div style={{ textAlign: "right" }}>
+                        <div style={{ fontSize: 13, fontWeight: 700, fontFamily: "var(--cc-font-mono)", color: "var(--cc-text-primary)" }}>
+                          {q.current_people.toLocaleString()} <span style={{ fontSize: 10, color: "var(--cc-text-muted)" }}>pax</span>
+                        </div>
+                        <div style={{ fontSize: 10, color: "var(--cc-text-muted)" }}>
+                          {q.estimated_wait_minutes ? `~${q.estimated_wait_minutes} min wait` : "Minimal wait"}
+                        </div>
+                      </div>
+
+                      <div
+                        style={{
+                          fontSize: 10,
+                          fontWeight: 700,
+                          fontFamily: "var(--cc-font-mono)",
+                          padding: "2px 8px",
+                          borderRadius: 4,
+                          background: statusBadge.bg,
+                          color: statusBadge.color,
+                          border: `1px solid ${statusBadge.border}`,
+                          minWidth: 70,
+                          textAlign: "center",
+                        }}
+                      >
+                        ● {q.flow_status}
+                      </div>
+                    </div>
+                  </div>
+                );
+              })
+            )}
+          </div>
+        </div>
+
+        {/* ZONE DENSITY */}
+        <div className="cc-card" style={{ padding: 0, overflow: "hidden", display: "flex", flexDirection: "column" }}>
+          <div className="cc-section-header" style={{ padding: "10px 14px", display: "flex", justifyContent: "space-between", alignItems: "center" }}>
+            <span style={{ fontWeight: 700, fontSize: 13, color: "var(--cc-text-primary)", letterSpacing: "0.04em" }}>
+              ZONE DENSITY
+            </span>
+            <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
+              <select
+                value={selectedZoneCode}
+                onChange={(e) => setSelectedZoneCode(e.target.value)}
+                style={{
+                  fontSize: 10, padding: "3px 8px", borderRadius: 4,
+                  background: "var(--cc-bg-input)", border: "1px solid var(--cc-border)",
+                  color: "var(--cc-text-primary)", cursor: "pointer",
+                }}
+              >
+                <option value="all">All Zones</option>
+                <option value="ZONE-A">Zone A</option>
+                <option value="ZONE-B">Zone B</option>
+                <option value="ZONE-C">Zone C</option>
+                <option value="ZONE-D">Zone D</option>
+              </select>
+              <button className="cc-btn cc-btn-sm" style={{ fontSize: 10 }} onClick={() => navigate("/crowd-management")}>
+                View All Zones
               </button>
             </div>
           </div>
 
-          {/* Feed grid */}
-          <div style={{
-            flex: 1,
-            overflowY: "auto",
-            padding: "10px 12px",
-            display: "flex",
-            flexWrap: "wrap",
-            gap: 8,
-            alignContent: "flex-start",
-          }}>
-            {cameraFeeds.length === 0 ? (
-              <div style={{ width: "100%", textAlign: "center", color: "var(--cc-text-muted)", padding: "40px 0", fontSize: 13 }}>
-                <i className="bi bi-camera-video-off" style={{ fontSize: 28, display: "block", marginBottom: 8 }} />
-                No cameras registered yet
-              </div>
-            ) : filteredFeeds.length === 0 ? (
-              <div style={{ width: "100%", textAlign: "center", color: "var(--cc-text-muted)", padding: "40px 0", fontSize: 13 }}>
-                <i className="bi bi-camera-video-off" style={{ fontSize: 28, display: "block", marginBottom: 8 }} />
-                No cameras match this filter
+          <div style={{ padding: "8px 12px", flex: 1, display: "flex", flexDirection: "column", gap: 6 }}>
+            {loading && !data ? (
+              <div style={{ padding: 20, textAlign: "center", color: "var(--cc-text-muted)" }}>Loading Zone Density...</div>
+            ) : !data?.zones || data.zones.length === 0 ? (
+              <div style={{ padding: 24, textAlign: "center", color: "var(--cc-text-muted)", fontSize: 12 }}>
+                <i className="bi bi-geo-alt" style={{ fontSize: 24, display: "block", marginBottom: 6 }} />
+                NO ACTIVE ZONES FOUND
               </div>
             ) : (
-              filteredFeeds.map((cam) => (
-                <ScanlineFeed
-                  key={cam.id}
-                  cameraId={cam.id}
-                  label={cam.label}
-                  zone={cam.zone || cam.label}
-                  people={cam.people}
-                  severity={cam.severity}
-                  status={cam.status}
-                  fps={cam.fps}
-                  ai={cam.ai}
-                  aiLabel={cam.aiLabel}
-                  ptzActive={cam.ptzActive}
-                  onClick={() => navigate(`/cameras/${cam.id}`)}
-                />
-              ))
+              data.zones
+                .slice(0, 4)
+                .filter((z) => selectedZoneCode === "all" || (z.zone_code || z.zone_name?.replace("Zone ", "ZONE-")) === selectedZoneCode)
+                .map((z, idx) => {
+                const statusStyle = {
+                  GREEN: { color: "#3fb950", bg: "rgba(63, 185, 80, 0.15)", border: "#3fb950" },
+                  ORANGE: { color: "#f0883e", bg: "rgba(240, 136, 62, 0.15)", border: "#f0883e" },
+                  RED: { color: "#f85149", bg: "rgba(248, 81, 73, 0.15)", border: "#f85149" },
+                }[z.status] || { color: "#3fb950", bg: "rgba(63, 185, 80, 0.15)", border: "#3fb950" };
+
+                return (
+                  <div
+                    key={idx}
+                    onClick={() => navigate("/crowd-management")}
+                    style={{
+                      display: "flex",
+                      alignItems: "center",
+                      justifyContent: "space-between",
+                      padding: "8px 10px",
+                      background: "rgba(255, 255, 255, 0.02)",
+                      border: "1px solid var(--cc-border)",
+                      borderRadius: 6,
+                      cursor: "pointer",
+                    }}
+                  >
+                    <div style={{ flex: 1 }}>
+                      <div style={{ display: "flex", justifyContent: "space-between", marginBottom: 4 }}>
+                        <span style={{ fontWeight: 600, fontSize: 12, color: "var(--cc-text-primary)" }}>{z.zone_name}</span>
+                        <span style={{ fontSize: 13, fontWeight: 700, fontFamily: "var(--cc-font-mono)", color: "var(--cc-text-primary)" }}>
+                          {(z.current_people !== undefined && z.current_people !== null ? z.current_people : 0).toLocaleString()} <span style={{ fontSize: 11, color: "var(--cc-text-muted)" }}>/ {(z.capacity ?? 0).toLocaleString()}</span>
+                        </span>
+                      </div>
+                      {/* Density progress bar */}
+                      <div style={{ width: "100%", height: 5, background: "rgba(255,255,255,0.08)", borderRadius: 3, overflow: "hidden" }}>
+                        <div
+                          style={{
+                            width: `${Math.min(100, z.density_pct)}%`,
+                            height: "100%",
+                            background: statusStyle.color,
+                            transition: "width 0.4s ease",
+                          }}
+                        />
+                      </div>
+                    </div>
+
+                    <div style={{ marginLeft: 16 }}>
+                      <div
+                        style={{
+                          fontSize: 10,
+                          fontWeight: 700,
+                          fontFamily: "var(--cc-font-mono)",
+                          padding: "2px 8px",
+                          borderRadius: 4,
+                          background: statusStyle.bg,
+                          color: statusStyle.color,
+                          border: `1px solid ${statusStyle.border}`,
+                          minWidth: 70,
+                          textAlign: "center",
+                        }}
+                      >
+                        ● {z.status}
+                      </div>
+                    </div>
+                  </div>
+                );
+              })
             )}
           </div>
+        </div>
+      </div>
 
-          {/* Feed footer status */}
-          <div style={{ padding: "6px 12px", borderTop: "1px solid var(--cc-border)", display: "flex", gap: 16, fontSize: 10, color: "var(--cc-text-muted)", flexShrink: 0 }}>
-            <span><span style={{ color: "var(--cc-green)" }}>?</span> {cameraFeeds.filter(f => f.status === "online").length} Online</span>
-            <span><span style={{ color: "var(--cc-text-muted)" }}>?</span> {cameraFeeds.filter(f => f.status === "offline").length} Offline</span>
-            <span><span style={{ color: "var(--cc-red)" }}>?</span> {cameraFeeds.filter(f => f.severity === "critical").length} Critical</span>
-            <span style={{ marginLeft: "auto" }}>Showing {filteredFeeds.length} / {cameraFeeds.length} feeds</span>
+      {/* ========================================================================= */}
+      {/* SECTION 4 & 10: DAILY VISITOR TREND + TOP RISK AREAS */}
+      {/* ========================================================================= */}
+      <div style={{ display: "grid", gridTemplateColumns: "1.3fr 1fr", gap: 10 }}>
+        {/* DAILY ENTRY / EXIT TREND */}
+        <div className="cc-card" style={{ padding: 0, overflow: "hidden" }}>
+          <div className="cc-section-header" style={{ padding: "10px 14px" }}>
+            <span style={{ fontWeight: 700, fontSize: 13, color: "var(--cc-text-primary)", letterSpacing: "0.04em" }}>
+              DAILY ENTRY / EXIT TREND
+            </span>
+          </div>
+
+          <div style={{ padding: "6px 12px" }}>
+            <table className="cc-table" style={{ width: "100%", fontSize: 11 }}>
+              <thead>
+                <tr>
+                  <th style={{ textAlign: "left" }}>Date</th>
+                  <th style={{ textAlign: "right" }}>Entries</th>
+                  <th style={{ textAlign: "right" }}>Exits</th>
+                  <th style={{ textAlign: "right" }}>Net Flow</th>
+                </tr>
+              </thead>
+              <tbody>
+                {loading && !data ? (
+                  <tr><td colSpan={4} style={{ textAlign: "center", padding: 16, color: "var(--cc-text-muted)" }}>Loading Daily Trends...</td></tr>
+                ) : !data?.daily_trend || data.daily_trend.length === 0 ? (
+                  <tr><td colSpan={4} style={{ textAlign: "center", padding: 16, color: "var(--cc-text-muted)" }}>NO HISTORICAL RECORDS</td></tr>
+                ) : (
+                  data.daily_trend.slice(0, 5).map((row, idx) => (
+                    <tr key={idx}>
+                      <td style={{ fontWeight: 600, fontFamily: "var(--cc-font-mono)" }}>{row.date}</td>
+                      <td style={{ textAlign: "right", color: "#3fb950", fontFamily: "var(--cc-font-mono)" }}>{row.entries.toLocaleString()}</td>
+                      <td style={{ textAlign: "right", color: "#58a6ff", fontFamily: "var(--cc-font-mono)" }}>{row.exits.toLocaleString()}</td>
+                      <td style={{ textAlign: "right", fontWeight: 700, color: row.net_flow >= 0 ? "#3fb950" : "#f85149", fontFamily: "var(--cc-font-mono)" }}>
+                        {row.net_flow > 0 ? "+" : ""}{row.net_flow.toLocaleString()}
+                      </td>
+                    </tr>
+                  ))
+                )}
+              </tbody>
+            </table>
           </div>
         </div>
 
-        {/* Action Center */}
-        <div
-          className="cc-card"
-          style={{ width: 340, flexShrink: 0, padding: 0, overflow: "hidden", display: "flex", flexDirection: "column" }}
-        >
-          <ActionCenter />
+        {/* TOP RISK AREAS */}
+        <div className="cc-card" style={{ padding: 0, overflow: "hidden" }}>
+          <div className="cc-section-header" style={{ padding: "10px 14px", display: "flex", justifyContent: "space-between" }}>
+            <span style={{ fontWeight: 700, fontSize: 13, color: "var(--cc-text-primary)", letterSpacing: "0.04em" }}>
+              TOP RISK AREAS
+            </span>
+            <span style={{ fontSize: 10, color: "var(--cc-text-muted)" }}>Max 5 Hotspots</span>
+          </div>
+
+          <div style={{ padding: "8px 12px", display: "flex", flexDirection: "column", gap: 6 }}>
+            {loading && !data ? (
+              <div style={{ padding: 20, textAlign: "center", color: "var(--cc-text-muted)" }}>Analyzing risk areas...</div>
+            ) : !data?.top_risk_areas || data.top_risk_areas.length === 0 ? (
+              <div style={{ padding: 20, textAlign: "center", color: "#3fb950", fontSize: 12 }}>
+                <i className="bi bi-shield-check" style={{ fontSize: 24, display: "block", marginBottom: 4 }} />
+                ALL ZONES & QUEUES WITHIN NORMAL THRESHOLDS
+              </div>
+            ) : (
+              data.top_risk_areas.map((r, idx) => (
+                <div
+                  key={idx}
+                  onClick={() => navigate("/crowd-management")}
+                  style={{
+                    padding: "8px 10px",
+                    background: "rgba(255, 255, 255, 0.02)",
+                    borderLeft: `3px solid ${r.risk_level === "RED" ? "#f85149" : "#f0883e"}`,
+                    borderTop: "1px solid var(--cc-border)",
+                    borderRight: "1px solid var(--cc-border)",
+                    borderBottom: "1px solid var(--cc-border)",
+                    borderRadius: 4,
+                    cursor: "pointer",
+                  }}
+                >
+                  <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center" }}>
+                    <span style={{ fontWeight: 600, fontSize: 12, color: "var(--cc-text-primary)" }}>{r.name}</span>
+                    <span style={{ fontSize: 10, fontWeight: 700, color: r.risk_level === "RED" ? "#f85149" : "#f0883e", fontFamily: "var(--cc-font-mono)" }}>
+                      ● {r.risk_level}
+                    </span>
+                  </div>
+                  <div style={{ fontSize: 11, color: "var(--cc-text-muted)", marginTop: 2 }}>{r.reason}</div>
+                </div>
+              ))
+            )}
+          </div>
+        </div>
+      </div>
+
+      {/* ========================================================================= */}
+      {/* SECTION 11, 12 & 14: FRS REVIEW (MAX 2) + ACTIVE EVENTS + AI FLEET HEALTH */}
+      {/* ========================================================================= */}
+      <div style={{ display: "grid", gridTemplateColumns: "1.2fr 1fr 1fr", gap: 10 }}>
+        {/* RECENT FRS REVIEW (MAX 2) */}
+        <div className="cc-card" style={{ padding: 0, overflow: "hidden" }}>
+          <div className="cc-section-header" style={{ padding: "10px 14px", display: "flex", justifyContent: "space-between", alignItems: "center" }}>
+            <span style={{ fontWeight: 700, fontSize: 13, color: "var(--cc-text-primary)", letterSpacing: "0.04em" }}>
+              RECENT FRS REVIEW
+            </span>
+            <button className="cc-btn cc-btn-sm" style={{ fontSize: 10 }} onClick={() => navigate("/frs")}>
+              Review Queue
+            </button>
+          </div>
+
+          <div style={{ padding: "8px 12px", display: "flex", flexDirection: "column", gap: 8 }}>
+            {!data?.recent_frs_candidates || data.recent_frs_candidates.length === 0 ? (
+              <div style={{ padding: 18, textAlign: "center", color: "var(--cc-text-muted)", fontSize: 12 }}>
+                <i className="bi bi-person-check" style={{ fontSize: 24, display: "block", marginBottom: 4 }} />
+                NO PENDING FRS CANDIDATES
+              </div>
+            ) : (
+              data.recent_frs_candidates.slice(0, 2).map((c) => (
+                <div
+                  key={c.id}
+                  onClick={() => navigate("/frs")}
+                  style={{
+                    display: "flex",
+                    alignItems: "center",
+                    gap: 10,
+                    padding: 8,
+                    background: "rgba(255, 255, 255, 0.02)",
+                    border: "1px solid var(--cc-border)",
+                    borderRadius: 6,
+                    cursor: "pointer",
+                  }}
+                >
+                  <div style={{ width: 44, height: 44, borderRadius: 4, overflow: "hidden", background: "#050e18", flexShrink: 0, border: "1px solid var(--cc-border)" }}>
+                    {c.detected_image ? (
+                      <img src={c.detected_image} alt="Detected" style={{ width: "100%", height: "100%", objectFit: "cover" }} />
+                    ) : (
+                      <div style={{ width: "100%", height: "100%", display: "flex", alignItems: "center", justifyContent: "center", color: "var(--cc-text-muted)" }}>
+                        <i className="bi bi-person" />
+                      </div>
+                    )}
+                  </div>
+
+                  <div style={{ flex: 1, minWidth: 0 }}>
+                    <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center" }}>
+                      <span style={{ fontWeight: 600, fontSize: 12, color: "var(--cc-text-primary)", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
+                        {c.person_name}
+                      </span>
+                      <span style={{ fontSize: 11, fontWeight: 700, fontFamily: "var(--cc-font-mono)", color: "#3fb950" }}>
+                        {c.match_score}%
+                      </span>
+                    </div>
+                    <div style={{ fontSize: 10, color: "var(--cc-text-muted)", marginTop: 2 }}>
+                      {c.camera_name} • {c.time_str}
+                    </div>
+                    <div style={{ display: "inline-block", fontSize: 9, fontWeight: 700, color: "var(--cc-yellow)", background: "rgba(210, 153, 34, 0.15)", padding: "1px 5px", borderRadius: 3, marginTop: 4 }}>
+                      REVIEW REQUIRED
+                    </div>
+                  </div>
+                </div>
+              ))
+            )}
+          </div>
+        </div>
+
+        {/* ACTIVE CRITICAL EVENTS (MAX 5) */}
+        <div className="cc-card" style={{ padding: 0, overflow: "hidden" }}>
+          <div className="cc-section-header" style={{ padding: "10px 14px", display: "flex", justifyContent: "space-between", alignItems: "center" }}>
+            <span style={{ fontWeight: 700, fontSize: 13, color: "var(--cc-text-primary)", letterSpacing: "0.04em" }}>
+              ACTIVE CRITICAL EVENTS
+            </span>
+            <button className="cc-btn cc-btn-sm" style={{ fontSize: 10 }} onClick={() => navigate("/alerts")}>
+              All Alerts
+            </button>
+          </div>
+
+          <div style={{ padding: "8px 12px", display: "flex", flexDirection: "column", gap: 6 }}>
+            {!data?.active_critical_events || data.active_critical_events.length === 0 ? (
+              <div style={{ padding: 18, textAlign: "center", color: "#3fb950", fontSize: 12 }}>
+                <i className="bi bi-check2-circle" style={{ fontSize: 24, display: "block", marginBottom: 4 }} />
+                NO ACTIVE CRITICAL ALERTS
+              </div>
+            ) : (
+              data.active_critical_events.slice(0, 4).map((evt) => (
+                <div
+                  key={evt.id}
+                  onClick={() => navigate("/alerts")}
+                  style={{
+                    padding: "6px 8px",
+                    background: "rgba(255, 255, 255, 0.02)",
+                    borderLeft: `3px solid ${evt.severity === "CRITICAL" ? "#f85149" : "#f0883e"}`,
+                    borderTop: "1px solid var(--cc-border)",
+                    borderRight: "1px solid var(--cc-border)",
+                    borderBottom: "1px solid var(--cc-border)",
+                    borderRadius: 4,
+                    cursor: "pointer",
+                  }}
+                >
+                  <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center" }}>
+                    <span style={{ fontWeight: 600, fontSize: 11, color: "var(--cc-text-primary)" }}>{evt.type}</span>
+                    <span style={{ fontSize: 9, fontFamily: "var(--cc-font-mono)", color: "var(--cc-text-muted)" }}>{evt.time}</span>
+                  </div>
+                  <div style={{ fontSize: 10, color: "var(--cc-text-muted)", marginTop: 2 }}>{evt.location}</div>
+                </div>
+              ))
+            )}
+          </div>
+        </div>
+
+        {/* AI & CAMERA FLEET HEALTH */}
+        <div className="cc-card" style={{ padding: 0, overflow: "hidden" }}>
+          <div className="cc-section-header" style={{ padding: "10px 14px", display: "flex", justifyContent: "space-between", alignItems: "center" }}>
+            <span style={{ fontWeight: 700, fontSize: 13, color: "var(--cc-text-primary)", letterSpacing: "0.04em" }}>
+              AI & CAMERA HEALTH
+            </span>
+            <button className="cc-btn cc-btn-sm" style={{ fontSize: 10 }} onClick={() => navigate("/ai-deployment")}>
+              Deployments
+            </button>
+          </div>
+
+          <div style={{ padding: "10px 12px", display: "flex", flexDirection: "column", gap: 8 }}>
+            <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", padding: "6px 8px", background: "rgba(255,255,255,0.02)", borderRadius: 4, border: "1px solid var(--cc-border)" }}>
+              <span style={{ fontSize: 11, color: "var(--cc-text-secondary)" }}>Cameras Online</span>
+              <span style={{ fontSize: 12, fontWeight: 700, fontFamily: "var(--cc-font-mono)", color: (data?.health?.cameras_online || 0) > 0 ? "#3fb950" : "#8b949e" }}>
+                {data?.health?.cameras_online || 0} / {data?.health?.cameras_total || 0}
+              </span>
+            </div>
+
+            <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", padding: "6px 8px", background: "rgba(255,255,255,0.02)", borderRadius: 4, border: "1px solid var(--cc-border)" }}>
+              <span style={{ fontSize: 11, color: "var(--cc-text-secondary)" }}>Crowd AI (YOLO11x)</span>
+              <span style={{ fontSize: 11, fontWeight: 700, fontFamily: "var(--cc-font-mono)", color: (data?.health?.crowd_ai_running || 0) > 0 ? "#3fb950" : "#8b949e" }}>
+                {(data?.health?.crowd_ai_running || 0) > 0 ? `${data.health.crowd_ai_running} RUNNING` : "STOPPED"}
+              </span>
+            </div>
+
+            <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", padding: "6px 8px", background: "rgba(255,255,255,0.02)", borderRadius: 4, border: "1px solid var(--cc-border)" }}>
+              <span style={{ fontSize: 11, color: "var(--cc-text-secondary)" }}>Queue AI Pipelines</span>
+              <span style={{ fontSize: 11, fontWeight: 700, fontFamily: "var(--cc-font-mono)", color: (data?.health?.queue_ai_running || 0) > 0 ? "#3fb950" : "#8b949e" }}>
+                {(data?.health?.queue_ai_running || 0) > 0 ? `${data.health.queue_ai_running} RUNNING` : "STOPPED"}
+              </span>
+            </div>
+
+            <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", padding: "6px 8px", background: "rgba(255,255,255,0.02)", borderRadius: 4, border: "1px solid var(--cc-border)" }}>
+              <span style={{ fontSize: 11, color: "var(--cc-text-secondary)" }}>FRS Engine (Buffalo_L)</span>
+              <span style={{ fontSize: 11, fontWeight: 700, fontFamily: "var(--cc-font-mono)", color: (data?.health?.frs_running || 0) > 0 ? "#3fb950" : "#8b949e" }}>
+                {(data?.health?.frs_running || 0) > 0 ? `${data.health.frs_running} RUNNING` : "STOPPED"}
+              </span>
+            </div>
+          </div>
         </div>
       </div>
     </div>

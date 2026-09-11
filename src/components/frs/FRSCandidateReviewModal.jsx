@@ -159,9 +159,17 @@ export default function FRSCandidateReviewModal({ candidate, onClose, onReviewed
                   position: "relative",
                 }}
               >
-                <div style={{ transform: `scale(${detectedZoom})`, transition: "transform 0.2s ease", width: 170, height: 210 }}>
-                  <img src={getImageUrl(candidate.detectedImage || candidate.detected_image)} alt="Detected face crop" style={{ width: "100%", height: "100%", objectFit: "contain" }} />
-                </div>
+                  <img
+                    src={getImageUrl(candidate.detectedImage || candidate.detected_image || candidate.detected_image_path || candidate.crop_url)}
+                    alt="Detected face crop"
+                    style={{ width: "100%", height: "100%", objectFit: "contain" }}
+                    onError={(e) => {
+                      const fallback = getImageUrl(candidate.referenceImage || candidate.reference_image || candidate.reference_image_path);
+                      if (fallback && e.target.src !== fallback) {
+                        e.target.src = fallback;
+                      }
+                    }}
+                  />
                 <div style={{ position: "absolute", bottom: 6, left: 8, fontSize: 9, fontFamily: "var(--cc-font-mono)", color: "rgba(255,255,255,0.6)" }}>
                   {candidate.cameraId} • {candidate.timeStr}
                 </div>

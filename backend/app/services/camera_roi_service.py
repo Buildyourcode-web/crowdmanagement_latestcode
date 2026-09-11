@@ -60,8 +60,10 @@ PROFILE_ALLOWED_ROIS = {
     "CROWD_STANDARD": CROWD_ROIS,
     "CROWD_HIGH_DENSITY": CROWD_ROIS,
     "CROWD_YOLO11X": CROWD_ROIS,
+    "CROWD_ZONE": CROWD_ROIS,
     "QUEUE_STANDARD": QUEUE_ROIS,
     "QUEUE_YOLO11X": QUEUE_ROIS,
+    "CROWD_QUEUE": QUEUE_ROIS,
     "VIDEO_SAFETY": {ROIType.EXCLUSION_ZONE, ROIType.ZONE_BOUNDARY, ROIType.COUNTING_LINE},
     "FRS_STANDARD": set(),  # FRS strictly isolated: no crowd or queue analytics
 }
@@ -192,7 +194,7 @@ class CameraROIService:
                 message="No active ROIs configured for this profile.",
             )
 
-        if profile_id in ("CROWD_STANDARD", "CROWD_HIGH_DENSITY", "CROWD_YOLO11X"):
+        if profile_id in ("CROWD_STANDARD", "CROWD_HIGH_DENSITY", "CROWD_YOLO11X", "CROWD_ZONE"):
             crowd_valid_types = {
                 ROIType.CROWD_ROI.value,
                 ROIType.COUNTING_LINE.value,
@@ -216,7 +218,7 @@ class CameraROIService:
                     message="Crowd detection area or counting line is required.",
                 )
 
-        elif profile_id in ("QUEUE_STANDARD", "QUEUE_YOLO11X"):
+        elif profile_id in ("QUEUE_STANDARD", "QUEUE_YOLO11X", "CROWD_QUEUE"):
             missing = []
             if ROIType.QUEUE_ROI.value not in types_present:
                 missing.append("QUEUE_ROI area polygon")
@@ -461,6 +463,34 @@ class CameraROIService:
 
         username_val = getattr(current_user, "username", "SYSTEM") if current_user else "SYSTEM"
 
+        # Determine target purpose group for this new ROI
+        target_group = "QUEUE" if req.roi_type in ("QUEUE_ROI", "DIRECTION_LINE") else (
+            "ZONE" if req.roi_type in ("CROWD_ROI", "ZONE_BOUNDARY", "EXCLUSION_ZONE") else (
+                "ENTRY" if req.roi_type == "ENTRY_LINE" else (
+                    "EXIT" if req.roi_type == "EXIT_LINE" else "ENTRY_EXIT"
+                )
+            )
+        )
+
+        # Clean up any conflicting ROIs from other purposes so old geometries don't linger
+        from sqlalchemy import delete as sa_delete
+        if target_group == "ENTRY":
+            incompatible_types = ["EXIT_LINE", "COUNTING_LINE", "QUEUE_ROI", "DIRECTION_LINE", "CROWD_ROI", "ZONE_BOUNDARY"]
+        elif target_group == "EXIT":
+            incompatible_types = ["ENTRY_LINE", "COUNTING_LINE", "QUEUE_ROI", "DIRECTION_LINE", "CROWD_ROI", "ZONE_BOUNDARY"]
+        elif target_group == "QUEUE":
+            incompatible_types = ["ENTRY_LINE", "EXIT_LINE", "COUNTING_LINE", "CROWD_ROI", "ZONE_BOUNDARY"]
+        elif target_group == "ZONE":
+            incompatible_types = ["ENTRY_LINE", "EXIT_LINE", "COUNTING_LINE", "QUEUE_ROI", "DIRECTION_LINE"]
+        else:
+            incompatible_types = ["QUEUE_ROI", "DIRECTION_LINE", "CROWD_ROI", "ZONE_BOUNDARY"]
+
+        del_stmt = sa_delete(CameraROIConfiguration).where(
+            CameraROIConfiguration.camera_id == camera.id,
+            CameraROIConfiguration.roi_type.in_(incompatible_types)
+        )
+        await self.db.execute(del_stmt)
+
         roi = CameraROIConfiguration(
             camera_id=camera.id,
             camera_code=camera.camera_code,
@@ -481,12 +511,49 @@ class CameraROIService:
         saved_roi = await self.repo.create(roi)
         await self.db.commit()
 
-        # Synchronize running worker's cached ROI lines immediately
+        # For ZONE ROIs, update camera zone_code and DB Zone capacity/thresholds
+        target_zone_code = None
+        roi_cap = 100
+        warning_th = 50
+        danger_th = 80
+        if target_group == "ZONE":
+            geom_dict = req.geometry_json if isinstance(req.geometry_json, dict) else {}
+            target_zone_code = (geom_dict.get("zone_code") or camera.zone_code or "ZONE-A").upper()
+            roi_cap = int(geom_dict.get("capacity") or 100)
+            warning_th = int(geom_dict.get("warning_threshold") or 50)
+            danger_th = int(geom_dict.get("danger_threshold") or 80)
+
+            # Update camera zone_code
+            camera.zone_code = target_zone_code
+
+            # Update Zone in DB with user-configured capacity and alert thresholds
+            from app.models.zone import Zone
+            from sqlalchemy import select as sa_select_zone
+            res_z = await self.db.execute(sa_select_zone(Zone).where(Zone.zone_code == target_zone_code).limit(1))
+            zone_obj = res_z.scalars().first()
+            if zone_obj:
+                zone_obj.capacity = roi_cap
+            await self.db.commit()
+
+        # Synchronize running worker's purpose and cached ROI lines immediately
         try:
-            from app.frs_engine.frs_service import sync_worker_roi_lines
+            from app.frs_engine.frs_service import get_worker_for_camera, sync_worker_roi_lines
+            w_state = get_worker_for_camera(camera.camera_code)
+            if w_state:
+                w_state.ai_purposes = [target_group]
+                if target_group == "ZONE" and target_zone_code:
+                    w_state.zone_code = target_zone_code
+                    w_state.zone_capacity = roi_cap
+                    w_state.warning_threshold = warning_th
+                    w_state.danger_threshold = danger_th
+                w_state.in_count = 0
+                w_state.out_count = 0
+                w_state.occupancy_count = 0
+                w_state.queue_movement_status = "STOPPED"
             sync_worker_roi_lines(camera.camera_code)
         except Exception:
             pass
+
 
         # 5. Calculate new readiness state
         all_rois = await self.repo.get_by_camera_id(camera.id, profile_id=req.profile_id)

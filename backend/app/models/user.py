@@ -1,6 +1,6 @@
 import uuid
 from datetime import datetime
-from typing import Optional
+from typing import List, Optional
 from sqlalchemy import Boolean, DateTime, ForeignKey, String
 from sqlalchemy.dialects.postgresql import UUID
 from sqlalchemy.orm import Mapped, mapped_column, relationship
@@ -20,3 +20,6 @@ class User(Base, UUIDMixin, TimestampMixin):
     last_login: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True), nullable=True)
 
     role: Mapped[Role] = relationship("Role", back_populates="users", lazy="selectin")
+    event_accesses: Mapped[List["UserEventAccess"]] = relationship("UserEventAccess", back_populates="user", lazy="noload")
+    site_accesses: Mapped[List["UserSiteAccess"]] = relationship("UserSiteAccess", back_populates="user", lazy="noload")
+

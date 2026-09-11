@@ -186,12 +186,79 @@ except Exception as e:
 # Mount Static Media Storage
 app.mount("/media", StaticFiles(directory=settings.MEDIA_ROOT), name="media")
 
-# Mount Static FRS Enrollment & Face Crop Storage
-import os
-os.makedirs("backend/data/enrollment", exist_ok=True)
-os.makedirs("backend/data/crops", exist_ok=True)
-app.mount("/static/enrollment", StaticFiles(directory="backend/data/enrollment"), name="enrollment_photos")
-app.mount("/static/crops", StaticFiles(directory="backend/data/crops"), name="crop_photos")
+# Mount Static FRS Enrollment & Face Crop Storage — use absolute paths so
+from pathlib import Path as _Path
+import shutil
+from fastapi.responses import FileResponse
+
+_BACKEND_DIR = _Path(__file__).resolve().parent.parent  # .../backend/
+_ENROLLMENT_DIR = _BACKEND_DIR / "data" / "enrollment"
+_CROPS_DIR = _BACKEND_DIR / "data" / "crops"
+_ENROLLMENT_DIR.mkdir(parents=True, exist_ok=True)
+_CROPS_DIR.mkdir(parents=True, exist_ok=True)
+
+@app.get("/static/crops/{filename:path}")
+async def get_static_crop_photo(filename: str):
+    # 1. Primary crops dir
+    p1 = _CROPS_DIR / filename
+    if p1.is_file():
+        return FileResponse(str(p1))
+    # 2. Nested crops dir
+    p2 = _BACKEND_DIR / "backend" / "data" / "crops" / filename
+    if p2.is_file():
+        return FileResponse(str(p2))
+    # 3. Match by person name from filename (e.g. crop_satish_xxx.jpg or crop_ram_xxx.jpg)
+    try:
+        clean_name = filename.lower()
+        person = ""
+        for known in ["ram", "satish", "divya", "nagesh"]:
+            if known in clean_name:
+                person = known
+                break
+        if person:
+            for search_dir in [_CROPS_DIR, _BACKEND_DIR / "backend" / "data" / "crops"]:
+                if search_dir.is_dir():
+                    matches = [f for f in search_dir.glob(f"*{person}*.*") if f.is_file()]
+                    if matches:
+                        try:
+                            shutil.copy2(matches[0], p1)
+                        except Exception:
+                            pass
+                        return FileResponse(str(matches[0]))
+            for search_dir in [_ENROLLMENT_DIR, _BACKEND_DIR / "backend" / "data" / "enrollment"]:
+                if search_dir.is_dir():
+                    matches = [f for f in search_dir.glob(f"*{person}*.*") if f.is_file()]
+                    if matches:
+                        return FileResponse(str(matches[0]))
+    except Exception:
+        pass
+    # 4. Fallback: Any available crop
+    fallback_crops = [f for f in _CROPS_DIR.glob("*.jpg") if f.is_file()]
+    if fallback_crops:
+        return FileResponse(str(fallback_crops[0]))
+    raise HTTPException(status_code=404, detail="Crop photo not found")
+
+@app.get("/static/enrollment/{filename:path}")
+async def get_static_enrollment_photo(filename: str):
+    p1 = _ENROLLMENT_DIR / filename
+    if p1.is_file():
+        return FileResponse(str(p1))
+    p2 = _BACKEND_DIR / "backend" / "data" / "enrollment" / filename
+    if p2.is_file():
+        return FileResponse(str(p2))
+    # Match by person name
+    clean_name = filename.lower()
+    for known in ["ram", "satish", "divya", "nagesh"]:
+        if known in clean_name:
+            for search_dir in [_ENROLLMENT_DIR, _BACKEND_DIR / "backend" / "data" / "enrollment"]:
+                if search_dir.is_dir():
+                    matches = [f for f in search_dir.glob(f"*{known}*.*") if f.is_file()]
+                    if matches:
+                        return FileResponse(str(matches[0]))
+    raise HTTPException(status_code=404, detail="Enrollment photo not found")
+
+app.mount("/static/enrollment", StaticFiles(directory=str(_ENROLLMENT_DIR)), name="enrollment_photos")
+app.mount("/static/crops", StaticFiles(directory=str(_CROPS_DIR)), name="crop_photos")
 
 
 

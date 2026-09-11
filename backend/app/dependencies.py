@@ -1,5 +1,5 @@
 import uuid
-from typing import AsyncGenerator, Callable, List, Optional
+from typing import Any, AsyncGenerator, Callable, List, Optional
 from fastapi import Depends, HTTPException, Header, Security, status
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 from redis.asyncio import Redis
@@ -20,6 +20,8 @@ _redis_pool: Optional[Redis] = None
 import time
 _cached_dev_user: Optional[User] = None
 _cached_users: dict[str, tuple[User, float]] = {}
+_cached_default_event: Optional[Any] = None
+_cached_default_event_exp: float = 0.0
 
 
 async def get_db() -> AsyncGenerator[AsyncSession, None]:
@@ -145,3 +147,177 @@ async def verify_ai_service_key(
             detail={"code": "UNAUTHORIZED_AI_SERVICE", "message": "Invalid or missing AI Service API Key"},
         )
     return True
+
+
+from dataclasses import dataclass
+from app.models.event import Event
+from app.models.site import Site
+from app.models.user_access import UserEventAccess, UserSiteAccess
+from app.security.permissions import Permissions
+
+
+@dataclass
+class EventContext:
+    event: Event
+    event_id: uuid.UUID
+    event_code: str
+    access_role: str
+    is_global_admin: bool
+    allowed_site_ids: Optional[List[uuid.UUID]] = None  # None means all sites in this event are allowed
+    has_frs_access: bool = False
+
+
+async def get_event_context(
+    x_event_id: Optional[str] = Header(None, alias="X-Event-ID"),
+    current_user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+) -> EventContext:
+    """
+    Validates event context and RBAC permissions.
+    - SUPER_ADMIN: has access to all events and all sites.
+    - Other users: must have explicit UserEventAccess record for the event.
+    - If X-Event-ID is omitted:
+        - If user has exactly one accessible event, defaults to that event.
+        - If user has multiple events, raises 400 Bad Request requiring explicit selection.
+    """
+    is_super = bool(current_user.role and current_user.role.code == "SUPER_ADMIN")
+    user_perms = [p.code for p in current_user.role.permissions] if current_user.role else []
+    has_frs = is_super or any(
+        p in user_perms for p in [Permissions.FRS_READ, Permissions.FRS_REVIEW, Permissions.FRS_MANAGE]
+    )
+
+    if is_super:
+        if x_event_id:
+            try:
+                target_uuid = uuid.UUID(x_event_id)
+                stmt = select(Event).where((Event.id == target_uuid) | (Event.code == x_event_id))
+            except ValueError:
+                stmt = select(Event).where(Event.code == x_event_id)
+            res = await db.execute(stmt)
+            target_event = res.scalars().first()
+            if not target_event:
+                raise HTTPException(
+                    status_code=status.HTTP_404_NOT_FOUND,
+                    detail={"code": "EVENT_NOT_FOUND", "message": f"Event '{x_event_id}' not found"},
+                )
+        else:
+            global _cached_default_event, _cached_default_event_exp
+            now_ts = time.time()
+            if _cached_default_event is not None and now_ts < _cached_default_event_exp:
+                target_event = _cached_default_event
+            else:
+                # Default to primary Khairatabad Ganesh event first, then fallback to active/latest
+                stmt = select(Event).where((Event.code == "KHB-2026") | (Event.name.ilike("%Khairatabad%"))).limit(1)
+                res = await db.execute(stmt)
+                target_event = res.scalars().first()
+                if not target_event:
+                    stmt = select(Event).where(Event.status.in_(["ACTIVE", "LIVE"])).order_by(Event.created_at.desc())
+                    res = await db.execute(stmt)
+                    target_event = res.scalars().first()
+                if not target_event:
+                    stmt = select(Event).order_by(Event.created_at.desc())
+                    res = await db.execute(stmt)
+                    target_event = res.scalars().first()
+                if target_event:
+                    _cached_default_event = target_event
+                    _cached_default_event_exp = now_ts + 120.0
+
+        if not target_event:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail={"code": "NO_EVENTS_EXIST", "message": "No events configured in the system"},
+            )
+
+        return EventContext(
+            event=target_event,
+            event_id=target_event.id,
+            event_code=target_event.code,
+            access_role="SUPER_ADMIN",
+            is_global_admin=True,
+            allowed_site_ids=None,
+            has_frs_access=True,
+        )
+
+    # Regular user: query accessible events from UserEventAccess
+    stmt = select(UserEventAccess).where(
+        UserEventAccess.user_id == current_user.id,
+        UserEventAccess.is_active == True,
+    )
+    res = await db.execute(stmt)
+    access_list = res.scalars().all()
+
+    if not access_list:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail={"code": "NO_EVENT_ACCESS", "message": "You do not have access to any events"},
+        )
+
+    accessible_event_ids = [acc.event_id for acc in access_list]
+    access_map = {acc.event_id: acc for acc in access_list}
+
+    target_event: Optional[Event] = None
+    target_access: Optional[UserEventAccess] = None
+
+    if x_event_id:
+        try:
+            target_uuid = uuid.UUID(x_event_id)
+            stmt = select(Event).where(
+                (Event.id == target_uuid) | (Event.code == x_event_id),
+                Event.id.in_(accessible_event_ids),
+            )
+        except ValueError:
+            stmt = select(Event).where(
+                Event.code == x_event_id,
+                Event.id.in_(accessible_event_ids),
+            )
+        res = await db.execute(stmt)
+        target_event = res.scalars().first()
+
+        if not target_event:
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN,
+                detail={"code": "EVENT_ACCESS_DENIED", "message": f"Access denied for event '{x_event_id}'"},
+            )
+        target_access = access_map.get(target_event.id)
+    else:
+        if len(accessible_event_ids) == 1:
+            stmt = select(Event).where(Event.id == accessible_event_ids[0])
+            res = await db.execute(stmt)
+            target_event = res.scalars().first()
+            target_access = access_map.get(target_event.id)
+        else:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail={
+                    "code": "EVENT_CONTEXT_REQUIRED",
+                    "message": "Multiple events accessible. Provide 'X-Event-ID' header to select context.",
+                },
+            )
+
+    if not target_event or not target_access:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail={"code": "EVENT_NOT_FOUND", "message": "Accessible event could not be resolved"},
+        )
+
+    # Check site-level restrictions for this user in this event
+    site_stmt = select(UserSiteAccess.site_id).where(
+        UserSiteAccess.user_id == current_user.id,
+        UserSiteAccess.event_id == target_event.id,
+        UserSiteAccess.is_active == True,
+    )
+    site_res = await db.execute(site_stmt)
+    site_ids = site_res.scalars().all()
+
+    allowed_sites = list(site_ids) if site_ids else None
+
+    return EventContext(
+        event=target_event,
+        event_id=target_event.id,
+        event_code=target_event.code,
+        access_role=target_access.access_role,
+        is_global_admin=False,
+        allowed_site_ids=allowed_sites,
+        has_frs_access=has_frs,
+    )
+

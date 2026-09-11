@@ -3,6 +3,7 @@ import { Link, useNavigate } from "react-router-dom";
 import { useAppStore } from "../../store/useAppStore.js";
 import { useAlertStore } from "../../store/useAlertStore.js";
 import { useSystemStore } from "../../store/useSystemStore.js";
+import { useEventStore } from "../../store/useEventStore.js";
 import { EVENT_CONFIG } from "../../config/eventConfig.js";
 
 function Clock() {
@@ -24,10 +25,16 @@ export default function TopBar() {
   const { sidebarCollapsed, toggleSidebar, toggleFullscreen, user, theme, toggleTheme, logout } = useAppStore();
   const { criticalCount } = useAlertStore();
   const { cpu, gpu } = useSystemStore();
+  const { events, activeEvent, activeEventId, setActiveEvent, fetchEvents, sites, activeSiteId, setActiveSiteId } = useEventStore();
   const [userMenuOpen, setUserMenuOpen] = useState(false);
   const userMenuRef = useRef(null);
 
+  useEffect(() => {
+    fetchEvents();
+  }, []);
+
   // Close dropdown on outside click
+
   useEffect(() => {
     const handleClickOutside = (event) => {
       if (userMenuRef.current && !userMenuRef.current.contains(event.target)) {
@@ -54,11 +61,12 @@ export default function TopBar() {
         <div className="cc-topbar-logo">BYC</div>
         {!sidebarCollapsed && (
           <div className="cc-topbar-brand-text">
-            <span className="cc-topbar-brand-name">{EVENT_CONFIG.shortName}</span>
+            <span className="cc-topbar-brand-name">{activeEvent?.name || EVENT_CONFIG.shortName}</span>
             <span className="cc-topbar-brand-sub">BYC AI Command Center</span>
           </div>
         )}
       </div>
+
 
       {/* Sidebar toggle */}
       <button
@@ -70,12 +78,129 @@ export default function TopBar() {
         <i className="bi bi-layout-sidebar" style={{ fontSize: 14 }} />
       </button>
 
+      {/* Event & Site Selector in Header */}
+      <div style={{ display: "flex", alignItems: "center", gap: 8, marginLeft: 12 }}>
+        {/* Event Dropdown */}
+        <div className="dropdown">
+          <button
+            className="btn btn-sm d-flex align-items-center gap-2"
+            style={{
+              background: "var(--cc-bg-secondary, rgba(255,255,255,0.05))",
+              border: "1px solid var(--cc-border)",
+              color: "var(--cc-text-primary)",
+              fontSize: 12,
+              fontWeight: 600,
+              padding: "4px 10px",
+              borderRadius: 6,
+            }}
+            type="button"
+            data-bs-toggle="dropdown"
+          >
+            <span className="cc-live-dot" style={{ width: 7, height: 7 }} />
+            <span style={{ maxWidth: 160, whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" }}>
+              {activeEvent?.name || "Select Event"}
+            </span>
+            <i className="bi bi-chevron-down" style={{ fontSize: 10, color: "var(--cc-text-muted)" }} />
+          </button>
+          <ul
+            className="dropdown-menu dropdown-menu-dark shadow"
+            style={{
+              background: "var(--cc-card-bg)",
+              borderColor: "var(--cc-border)",
+              fontSize: 12,
+              minWidth: 240,
+            }}
+          >
+            <li className="dropdown-header text-muted" style={{ fontSize: 10, letterSpacing: 0.5 }}>
+              ACCESSIBLE FESTIVALS & EVENTS
+            </li>
+            {events.map((evt) => (
+              <li key={evt.id}>
+                <button
+                  className={`dropdown-item d-flex justify-content-between align-items-center py-2 ${evt.id === activeEventId ? "active" : ""}`}
+                  onClick={() => setActiveEvent(evt)}
+                >
+                  <div>
+                    <div style={{ fontWeight: 600 }}>{evt.name}</div>
+                    <small style={{ color: "var(--cc-text-muted)" }}>
+                      {evt.code} • {evt.site_count || 0} Sites
+                    </small>
+                  </div>
+                  <span className={`badge ${evt.status === "ACTIVE" || evt.status === "LIVE" ? "bg-success" : "bg-secondary"}`} style={{ fontSize: 9 }}>
+                    {evt.status}
+                  </span>
+                </button>
+              </li>
+            ))}
+            <li><hr className="dropdown-divider" style={{ borderColor: "var(--cc-border)" }} /></li>
+            <li>
+              <Link to="/events" className="dropdown-item py-2 text-primary d-flex align-items-center gap-2">
+                <i className="bi bi-gear" />
+                Manage All Events
+              </Link>
+            </li>
+          </ul>
+        </div>
+
+        {/* Site Dropdown (if active event has sites) */}
+        {sites && sites.length > 0 && (
+          <div className="dropdown">
+            <button
+              className="btn btn-sm d-flex align-items-center gap-2"
+              style={{
+                background: activeSiteId ? "rgba(45, 126, 247, 0.15)" : "var(--cc-bg-secondary, rgba(255,255,255,0.05))",
+                border: activeSiteId ? "1px solid var(--cc-accent)" : "1px solid var(--cc-border)",
+                color: activeSiteId ? "var(--cc-accent)" : "var(--cc-text-muted)",
+                fontSize: 12,
+                padding: "4px 10px",
+                borderRadius: 6,
+              }}
+              type="button"
+              data-bs-toggle="dropdown"
+            >
+              <i className="bi bi-geo-alt" style={{ fontSize: 11 }} />
+              <span style={{ maxWidth: 120, whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" }}>
+                {sites.find((s) => s.id === activeSiteId)?.site_name || "All Sites"}
+              </span>
+              <i className="bi bi-chevron-down" style={{ fontSize: 10 }} />
+            </button>
+            <ul
+              className="dropdown-menu dropdown-menu-dark shadow"
+              style={{
+                background: "var(--cc-card-bg)",
+                borderColor: "var(--cc-border)",
+                fontSize: 12,
+                minWidth: 200,
+              }}
+            >
+              <li>
+                <button
+                  className={`dropdown-item py-2 ${!activeSiteId ? "active" : ""}`}
+                  onClick={() => setActiveSiteId(null)}
+                >
+                  <i className="bi bi-grid me-2" />
+                  All Sites (Full Event)
+                </button>
+              </li>
+              <li><hr className="dropdown-divider" style={{ borderColor: "var(--cc-border)" }} /></li>
+              {sites.map((s) => (
+                <li key={s.id}>
+                  <button
+                    className={`dropdown-item py-2 ${s.id === activeSiteId ? "active" : ""}`}
+                    onClick={() => setActiveSiteId(s.id)}
+                  >
+                    <div style={{ fontWeight: 600 }}>{s.site_name}</div>
+                    <small style={{ color: "var(--cc-text-muted)" }}>{s.site_code}</small>
+                  </button>
+                </li>
+              ))}
+            </ul>
+          </div>
+        )}
+      </div>
+
       {/* Center info */}
       <div className="cc-topbar-center">
-        <div className="cc-event-status">
-          <span className="cc-live-dot" />
-          <span className="cc-event-status-label">LIVE EVENT ACTIVE</span>
-        </div>
         <Clock />
         <span style={{ color: "var(--cc-text-muted)", fontSize: 11 }}>
           {new Date().toLocaleDateString("en-IN", { day: "2-digit", month: "short", year: "numeric" })}
@@ -93,6 +218,7 @@ export default function TopBar() {
           </span>
         </div>
       </div>
+
 
       {/* Right actions */}
       <div className="cc-topbar-right">

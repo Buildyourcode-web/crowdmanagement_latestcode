@@ -12,26 +12,21 @@ const NAV_GROUPS = [
     ],
   },
   {
-    label: "AI Intelligence",
+    label: "Cameras & AI",
     items: [
-      { path: "/cameras", icon: "bi-camera-video-fill", label: "Cameras", alertKey: "cameras" },
-      { path: "/crowd-management", icon: "bi-people-fill", label: "Crowd Management" },
-      { path: "/predictions", icon: "bi-graph-up-arrow", label: "Predictions" },
+      { path: "/cameras", icon: "bi-camera-video-fill", label: "Cameras" },
     ],
   },
   {
     label: "Security",
     items: [
       { path: "/frs", icon: "bi-person-bounding-box", label: "FRS" },
-      { path: "/missing-persons", icon: "bi-person-exclamation", label: "Missing Persons" },
       { path: "/alerts", icon: "bi-exclamation-triangle-fill", label: "Alerts", alertKey: "alerts" },
-      { path: "/incidents", icon: "bi-shield-exclamation", label: "Incidents" },
     ],
   },
   {
-    label: "Operations",
+    label: "Reports",
     items: [
-      // { path: "/operations", icon: "bi-diagram-3-fill", label: "Operations" },
       { path: "/analytics", icon: "bi-bar-chart-fill", label: "Analytics" },
       { path: "/reports", icon: "bi-file-earmark-text-fill", label: "Reports" },
     ],
@@ -39,12 +34,11 @@ const NAV_GROUPS = [
   {
     label: "System",
     items: [
-      { path: "/system-health", icon: "bi-cpu-fill", label: "System Health" },
-      { path: "/ai-deployment", icon: "bi-robot", label: "AI Deployment" },
       { path: "/settings", icon: "bi-gear-fill", label: "Settings" },
     ],
   },
 ];
+
 
 export default function Sidebar() {
   const navigate = useNavigate();

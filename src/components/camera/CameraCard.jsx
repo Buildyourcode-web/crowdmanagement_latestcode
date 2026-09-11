@@ -211,9 +211,11 @@ export default function CameraCard({ camera, onSelect, onToggleFrs, onFullscreen
         {!isFrs && (() => {
           const purp = camera.ai_purposes?.[0] || "ENTRY_EXIT";
           const meta = {
-            ENTRY_EXIT: { label: "Entry/Exit Counting", color: "#bc8cff", bg: "rgba(188, 140, 255, 0.12)", icon: "bi-arrow-left-right" },
-            ZONE: { label: "Zone Density", color: "#3fb950", bg: "rgba(63, 185, 80, 0.12)", icon: "bi-bounding-box" },
+            ENTRY: { label: "Entry Gate (IN)", color: "#3fb950", bg: "rgba(63, 185, 80, 0.12)", icon: "bi-box-arrow-in-right" },
+            EXIT: { label: "Exit Gate (OUT)", color: "#f85149", bg: "rgba(248, 81, 73, 0.12)", icon: "bi-box-arrow-right" },
+            ZONE: { label: "Zone Density", color: "#bc8cff", bg: "rgba(188, 140, 255, 0.12)", icon: "bi-bounding-box" },
             QUEUE: { label: "Queue Management", color: "#d29922", bg: "rgba(210, 153, 34, 0.12)", icon: "bi-people" },
+            ENTRY_EXIT: { label: "Entry/Exit Counting", color: "#3fb950", bg: "rgba(63, 185, 80, 0.12)", icon: "bi-arrow-left-right" },
           }[purp] || { label: "Crowd Analytics", color: "var(--cc-green)", bg: "rgba(63, 185, 80, 0.12)", icon: "bi-people-fill" };
           return (
             <div style={{ marginBottom: 6 }}>

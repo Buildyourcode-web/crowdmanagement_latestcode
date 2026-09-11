@@ -84,29 +84,43 @@ export default function ROIEditor({
   const [rois, setRois] = useState([]);
   const [readiness, setReadiness] = useState(null);
 
-  // Assigned purpose locked to camera profile: ENTRY_EXIT | ZONE | QUEUE
+  // Assigned purpose locked to camera profile: ENTRY | EXIT | ZONE | QUEUE
   const assignedObjective = useMemo(() => {
     if (initialObjective && initialObjective !== "ALL") return initialObjective;
-    if (camera?.ai_purposes && camera.ai_purposes.length > 0) return camera.ai_purposes[0];
+    if (camera?.ai_purposes && camera.ai_purposes.length > 0) {
+      const p = String(camera.ai_purposes[0]).toUpperCase();
+      if (p === "ENTRY" || (p.includes("ENTRY") && !p.includes("EXIT"))) return "ENTRY";
+      if (p === "EXIT" || (p.includes("EXIT") && !p.includes("ENTRY"))) return "EXIT";
+      if (p.includes("QUEUE")) return "QUEUE";
+      if (p.includes("ZONE")) return "ZONE";
+      return "ENTRY";
+    }
     if (profileId?.includes("QUEUE")) return "QUEUE";
     if (profileId?.includes("ZONE")) return "ZONE";
-    return "ENTRY_EXIT";
+    if (profileId?.includes("EXIT")) return "EXIT";
+    return "ENTRY";
   }, [initialObjective, camera?.ai_purposes, profileId]);
 
   const [objective, setObjective] = useState(assignedObjective);
 
-  // Available tools strictly locked to assigned profile
+  // Available tools strictly locked to assigned profile (Single tool per purpose)
   const availableTools = useMemo(() => {
-    if (objective === "ENTRY_EXIT") {
-      return ["COUNTING_LINE", "ENTRY_LINE", "EXIT_LINE"];
+    if (objective === "ENTRY") {
+      return ["ENTRY_LINE"];
+    }
+    if (objective === "EXIT") {
+      return ["EXIT_LINE"];
     }
     if (objective === "ZONE") {
-      return ["CROWD_ROI", "EXCLUSION_ZONE"];
+      return ["CROWD_ROI"];
     }
     if (objective === "QUEUE") {
-      return ["QUEUE_ROI", "DIRECTION_LINE"];
+      return ["QUEUE_ROI"];
     }
-    return ["COUNTING_LINE", "ENTRY_LINE", "EXIT_LINE"];
+    if (objective === "ENTRY_EXIT") {
+      return ["COUNTING_LINE"];
+    }
+    return ["ENTRY_LINE"];
   }, [objective]);
 
   const [activeTool, setActiveTool] = useState(initialTool || availableTools[0] || "COUNTING_LINE");
@@ -130,6 +144,9 @@ export default function ROIEditor({
   const [warningThreshold, setWarningThreshold] = useState("50");
   const [dangerThreshold, setDangerThreshold] = useState("80");
   const [capacity, setCapacity] = useState("100");
+  const [selectedZone, setSelectedZone] = useState(
+    camera?.zone_code || camera?.zone || "ZONE-A"
+  );
 
   const [validationStatus, setValidationStatus] = useState(null); // { valid: bool, message: str }
   const [saving, setSaving] = useState(false);
@@ -151,8 +168,18 @@ export default function ROIEditor({
     if (!camera?.id) return;
     try {
       const summary = await getCameraROIConfig(camera.id, profileId);
-      setRois(summary.configurations || []);
+      const confs = summary.configurations || [];
+      setRois(confs);
       setReadiness(summary.readiness_by_profile?.[profileId] || null);
+      if (confs.length > 0) {
+        const first = confs[0];
+        const g = first.geometry_json || {};
+        if (g.warning_threshold) setWarningThreshold(String(g.warning_threshold));
+        if (g.danger_threshold) setDangerThreshold(String(g.danger_threshold));
+        if (g.capacity) setCapacity(String(g.capacity));
+        if (g.zone_code) setSelectedZone(g.zone_code);
+        if (first.name) setRoiName(first.name);
+      }
     } catch (err) {
       console.error("Failed to load ROI configurations:", err);
     }
@@ -326,8 +353,59 @@ export default function ROIEditor({
         warning_threshold: parseInt(warningThreshold, 10) || 50,
         danger_threshold: parseInt(dangerThreshold, 10) || 80,
         capacity: parseInt(capacity, 10) || 100,
-        zone_name: roiName || `${meta?.label} ${rois.length + 1}`,
+        zone_name: roiName || `${selectedZone} Density Area`,
+        zone_code: (objective === "ZONE" || activeTool === "CROWD_ROI") ? selectedZone : (camera?.zone_code || "ZONE-A"),
       };
+    }
+
+    // Check if camera already has ROIs of another purpose/model
+    const conflictingRois = (rois || []).filter((r) => {
+      if (activeTool === "ENTRY_LINE") {
+        return r.roi_type !== "ENTRY_LINE";
+      }
+      if (activeTool === "EXIT_LINE") {
+        return r.roi_type !== "EXIT_LINE";
+      }
+      if (activeTool === "QUEUE_ROI" || activeTool === "DIRECTION_LINE") {
+        return r.roi_type !== "QUEUE_ROI" && r.roi_type !== "DIRECTION_LINE";
+      }
+      if (activeTool === "CROWD_ROI" || activeTool === "ZONE_BOUNDARY") {
+        return r.roi_type !== "CROWD_ROI" && r.roi_type !== "ZONE_BOUNDARY";
+      }
+      if (activeTool === "COUNTING_LINE") {
+        return r.roi_type !== "COUNTING_LINE";
+      }
+      return false;
+    });
+
+    if (conflictingRois.length > 0) {
+      const getPurposeName = (t) => {
+        if (t === "ENTRY_LINE") return "Entry Gate (IN)";
+        if (t === "EXIT_LINE") return "Exit Gate (OUT)";
+        if (t.includes("QUEUE")) return "Queue Management";
+        if (t.includes("CROWD") || t.includes("ZONE")) return "Zone Density";
+        return "Line Counting";
+      };
+
+      const prevName = conflictingRois[0].name || conflictingRois[0].roi_type;
+      const prevPurpose = getPurposeName(conflictingRois[0].roi_type);
+      const newPurpose = getPurposeName(activeTool);
+
+      const confirmMsg =
+        `ఈ కెమెరా ఇప్పటికే "${prevPurpose}" (${prevName}) కొరకు ఉపయోగించబడుతోంది.\n\n` +
+        `ఇప్పుడు మీరు "${newPurpose}" మోడల్‌ను సెట్ చేస్తున్నారు.\n` +
+        `పాత ROI ని తీసివేసి (Remove) కొత్త కాన్ఫిగరేషన్‌ను సేవ్‌ చేయాలా?`;
+
+      if (!window.confirm(confirmMsg)) {
+        return;
+      }
+
+      // Delete conflicting previous ROIs from DB
+      for (const cr of conflictingRois) {
+        try {
+          await deleteCameraROI(camera.id, cr.id);
+        } catch (_) {}
+      }
     }
 
     setSaving(true);
@@ -350,6 +428,17 @@ export default function ROIEditor({
         console.warn("Auto-start Crowd AI notice:", e);
       }
 
+      // If configuring Zone Density, sync camera zone assignment
+      if (objective === "ZONE" || activeTool === "CROWD_ROI") {
+        try {
+          await fetch(`${BACKEND}/api/v1/frs-engine/cameras/${camCode}/assign-zone?zone_code=${selectedZone}`, {
+            method: "PATCH",
+          });
+        } catch (e) {
+          console.warn("Zone assignment sync notice:", e);
+        }
+      }
+
       setStatusMessage("Configuration saved successfully! YOLO11x Human Detection is active.");
       setCurrentPoints([]);
       setHistory([]);
@@ -358,8 +447,13 @@ export default function ROIEditor({
       await refreshData();
       if (onSaved) onSaved();
     } catch (err) {
+      const errObj = err.response?.data?.error;
       const detail = err.response?.data?.detail;
-      const msg = (typeof detail === "object" && detail?.message) ? detail.message : (typeof detail === "string" ? detail : err.message);
+      const msg =
+        errObj?.message ||
+        (typeof detail === "object" && !Array.isArray(detail) && detail?.message) ||
+        (Array.isArray(detail) ? detail.map((d) => d.msg || JSON.stringify(d)).join(", ") : null) ||
+        (typeof detail === "string" ? detail : err.message);
       setValidationStatus({ valid: false, message: `✕ ${msg}` });
     } finally {
       setSaving(false);
@@ -472,24 +566,73 @@ export default function ROIEditor({
           {/* Locked Assigned Profile Header Banner */}
           <div
             style={{
-              background: objective === "ENTRY_EXIT" ? "rgba(188, 140, 255, 0.1)" : (objective === "QUEUE" ? "rgba(210, 153, 34, 0.1)" : "rgba(63, 185, 80, 0.1)"),
+              background:
+                objective === "ENTRY"
+                  ? "rgba(63, 185, 80, 0.1)"
+                  : objective === "EXIT"
+                  ? "rgba(248, 81, 73, 0.1)"
+                  : objective === "QUEUE"
+                  ? "rgba(210, 153, 34, 0.1)"
+                  : "rgba(188, 140, 255, 0.1)",
               padding: "10px 12px",
               borderRadius: 6,
-              border: `1px solid ${objective === "ENTRY_EXIT" ? "rgba(188, 140, 255, 0.3)" : (objective === "QUEUE" ? "rgba(210, 153, 34, 0.3)" : "rgba(63, 185, 80, 0.3)")}`,
+              border: `1px solid ${
+                objective === "ENTRY"
+                  ? "rgba(63, 185, 80, 0.3)"
+                  : objective === "EXIT"
+                  ? "rgba(248, 81, 73, 0.3)"
+                  : objective === "QUEUE"
+                  ? "rgba(210, 153, 34, 0.3)"
+                  : "rgba(188, 140, 255, 0.3)"
+              }`,
             }}
           >
-            <div style={{ display: "flex", alignItems: "center", gap: 6, fontSize: 12, fontWeight: 700, color: objective === "ENTRY_EXIT" ? "#bc8cff" : (objective === "QUEUE" ? "#d29922" : "#3fb950") }}>
-              <i className={`bi ${objective === "ENTRY_EXIT" ? "bi-arrow-left-right" : (objective === "QUEUE" ? "bi-people" : "bi-bounding-box")}`} />
+            <div
+              style={{
+                display: "flex",
+                alignItems: "center",
+                gap: 6,
+                fontSize: 12,
+                fontWeight: 700,
+                color:
+                  objective === "ENTRY"
+                    ? "#3fb950"
+                    : objective === "EXIT"
+                    ? "#f85149"
+                    : objective === "QUEUE"
+                    ? "#d29922"
+                    : "#bc8cff",
+              }}
+            >
+              <i
+                className={`bi ${
+                  objective === "ENTRY"
+                    ? "bi-box-arrow-in-right"
+                    : objective === "EXIT"
+                    ? "bi-box-arrow-right"
+                    : objective === "QUEUE"
+                    ? "bi-people"
+                    : "bi-bounding-box"
+                }`}
+              />
               <span>
-                {objective === "ENTRY_EXIT" ? "Assigned: Entry / Exit Counting" : (objective === "QUEUE" ? "Assigned: Queue Management" : "Assigned: Zone Density Management")}
+                {objective === "ENTRY"
+                  ? "Assigned: Entry Gate (IN)"
+                  : objective === "EXIT"
+                  ? "Assigned: Exit Gate (OUT)"
+                  : objective === "QUEUE"
+                  ? "Assigned: Queue Management"
+                  : "Assigned: Zone Density Management"}
               </span>
             </div>
             <div style={{ fontSize: 10, color: "var(--cc-text-muted)", marginTop: 4, lineHeight: 1.3 }}>
-              {objective === "ENTRY_EXIT"
-                ? "Showing only bidirectional line-crossing counting tools."
-                : (objective === "QUEUE"
-                  ? "Showing only waiting queue polygons and flow direction tools."
-                  : "Showing only crowd density perimeter and exclusion tools.")}
+              {objective === "ENTRY"
+                ? "Draw an Entry Line across the gate to count visitors entering (IN)."
+                : objective === "EXIT"
+                ? "Draw an Exit Line across the gate to count visitors leaving (OUT)."
+                : objective === "QUEUE"
+                ? "Draw a waiting queue polygon around barricades to track people waiting."
+                : "Draw a crowd density zone polygon to monitor area capacity."}
             </div>
           </div>
 
@@ -556,6 +699,59 @@ export default function ROIEditor({
 
           {/* Geometry Properties */}
           <div style={{ display: "flex", flexDirection: "column", gap: 10 }}>
+            {/* Zone Selector — ONLY for Zone Density camera */}
+            {(objective === "ZONE" || activeTool === "CROWD_ROI") && (
+              <div style={{ background: "var(--cc-bg-root)", padding: "10px 12px", borderRadius: 6, border: "1px solid var(--cc-border)" }}>
+                <label style={{ fontSize: 11, fontWeight: 700, color: "var(--cc-accent)", display: "flex", alignItems: "center", gap: 6, marginBottom: 8, textTransform: "uppercase" }}>
+                  <i className="bi bi-geo-alt-fill" style={{ color: "#58a6ff" }} /> Select Zone (A, B, C, D):
+                </label>
+                <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 6 }}>
+                  {[
+                    { code: "ZONE-A", label: "Zone A", sub: "North Gate", color: "#3fb950" },
+                    { code: "ZONE-B", label: "Zone B", sub: "Main Idol", color: "#58a6ff" },
+                    { code: "ZONE-C", label: "Zone C", sub: "VIP Enclosure", color: "#bc8cff" },
+                    { code: "ZONE-D", label: "Zone D", sub: "Prasadam", color: "#d29922" },
+                  ].map((z) => {
+                    const isSel = selectedZone === z.code;
+                    return (
+                      <button
+                        key={z.code}
+                        type="button"
+                        onClick={() => {
+                          setSelectedZone(z.code);
+                          if (!roiName || roiName.includes("Polygon") || roiName.includes("Zone") || roiName.includes("Area")) {
+                            setRoiName(`${z.label} Density Area`);
+                          }
+                        }}
+                        style={{
+                          padding: "8px 6px",
+                          borderRadius: 6,
+                          cursor: "pointer",
+                          border: isSel ? `2px solid ${z.color}` : "1px solid var(--cc-border)",
+                          background: isSel ? `${z.color}25` : "rgba(255,255,255,0.02)",
+                          color: isSel ? z.color : "var(--cc-text-primary)",
+                          fontWeight: 700,
+                          fontSize: 11,
+                          display: "flex",
+                          flexDirection: "column",
+                          alignItems: "center",
+                          justifyContent: "center",
+                          gap: 2,
+                          transition: "all 0.15s ease",
+                        }}
+                      >
+                        <div style={{ display: "flex", alignItems: "center", gap: 5 }}>
+                          <span style={{ width: 8, height: 8, borderRadius: "50%", background: z.color }} />
+                          {z.label}
+                        </div>
+                        <span style={{ fontSize: 9.5, color: "var(--cc-text-muted)", fontWeight: 400 }}>{z.sub}</span>
+                      </button>
+                    );
+                  })}
+                </div>
+              </div>
+            )}
+
             <div>
               <label style={{ fontSize: 11, fontWeight: 700, color: "var(--cc-text-muted)", display: "block", marginBottom: 4 }}>
                 Geometry Label

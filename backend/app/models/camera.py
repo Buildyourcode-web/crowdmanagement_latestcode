@@ -33,6 +33,11 @@ class Camera(Base, UUIDMixin, TimestampMixin):
     latitude: Mapped[Optional[float]] = mapped_column(Float, nullable=True)
     longitude: Mapped[Optional[float]] = mapped_column(Float, nullable=True)
     coordinates: Mapped[Any] = mapped_column(JSON, default=lambda: [78.4635, 17.4175], nullable=False)
+
+    # Event & Site scoping (nullable — cameras can exist before being assigned to an event/site)
+    event_id: Mapped[Optional[uuid.UUID]] = mapped_column(UUID(as_uuid=True), ForeignKey("events.id"), nullable=True, index=True)
+    site_id: Mapped[Optional[uuid.UUID]] = mapped_column(UUID(as_uuid=True), ForeignKey("sites.id"), nullable=True, index=True)
+
     
     # Operational & Stream Status
     status: Mapped[str] = mapped_column(String(50), default="online", index=True, nullable=False)
@@ -59,6 +64,7 @@ class Camera(Base, UUIDMixin, TimestampMixin):
 
     # Relationships
     zone: Mapped[Optional["Zone"]] = relationship("Zone", back_populates="cameras")
+    site: Mapped[Optional["Site"]] = relationship("Site", back_populates="cameras", lazy="noload")
     ai_assignments: Mapped[List["CameraAIProfileAssignment"]] = relationship(
         "CameraAIProfileAssignment",
         back_populates="camera",

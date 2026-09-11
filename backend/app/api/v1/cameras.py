@@ -1,10 +1,12 @@
+import uuid
 from typing import List, Optional
 from fastapi import APIRouter, Depends, Query, Request, Response, status
 from sqlalchemy.ext.asyncio import AsyncSession
 from loguru import logger
 
-from app.dependencies import get_current_user, get_db, require_permission
+from app.dependencies import get_current_user, get_db, get_event_context, require_permission, EventContext
 from app.models.user import User
+
 from app.schemas.camera import (
     BulkCameraImportRequest,
     BulkCameraImportResult,
@@ -52,13 +54,19 @@ async def list_cameras(
     is_frs: Optional[bool] = Query(None, description="Filter by FRS flag"),
     search: Optional[str] = Query(None, description="Search by camera code, name, or IP"),
     enabled_only: Optional[bool] = Query(None, description="Filter by enabled state"),
+    site_id: Optional[uuid.UUID] = Query(None, description="Filter by operational site ID"),
     page: int = Query(1, ge=1),
     page_size: int = Query(100, ge=1, le=200),
+    ctx: EventContext = Depends(get_event_context),
     db: AsyncSession = Depends(get_db),
     current_user: User = Depends(require_permission(Permissions.CAMERA_READ)),
 ):
-    """List cameras with multi-attribute filtering, search, and pagination."""
+    """List cameras with multi-attribute filtering, search, pagination, and multi-event/site isolation."""
     service = CameraService(db)
+    
+    # Calculate effective site scoping:
+    effective_sites = [site_id] if site_id else ctx.allowed_site_ids
+
     cameras, total = await service.get_cameras(
         zone_code=zone,
         status_filter=status,
@@ -66,9 +74,12 @@ async def list_cameras(
         is_frs=is_frs,
         search=search,
         enabled_only=enabled_only,
+        event_id=ctx.event_id,
+        allowed_site_ids=effective_sites,
         page=page,
         page_size=page_size,
     )
+
     meta = ResponseMeta(
         page=page,
         page_size=page_size,

@@ -7,9 +7,8 @@ import FRSCameraGrid from "../components/frs/FRSCameraGrid.jsx";
 import FRSCandidateReviewModal from "../components/frs/FRSCandidateReviewModal.jsx";
 import FRSEnrollmentModal from "../components/frs/FRSEnrollmentModal.jsx";
 import { getFRSDashboard, getFRSDetections, getFRSCameras } from "../services/frsService.js";
+import { realtimeService } from "../services/realtimeService.js";
 import { LoadingState } from "../components/common/States.jsx";
-
-const WS_URL = `ws://${window.location.hostname}:8000/ws/v1/events`;
 
 const DEFAULT_KPIS = {
   cameras_online: 0,
@@ -18,93 +17,74 @@ const DEFAULT_KPIS = {
   possible_matches: 0,
   pending_review: 0,
   pendingReview: 0,
-  dismissed: 0,
-  active_cases: 0,
+  watchlist_size: 0,
+  watchlistSize: 0,
+  activeAlerts: 0,
 };
 
 export default function FRS() {
   const navigate = useNavigate();
-  const [kpis, setKpis] = useState(DEFAULT_KPIS);
+  const [activeTab, setActiveTab] = useState("feed");
+  const [kpis, setKpis] = useState(null);
   const [detections, setDetections] = useState([]);
   const [cameras, setCameras] = useState([]);
+  const [selectedCandidate, setSelectedCandidate] = useState(null);
+  const [showEnrollModal, setShowEnrollModal] = useState(false);
   const [loading, setLoading] = useState(true);
-  const [activeTab, setActiveTab] = useState("feed");
+  const [wsConnected, setWsConnected] = useState(false);
+  const [search, setSearch] = useState("");
+  const [selectedStatus, setSelectedStatus] = useState("ALL");
   const [statusFilter, setStatusFilter] = useState("ALL");
   const [alertReviewCandidate, setAlertReviewCandidate] = useState(null);
-  const [showEnrollModal, setShowEnrollModal] = useState(false);
-  const [wsConnected, setWsConnected] = useState(false);
-  const wsRef = useRef(null);
 
   const loadData = useCallback(async () => {
     try {
-      const [dash, dets, cams] = await Promise.all([
+      const [dashRes, detRes, camRes] = await Promise.allSettled([
         getFRSDashboard(),
-        getFRSDetections(),
+        getFRSDetections({ limit: 50 }),
         getFRSCameras(),
       ]);
-      setKpis(dash);
-      setDetections(dets);
-      setCameras(cams);
+
+      if (dashRes.status === "fulfilled" && dashRes.value) {
+        setKpis(dashRes.value);
+      }
+      if (detRes.status === "fulfilled" && detRes.value) {
+        const list = Array.isArray(detRes.value) ? detRes.value : (detRes.value?.data || []);
+        setDetections(list);
+      }
+      if (camRes.status === "fulfilled" && camRes.value) {
+        const list = Array.isArray(camRes.value) ? camRes.value : (camRes.value?.cameras || []);
+        setCameras(list);
+      }
     } catch (e) {
-      console.error(e);
+      console.warn("FRS load error:", e);
     } finally {
       setLoading(false);
     }
   }, []);
 
-  // WebSocket live candidate feed
+  // WebSocket live candidate feed via centralized realtimeService
   useEffect(() => {
-    let ws;
-    let reconnectTimer;
+    const unsubStatus = realtimeService.subscribeStatus((status) => {
+      setWsConnected(status === "LIVE DATA" || status === "UPDATING");
+    });
 
-    const connect = () => {
-      try {
-        ws = new WebSocket(WS_URL);
-        wsRef.current = ws;
-
-        ws.onopen = () => {
-          setWsConnected(true);
-          console.log("[FRS-WS] Connected to live event bus");
-        };
-
-        ws.onmessage = (evt) => {
-          try {
-            const msg = JSON.parse(evt.data);
-            if (msg.type === "frs_candidate" && msg.payload) {
-              const candidate = msg.payload;
-              // Prepend live detection to feed
-              setDetections((prev) => {
-                const exists = prev.some((d) => d.id === candidate.id);
-                if (exists) return prev;
-                return [candidate, ...prev].slice(0, 100); // keep max 100
-              });
-              // Update pending count in KPIs
-              setKpis((k) => k ? { ...k, pending_review: (k.pending_review || 0) + 1 } : k);
-            }
-          } catch (e) {
-            // ignore parse errors
-          }
-        };
-
-        ws.onclose = () => {
-          setWsConnected(false);
-          // Auto-reconnect after 3s
-          reconnectTimer = setTimeout(connect, 3000);
-        };
-
-        ws.onerror = () => {
-          ws.close();
-        };
-      } catch (e) {
-        console.warn("[FRS-WS] Connection failed:", e);
+    const unsubEvents = realtimeService.subscribe((msg, eventType, payload) => {
+      const type = eventType || msg?.type;
+      const data = payload || msg?.payload;
+      if (type === "frs_candidate" && data) {
+        setDetections((prev) => {
+          const exists = prev.some((d) => d.id === data.id);
+          if (exists) return prev;
+          return [data, ...prev].slice(0, 100);
+        });
+        setKpis((k) => (k ? { ...k, pending_review: (k.pending_review || 0) + 1 } : k));
       }
-    };
-
-    connect();
+    });
 
     return () => {
-      clearTimeout(reconnectTimer);
-      if (wsRef.current) wsRef.current.close();
+      unsubStatus();
+      unsubEvents();
     };
   }, []);
 

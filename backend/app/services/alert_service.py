@@ -1,6 +1,8 @@
+import uuid
 from datetime import datetime, timezone
 from typing import List, Optional, Tuple
 from fastapi import HTTPException, status
+
 from sqlalchemy.ext.asyncio import AsyncSession
 from app.models.alert import Alert
 from app.repositories.alert_repository import AlertRepository
@@ -20,6 +22,7 @@ class AlertService:
         camera_code: Optional[str] = None,
         status_filter: Optional[str] = None,
         search: Optional[str] = None,
+        event_id: Optional[uuid.UUID] = None,
         page: int = 1,
         page_size: int = 50,
     ) -> Tuple[List[AlertRead], int]:
@@ -31,9 +34,11 @@ class AlertService:
             camera_code=camera_code,
             status=status_filter,
             search=search,
+            event_id=event_id,
             skip=skip,
             limit=page_size,
         )
+
 
         results = [
             AlertRead(

@@ -18,6 +18,8 @@ class QueueSnapshot(Base, UUIDMixin, TimestampMixin):
     camera_code: Mapped[Optional[str]] = mapped_column(String(50), index=True, nullable=True)
     profile_id: Mapped[Optional[str]] = mapped_column(String(50), nullable=True)
     zone_id: Mapped[Optional[uuid.UUID]] = mapped_column(UUID(as_uuid=True), ForeignKey("zones.id"), nullable=True)
+    event_id: Mapped[Optional[uuid.UUID]] = mapped_column(UUID(as_uuid=True), ForeignKey("events.id"), nullable=True, index=True)
+
 
     timestamp: Mapped[datetime] = mapped_column(
         DateTime(timezone=True),

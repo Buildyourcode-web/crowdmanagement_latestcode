@@ -10,6 +10,8 @@ from app.models.camera import Camera
 from app.models.user import User
 from app.models.role import Role
 from app.models.event import Event
+from app.models.site import Site
+from app.models.user_access import UserEventAccess, UserSiteAccess
 from app.models.alert import Alert
 from app.models.crowd import CrowdSnapshot
 from app.models.incident import Incident
@@ -38,6 +40,9 @@ __all__ = [
     "User",
     "Role",
     "Event",
+    "Site",
+    "UserEventAccess",
+    "UserSiteAccess",
     "Alert",
     "CrowdSnapshot",
     "Incident",
@@ -50,3 +55,4 @@ __all__ = [
     "FRSReferenceProfile",
     "AuditLog",
 ]
+

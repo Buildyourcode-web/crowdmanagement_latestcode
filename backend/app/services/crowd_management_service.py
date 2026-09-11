@@ -145,6 +145,15 @@ class CrowdManagementService:
         # 3. Running Pipelines in memory
         live_crowd_pipes = {p.camera_code: p for p in CrowdPipelineRegistry.list_pipelines()}
         live_queue_pipes = {p.config.camera_code: p for p in QueuePipelineRegistry.list_all()}
+        live_frs_workers = {}
+        try:
+            from app.frs_engine.frs_service import _active_workers, _workers_lock
+            with _workers_lock:
+                for cid, w in _active_workers.items():
+                    if getattr(w.state, "running", False):
+                        live_frs_workers[cid] = w.state
+        except Exception:
+            pass
 
         # 4. Filter cameras by camera_id_or_code if requested
         if camera_id_or_code and camera_id_or_code.strip().upper() not in ("ALL", ""):
@@ -253,7 +262,10 @@ class CrowdManagementService:
         ]
 
         # Map zones to cameras
-        zones_to_process = all_zones[:2] if len(all_zones) >= 2 else all_zones
+        # Map zones to cameras (prioritizing ZONE-A, ZONE-B, ZONE-C, ZONE-D)
+        primary_order = {"ZONE-A": 0, "ZONE-B": 1, "ZONE-C": 2, "ZONE-D": 3}
+        sorted_all_zones = sorted(all_zones, key=lambda z: primary_order.get(z.zone_code, 99))
+        zones_to_process = sorted_all_zones[:4] if len(sorted_all_zones) >= 4 else sorted_all_zones
         zone_codes_needed = [z.zone_code for z in zones_to_process]
         latest_crowd_snaps: Dict[str, CrowdSnapshot] = {}
         if zone_codes_needed:
@@ -269,9 +281,16 @@ class CrowdManagementService:
 
         for idx, z in enumerate(zones_to_process):
             # Find camera linked to this zone if any
-            matched_cam = next((c for c in zone_cams if c.zone_code == z.zone_code), None)
+            matched_cam = next((c for c in zone_cams if (c.zone_code or "").upper() == z.zone_code.upper()), None)
             if not matched_cam and idx < len(zone_cams):
                 matched_cam = zone_cams[idx]
+
+            # Check if live FRS / YOLO11x worker is actively assigned to this zone
+            live_worker_state = None
+            for s in live_frs_workers.values():
+                if getattr(s, "zone_code", "").upper() == z.zone_code.upper():
+                    live_worker_state = s
+                    break
 
             pipe = live_crowd_pipes.get(matched_cam.camera_code) if matched_cam else None
             if pipe and pipe.state == PipelineState.RUNNING:
@@ -282,6 +301,14 @@ class CrowdManagementService:
                 density_lvl = m.get("density_level", "LOW")
                 risk = m.get("risk_level", "LOW")
                 trend = "INCREASING" if (m.get("flow_delta") or 0) > 10 else ("DECREASING" if (m.get("flow_delta") or 0) < -10 else "STABLE")
+                pipe_status = "RUNNING"
+            elif live_worker_state and getattr(live_worker_state, "crowd_ai_active", False):
+                cur_people = getattr(live_worker_state, "occupancy_count", 0)
+                capacity = z.capacity or 5000
+                density_pct = round((cur_people / float(capacity)) * 100.0, 1) if capacity > 0 else 0.0
+                density_lvl = "HIGH" if density_pct > 75 else ("MODERATE" if density_pct > 50 else "LOW")
+                risk = "CRITICAL" if density_pct > 85 else ("HIGH" if density_pct > 60 else "LOW")
+                trend = "STABLE"
                 pipe_status = "RUNNING"
             else:
                 pipe_status = "STOPPED" if matched_cam and matched_cam.enabled else "OFFLINE"
@@ -302,7 +329,7 @@ class CrowdManagementService:
                     risk = z.risk_level or "LOW"
                     trend = "STABLE"
 
-            cam_status_str = "ONLINE" if matched_cam and matched_cam.enabled and (matched_cam.status or "").lower() == "online" else "OFFLINE"
+            cam_status_str = "ONLINE" if (matched_cam and matched_cam.enabled and (matched_cam.status or "").lower() == "online") or live_worker_state else "OFFLINE"
             if matched_cam and matched_cam.enabled and (matched_cam.status or "").lower() == "degraded":
                 cam_status_str = "DEGRADED"
 
@@ -311,8 +338,8 @@ class CrowdManagementService:
                     zone_id=str(z.id),
                     zone_code=z.zone_code,
                     zone_name=z.name or z.zone_code,
-                    camera_id=str(matched_cam.id) if matched_cam else None,
-                    camera_code=matched_cam.camera_code if matched_cam else None,
+                    camera_id=str(matched_cam.id) if matched_cam else (live_worker_state.camera_id if live_worker_state else None),
+                    camera_code=matched_cam.camera_code if matched_cam else (live_worker_state.camera_id if live_worker_state else None),
                     current_people=cur_people,
                     capacity=capacity,
                     density_pct=density_pct,
@@ -323,6 +350,7 @@ class CrowdManagementService:
                     pipeline_status=pipe_status,
                 )
             )
+
 
         # 7. Build Camera Status Table (7 dynamic crowd management cameras)
         # Combine queue cameras and zone cameras up to 7, or all available

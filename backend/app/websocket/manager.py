@@ -18,13 +18,22 @@ class ConnectionManager:
             self.active_connections.remove(websocket)
         logger.info(f"WebSocket client disconnected. Active clients: {len(self.active_connections)}")
 
-    async def broadcast_event(self, event_type: str, payload: dict):
+    async def broadcast_event(
+        self,
+        event_type: str,
+        payload: dict,
+        event_id: Optional[str] = None,
+        site_id: Optional[str] = None,
+    ):
         message = {
             "type": event_type,
+            "event_id": str(event_id) if event_id else payload.get("event_id"),
+            "site_id": str(site_id) if site_id else payload.get("site_id"),
             "payload": payload,
         }
         json_str = json.dumps(message)
         dead_connections = []
+
         for connection in list(self.active_connections):
             try:
                 await connection.send_text(json_str)

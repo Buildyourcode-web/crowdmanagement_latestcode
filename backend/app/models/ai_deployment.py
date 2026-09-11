@@ -32,6 +32,15 @@ class AIPipelineDeployment(Base, UUIDMixin, TimestampMixin):
     profile_id: Mapped[str] = mapped_column(String(50), nullable=False, index=True)
     pipeline_type: Mapped[str] = mapped_column(String(50), nullable=False, index=True)  # "CROWD", "QUEUE"
 
+    # Event scoping — AI deployments are contextual per event
+    event_id: Mapped[Optional[uuid.UUID]] = mapped_column(
+        UUID(as_uuid=True),
+        ForeignKey("events.id"),
+        nullable=True,
+        index=True,
+    )
+
+
     # State Machine: desired_state vs actual_state
     desired_state: Mapped[str] = mapped_column(String(50), default="STOPPED", nullable=False, index=True)
     actual_state: Mapped[str] = mapped_column(String(50), default="STOPPED", nullable=False, index=True)

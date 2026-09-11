@@ -7,6 +7,7 @@ from app.api.v1.cameras import router as cameras_router
 from app.api.v1.crowd import router as crowd_router
 from app.api.v1.crowd_management import router as crowd_management_router
 from app.api.v1.queue import router as queue_router
+from app.api.v1.dashboard import router as dashboard_router
 from app.api.v1.frs import router as frs_router
 from app.api.v1.health import router as health_router
 from app.api.v1.incidents import router as incidents_router
@@ -19,12 +20,19 @@ from app.api.v1.settings import router as settings_router
 from app.api.v1.system import router as system_router
 from app.api.v1.users import router as users_router
 from app.api.v1.zones import router as zones_router
+from app.api.v1.events import router as events_router
+from app.api.v1.sites import router as sites_router
+from app.api.v1.event_access import router as event_access_router
 
 api_router = APIRouter()
 
 # API v1 endpoints
 api_router.include_router(auth_router)
 api_router.include_router(users_router)
+api_router.include_router(events_router)
+api_router.include_router(sites_router)
+api_router.include_router(event_access_router)
+api_router.include_router(dashboard_router)
 api_router.include_router(cameras_router)
 api_router.include_router(zones_router)
 api_router.include_router(crowd_router)
@@ -41,3 +49,4 @@ api_router.include_router(reports_router)
 api_router.include_router(settings_router)
 api_router.include_router(system_router)
 api_router.include_router(ai_router)
+
