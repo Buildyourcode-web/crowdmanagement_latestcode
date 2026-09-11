@@ -1,0 +1,31 @@
+version: "3.8"
+
+# ==============================================================================
+# CPU Instance Docker Compose — BYC AI Command & Control Frontend
+# Runs lightweight Nginx container serving compiled React SPA + proxying to GPU backend
+# ==============================================================================
+
+services:
+  frontend:
+    build:
+      context: ../..
+      dockerfile: deploy/cpu-frontend/Dockerfile
+      args:
+        # If left empty, the browser uses the same host and Nginx proxies /api and /ws
+        # If direct mode is desired, set VITE_API_BASE_URL=http://<GPU_IP>:8000
+        - VITE_API_BASE_URL=${VITE_API_BASE_URL:-}
+        - VITE_WS_URL=${VITE_WS_URL:-}
+    container_name: byc_cpu_frontend
+    restart: unless-stopped
+    ports:
+      - "${FRONTEND_PORT:-80}:80"
+    environment:
+      # GPU Backend Target for Nginx Reverse Proxy
+      # Replace with your GPU Instance Private IP (if in same VPC) or Public IP
+      - BACKEND_URL=${BACKEND_URL:-http://localhost:8000}
+    healthcheck:
+      test: ["CMD", "wget", "-q", "--spider", "http://localhost:80/health"]
+      interval: 30s
+      timeout: 5s
+      start_period: 10s
+      retries: 3

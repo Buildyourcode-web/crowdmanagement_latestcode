@@ -1,0 +1,98 @@
+# ==============================================================================
+# Nginx Configuration Template for CPU Frontend Instance
+# Automatic environment variable substitution via envsubst at container launch
+# Variables:
+#   ${BACKEND_URL} -> e.g. http://10.0.0.5:8000 or http://gpu-instance-ip:8000
+# ==============================================================================
+
+server {
+    listen 80;
+    server_name _;
+
+    root /usr/share/nginx/html;
+    index index.html;
+
+    # Gzip Compression
+    gzip on;
+    gzip_vary on;
+    gzip_min_length 1024;
+    gzip_proxied any;
+    gzip_types text/plain text/css text/xml application/json application/javascript application/xml+rss application/atom+xml image/svg+xml;
+
+    # Maximum file upload size (e.g. for face enrollment images)
+    client_max_body_size 50M;
+
+    # --------------------------------------------------------------------------
+    # 1. Reverse Proxy to GPU Backend (REST API)
+    # --------------------------------------------------------------------------
+    location /api/ {
+        proxy_pass ${BACKEND_URL}/api/;
+        proxy_http_version 1.1;
+        proxy_set_header Host $host;
+        proxy_set_header X-Real-IP $remote_addr;
+        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+        proxy_set_header X-Forwarded-Proto $scheme;
+        proxy_read_timeout 90s;
+        proxy_connect_timeout 15s;
+    }
+
+    # --------------------------------------------------------------------------
+    # 2. Reverse Proxy to GPU Backend (WebSocket Live Telemetry Bus)
+    # --------------------------------------------------------------------------
+    location /ws/ {
+        proxy_pass ${BACKEND_URL}/ws/;
+        proxy_http_version 1.1;
+        proxy_set_header Upgrade $http_upgrade;
+        proxy_set_header Connection "upgrade";
+        proxy_set_header Host $host;
+        proxy_set_header X-Real-IP $remote_addr;
+        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+        proxy_read_timeout 86400s;
+        proxy_send_timeout 86400s;
+    }
+
+    # --------------------------------------------------------------------------
+    # 3. Media & Static Files from Backend
+    # --------------------------------------------------------------------------
+    location /media/ {
+        proxy_pass ${BACKEND_URL}/media/;
+        proxy_http_version 1.1;
+        proxy_set_header Host $host;
+        proxy_set_header X-Real-IP $remote_addr;
+        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+    }
+
+    location /static/ {
+        proxy_pass ${BACKEND_URL}/static/;
+        proxy_http_version 1.1;
+        proxy_set_header Host $host;
+        proxy_set_header X-Real-IP $remote_addr;
+        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+    }
+
+    # --------------------------------------------------------------------------
+    # 4. Vite Frontend Static Assets Caching
+    # --------------------------------------------------------------------------
+    location /assets/ {
+        expires 1y;
+        add_header Cache-Control "public, immutable";
+        access_log off;
+    }
+
+    # --------------------------------------------------------------------------
+    # 5. SPA Client-Side Routing Fallback
+    # --------------------------------------------------------------------------
+    location / {
+        try_files $uri $uri/ /index.html;
+        # Never cache index.html so updates are visible instantly
+        add_header Cache-Control "no-cache, no-store, must-revalidate";
+        add_header Pragma "no-cache";
+        add_header Expires "0";
+    }
+
+    # Healthcheck endpoint for load balancer
+    location /health {
+        access_log off;
+        return 200 "OK\n";
+    }
+}

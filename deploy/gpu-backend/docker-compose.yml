@@ -1,0 +1,156 @@
+version: "3.8"
+
+# ==============================================================================
+# GPU Instance Docker Compose — BYC AI Command & Control Platform
+# Services:
+#   1. backend: FastAPI + YOLO11x + InsightFace FRS (NVIDIA GPU accelerated)
+#   2. db: PostgreSQL 16 + PostGIS (Intra-host zero-latency storage)
+#   3. redis: Redis 7 In-Memory Cache & Pub/Sub (Intra-host zero-latency bus)
+# ==============================================================================
+
+services:
+  # ----------------------------------------------------------------------------
+  # 1. GPU AI Backend (FastAPI + YOLO11x Crowd AI + InsightFace FRS)
+  # ----------------------------------------------------------------------------
+  backend:
+    build:
+      context: ../..
+      dockerfile: deploy/gpu-backend/Dockerfile
+    container_name: byc_gpu_backend
+    restart: unless-stopped
+    ports:
+      - "8000:8000"
+    environment:
+      # Application
+      - APP_NAME=BYC AI Command & Control Platform
+      - APP_ENV=production
+      - DEBUG=false
+      - PORT=8000
+      - HOST=0.0.0.0
+
+      # Database (Intra-container high-speed link)
+      - DATABASE_URL=postgresql+asyncpg://${POSTGRES_USER:-postgres}:${POSTGRES_PASSWORD:-postgres_secure_2026}@db:5432/${POSTGRES_DB:-main_crowd_ai}
+      - DATABASE_SYNC_URL=postgresql://${POSTGRES_USER:-postgres}:${POSTGRES_PASSWORD:-postgres_secure_2026}@db:5432/${POSTGRES_DB:-main_crowd_ai}
+      - DB_POOL_SIZE=20
+      - DB_MAX_OVERFLOW=10
+
+      # Redis (Intra-container high-speed bus)
+      - REDIS_URL=redis://redis:6379/0
+
+      # Security & Auth
+      - JWT_SECRET_KEY=${JWT_SECRET_KEY:-byc_super_secret_jwt_key_khairatabad_2026_production_change_me}
+      - AI_SERVICE_API_KEY=${AI_SERVICE_API_KEY:-byc_ai_internal_service_token_2026}
+
+      # CORS — Put your Frontend CPU instance IP / domain here
+      - CORS_ORIGINS=${CORS_ORIGINS:-http://localhost,http://localhost:5173,http://localhost:80}
+
+      # GPU Acceleration & AI Settings
+      - USE_CUDA=true
+      - MODEL_NAME=buffalo_l
+      - DET_SIZE=640
+      - MATCH_THRESHOLD=0.60
+      - FRS_ENABLED=true
+      - AI_ENABLED=true
+
+      # Physical RTSP Camera Source
+      - RTSP_ENABLED=${RTSP_ENABLED:-true}
+      - RTSP_URL=${RTSP_URL:-rtsp://admin:Veeru%40555@192.168.0.102:554/Streaming/Channels/101}
+
+    # Pass NVIDIA GPU into container
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: all
+              capabilities: [gpu]
+
+    depends_on:
+      db:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+
+    volumes:
+      - media_data:/app/media
+      - insightface_data:/root/.insightface
+      - ../../models:/app/models:ro
+
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8000/api/v1/health/live"]
+      interval: 30s
+      timeout: 5s
+      start_period: 25s
+      retries: 3
+
+    networks:
+      - byc_internal_net
+
+  # ----------------------------------------------------------------------------
+  # 2. Database: PostgreSQL 16 + PostGIS Spatial Engine
+  # ----------------------------------------------------------------------------
+  db:
+    image: postgis/postgis:16-3.4-alpine
+    container_name: byc_gpu_postgres
+    restart: unless-stopped
+    # 5432 bound to localhost only for security — not exposed to public internet
+    ports:
+      - "127.0.0.1:5432:5432"
+    environment:
+      - POSTGRES_USER=${POSTGRES_USER:-postgres}
+      - POSTGRES_PASSWORD=${POSTGRES_PASSWORD:-postgres_secure_2026}
+      - POSTGRES_DB=${POSTGRES_DB:-main_crowd_ai}
+      - PGDATA=/var/lib/postgresql/data/pgdata
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-postgres} -d ${POSTGRES_DB:-main_crowd_ai}"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 10s
+    networks:
+      - byc_internal_net
+
+  # ----------------------------------------------------------------------------
+  # 3. Cache: Redis 7 In-Memory Telemetry & Pub/Sub
+  # ----------------------------------------------------------------------------
+  redis:
+    image: redis:7-alpine
+    container_name: byc_gpu_redis
+    restart: unless-stopped
+    # 6379 bound to localhost only for security — not exposed to public internet
+    ports:
+      - "127.0.0.1:6379:6379"
+    command: ["redis-server", "--appendonly", "yes"]
+    volumes:
+      - redis_data:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 5s
+    networks:
+      - byc_internal_net
+
+# ------------------------------------------------------------------------------
+# Storage Volumes (Persistent across container restarts)
+# ------------------------------------------------------------------------------
+volumes:
+  postgres_data:
+    name: byc_postgres_data
+  redis_data:
+    name: byc_redis_data
+  media_data:
+    name: byc_media_data
+  insightface_data:
+    name: byc_insightface_data
+
+# ------------------------------------------------------------------------------
+# Isolated Internal Network
+# ------------------------------------------------------------------------------
+networks:
+  byc_internal_net:
+    name: byc_internal_net
+    driver: bridge
