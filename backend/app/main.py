@@ -55,18 +55,16 @@ async def lifespan(app: FastAPI):
     async def _warm_db_and_cache():
         try:
             from app.db.session import AsyncSessionLocal
-            from app.dependencies import get_current_user
             from app.services.crowd_service import CrowdService
             from app.services.zone_service import ZoneService
             from app.services.camera_service import CameraService
             from app.services.dashboard_service import DashboardService
             async with AsyncSessionLocal() as session:
-                await get_current_user(auth=None, db=session)
                 await CrowdService(session).get_summary()
                 await ZoneService(session).list_zones()
                 await CameraService(session).get_camera_stats()
                 await DashboardService(session).get_summary()
-            logger.info("DB cache pre-warmed successfully (user, summary, zones, camera stats, dashboard)")
+            logger.info("DB cache pre-warmed successfully (summary, zones, camera stats, dashboard)")
         except Exception as e:
             logger.warning(f"DB cache pre-warm skipped (non-fatal): {e}")
 

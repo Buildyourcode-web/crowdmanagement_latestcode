@@ -8,6 +8,8 @@ from app.utils.response import success_response
 router = APIRouter(prefix="/health", tags=["Health Checks"])
 
 
+@router.get("", response_model=dict)
+@router.get("/", response_model=dict)
 @router.get("/live", response_model=dict)
 async def liveness_probe():
     """Kubernetes / Docker container liveness probe."""

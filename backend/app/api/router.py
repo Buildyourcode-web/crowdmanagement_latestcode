@@ -49,4 +49,5 @@ api_router.include_router(reports_router)
 api_router.include_router(settings_router)
 api_router.include_router(system_router)
 api_router.include_router(ai_router)
+api_router.include_router(health_router)
 
