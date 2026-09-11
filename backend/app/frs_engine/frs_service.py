@@ -903,7 +903,8 @@ class RTSPCameraWorker:
 
                 preds = np.squeeze(outputs[0]).T  # (8400, 84)
                 person_scores = preds[:, 4]
-                mask = person_scores > 0.28
+                # Dual-threshold detection: low threshold (0.16) for existing track continuity, high (0.26) for new tracks
+                mask = person_scores > 0.16
                 filtered_preds = preds[mask]
 
                 sx = w_orig / 640.0
@@ -917,10 +918,9 @@ class RTSPCameraWorker:
                     raw_boxes.append([x1, y1, int(bw * sx), int(bh * sy)])
                     raw_scores.append(float(row[4]))
 
-                indices = cv2.dnn.NMSBoxes(raw_boxes, raw_scores, score_threshold=0.28, nms_threshold=0.45)
-                new_crowd_boxes = []
-                curr_centroids = []
-                now_ts = time.time()
+                indices = cv2.dnn.NMSBoxes(raw_boxes, raw_scores, score_threshold=0.16, nms_threshold=0.45)
+                high_detections = []
+                low_detections = []
 
                 if len(indices) > 0:
                     for idx in indices.flatten():
@@ -930,235 +930,293 @@ class RTSPCameraWorker:
                         x2 = min(w_orig, bx + bw)
                         y2 = min(h_orig, by + bh)
                         conf = raw_scores[idx]
-                        conf_pct = round(conf * 100)
-                        # Head position (upper quarter of detected bounding box)
-                        head_x = (x1 + x2) // 2
-                        head_y = y1 + max(4, int((y2 - y1) * 0.18))
-                        new_crowd_boxes.append({
-                            "bbox": [x1, y1, x2, y2],
-                            "head": [head_x, head_y],
-                            "centroid": [(x1 + x2) // 2, (y1 + y2) // 2],
-                            "label": f"HUMAN {conf_pct}%",
+                        det_c = ((x1 + x2) / 2.0, (y1 + y2) / 2.0)
+                        det_tc = (det_c[0], float(y1))
+                        det_bc = (det_c[0], float(y2))
+                        det_obj = {
+                            "bbox": [float(x1), float(y1), float(x2), float(y2)],
+                            "centroid": det_c,
+                            "top_center": det_tc,
+                            "bottom_center": det_bc,
                             "confidence": conf,
-                            "expiry": now_ts + 0.8,
-                        })
-                        curr_centroids.append(((x1 + x2) // 2, (y1 + y2) // 2))
+                        }
+                        if conf >= 0.26:
+                            high_detections.append(det_obj)
+                        else:
+                            low_detections.append(det_obj)
+
+                curr_time = time.time()
+                dt = max(0.02, min(0.4, curr_time - getattr(self, "_last_track_time", curr_time)))
+                self._last_track_time = curr_time
+
+                # -----------------------------------------------------------
+                # Continuous Multi-Object Tracking with Temporal Smoothing & Coasting
+                # -----------------------------------------------------------
+                # 1. Predict next positions for all existing active tracks based on velocity
+                for trk in self._crowd_tracks.values():
+                    vx, vy = trk.get("velocity", (0.0, 0.0))
+                    decay = 0.88 if trk.get("misses", 0) > 0 else 1.0
+                    vx *= decay
+                    vy *= decay
+                    trk["velocity"] = (vx, vy)
+
+                    bw = trk["bbox"][2] - trk["bbox"][0]
+                    bh = trk["bbox"][3] - trk["bbox"][1]
+                    pred_cx = trk["centroid"][0] + vx * dt
+                    pred_cy = trk["centroid"][1] + vy * dt
+                    trk["pred_bbox"] = [
+                        max(0.0, pred_cx - bw / 2.0),
+                        max(0.0, pred_cy - bh / 2.0),
+                        min(float(w_orig), pred_cx + bw / 2.0),
+                        min(float(h_orig), pred_cy + bh / 2.0),
+                    ]
+                    trk["pred_centroid"] = (pred_cx, pred_cy)
+
+                # 2. Greedy bipartite matching helper
+                def _match_tracks(track_ids, detections, min_iou=0.15, max_dist_mult=1.4):
+                    matches = []
+                    unmatched_t = set(track_ids)
+                    unmatched_d = set(range(len(detections)))
+                    candidates = []
+                    for tid in track_ids:
+                        trk = self._crowd_tracks[tid]
+                        p_box = trk["pred_bbox"]
+                        p_c = trk["pred_centroid"]
+                        bw = p_box[2] - p_box[0]
+                        bh = p_box[3] - p_box[1]
+                        max_d = max(160.0, max(bw, bh) * max_dist_mult)
+                        for d_idx, det in enumerate(detections):
+                            iou = _box_iou(p_box, det["bbox"])
+                            dist = math.hypot(det["centroid"][0] - p_c[0], det["centroid"][1] - p_c[1])
+                            if iou >= min_iou or dist <= max_d:
+                                score = (iou * 2.5) + max(0.0, 1.0 - (dist / max_d))
+                                candidates.append((tid, d_idx, score))
+                    candidates.sort(key=lambda x: x[2], reverse=True)
+                    for tid, d_idx, _ in candidates:
+                        if tid in unmatched_t and d_idx in unmatched_d:
+                            matches.append((tid, d_idx))
+                            unmatched_t.discard(tid)
+                            unmatched_d.discard(d_idx)
+                    return matches, list(unmatched_t), list(unmatched_d)
+
+                all_tids = list(self._crowd_tracks.keys())
+                # Pass 1: Match against high-confidence detections
+                high_matches, unassigned_t, unassigned_high_d = _match_tracks(all_tids, high_detections, min_iou=0.15, max_dist_mult=1.4)
+                # Pass 2: Match remaining tracks against low-confidence detections (keeps occluded/sitting humans alive!)
+                low_matches, still_unmatched_t, _ = _match_tracks(unassigned_t, low_detections, min_iou=0.10, max_dist_mult=1.2)
+
+                matched_det_map = {}
+                for tid, d_idx in high_matches:
+                    matched_det_map[tid] = high_detections[d_idx]
+                for tid, d_idx in low_matches:
+                    matched_det_map[tid] = low_detections[d_idx]
+
+                # Update matched tracks with smooth bounding box and velocity
+                for tid, det in matched_det_map.items():
+                    trk = self._crowd_tracks[tid]
+                    trk["misses"] = 0
+                    trk["hits"] = trk.get("hits", 0) + 1
+                    trk["confidence"] = det["confidence"]
+                    det_c = det["centroid"]
+                    inst_vx = (det_c[0] - trk["centroid"][0]) / dt
+                    inst_vy = (det_c[1] - trk["centroid"][1]) / dt
+                    trk["velocity"] = (0.5 * trk.get("velocity", (0.0, 0.0))[0] + 0.5 * inst_vx, 0.5 * trk.get("velocity", (0.0, 0.0))[1] + 0.5 * inst_vy)
+                    # Smooth box (75% new detection, 25% previous box)
+                    trk["bbox"] = [0.75 * d + 0.25 * b for d, b in zip(det["bbox"], trk["bbox"])]
+                    trk["centroid"] = ((trk["bbox"][0] + trk["bbox"][2]) / 2.0, (trk["bbox"][1] + trk["bbox"][3]) / 2.0)
+                    trk["top_center"] = (trk["centroid"][0], trk["bbox"][1])
+                    trk["bottom_center"] = (trk["centroid"][0], trk["bbox"][3])
+                    trk["last_seen"] = curr_time
+                    if "history" not in trk:
+                        trk["history"] = deque(maxlen=20)
+                    trk["history"].append((trk["centroid"], curr_time))
+
+                # Update still unmatched tracks (coast mode: advances with velocity, keeps box alive!)
+                for tid in still_unmatched_t:
+                    trk = self._crowd_tracks[tid]
+                    trk["misses"] = trk.get("misses", 0) + 1
+                    trk["bbox"] = trk["pred_bbox"]
+                    trk["centroid"] = trk["pred_centroid"]
+                    trk["top_center"] = (trk["centroid"][0], trk["bbox"][1])
+                    trk["bottom_center"] = (trk["centroid"][0], trk["bbox"][3])
+                    if "history" not in trk:
+                        trk["history"] = deque(maxlen=20)
+                    trk["history"].append((trk["centroid"], curr_time))
+
+                # Spawn new tracks for unassigned high detections
+                for d_idx in unassigned_high_d:
+                    det = high_detections[d_idx]
+                    det_c = det["centroid"]
+                    # Prevent duplicate track if too close to an existing track
+                    too_close = False
+                    for existing_trk in self._crowd_tracks.values():
+                        if math.hypot(det_c[0] - existing_trk["centroid"][0], det_c[1] - existing_trk["centroid"][1]) < 45.0:
+                            too_close = True
+                            break
+                    if too_close:
+                        continue
+
+                    new_tid = self._next_track_id
+                    self._next_track_id += 1
+                    new_crossed = set()
+                    for old_trk in self._crowd_tracks.values():
+                        if old_trk.get("crossed_lines"):
+                            if math.hypot(det_c[0] - old_trk["centroid"][0], det_c[1] - old_trk["centroid"][1]) < 100.0:
+                                new_crossed.update(old_trk["crossed_lines"])
+                                break
+                    self._crowd_tracks[new_tid] = {
+                        "track_id": new_tid,
+                        "bbox": det["bbox"],
+                        "centroid": det_c,
+                        "top_center": det["top_center"],
+                        "bottom_center": det["bottom_center"],
+                        "velocity": (0.0, 0.0),
+                        "confidence": det["confidence"],
+                        "hits": 1,
+                        "misses": 0,
+                        "last_seen": curr_time,
+                        "history": deque([(det_c, curr_time)], maxlen=20),
+                        "cooldown_until": 0.0,
+                        "crossed_lines": new_crossed,
+                    }
+
+                # Prune tracks inactive for > 18 frames (~2.5s) or off-screen
+                stale_tids = [
+                    tid for tid, trk in self._crowd_tracks.items()
+                    if trk.get("misses", 0) > 18 or (curr_time - trk.get("last_seen", curr_time)) > 3.0
+                    or trk["bbox"][2] < 0 or trk["bbox"][3] < 0 or trk["bbox"][0] > w_orig or trk["bbox"][1] > h_orig
+                ]
+                for tid in stale_tids:
+                    del self._crowd_tracks[tid]
 
                 purposes = self.state.ai_purposes or ["ENTRY_EXIT"]
 
                 # -----------------------------------------------------------
-                # 1. ENTRY / EXIT Mode: High-Accuracy IoU + Trajectory Tracking
+                # 1. ENTRY / EXIT Mode: Trajectory Segment Crossing (Strict No-Touch)
                 # -----------------------------------------------------------
-                if any(p in purposes for p in ("ENTRY", "EXIT", "ENTRY_EXIT")):
-                    curr_time = time.time()
-                    matched_tids = set()
+                if any(p in purposes for p in ("ENTRY", "EXIT", "ENTRY_EXIT")) and self._cached_roi_lines:
+                    for trk in list(self._crowd_tracks.values()):
+                        if trk.get("hits", 0) < 2:
+                            continue
+                        hist = list(trk.get("history", []))
+                        if len(hist) < 2:
+                            continue
 
-                    # Associate each detection with an active track (IoU first, then adaptive centroid)
-                    for det in new_crowd_boxes:
-                        det_box = det["bbox"]
-                        det_c = det["centroid"]
-                        det_tc = (det_c[0], det_box[1])  # Head (top-center)
-                        det_bc = (det_c[0], det_box[3])  # Legs/Feet (bottom-center)
-                        det["top_center"] = det_tc
-                        det["bottom_center"] = det_bc
+                        for line in self._cached_roi_lines:
+                            line_id = str(line.get("id") or line.get("name") or "line")
 
-                        best_tid = None
-                        best_score = -1.0
-                        bw = det_box[2] - det_box[0]
-                        bh = det_box[3] - det_box[1]
-                        max_d = max(180.0, max(bw, bh) * 1.2)
-
-                        for tid, trk in list(self._crowd_tracks.items()):
-                            if tid in matched_tids:
+                            # Deduplication: already counted for this person
+                            if line_id in trk.get("crossed_lines", set()):
                                 continue
-                            iou = _box_iou(det_box, trk["bbox"])
-                            dist = math.hypot(det_c[0] - trk["centroid"][0], det_c[1] - trk["centroid"][1])
-                            if iou > 0.20:
-                                score = 2.0 + iou
-                            elif dist < max_d:
-                                score = 1.0 - (dist / max_d)
+
+                            # Cooldown
+                            if curr_time < trk.get("cooldown_until", 0.0):
+                                continue
+
+                            l1 = (int(line["start"]["x"] * w_orig), int(line["start"]["y"] * h_orig))
+                            l2 = (int(line["end"]["x"] * w_orig), int(line["end"]["y"] * h_orig))
+
+                            vx = l2[0] - l1[0]
+                            vy = l2[1] - l1[1]
+                            l_len = math.hypot(vx, vy)
+                            if l_len > 0:
+                                ext_x = int(vx / l_len * 25)
+                                ext_y = int(vy / l_len * 25)
+                                el1 = (l1[0] - ext_x, l1[1] - ext_y)
+                                el2 = (l2[0] + ext_x, l2[1] + ext_y)
                             else:
-                                score = -1.0
+                                el1, el2 = l1, l2
 
-                            if score > best_score:
-                                best_score = score
-                                best_tid = tid
+                            has_crossed = False
+                            crossing_prev = None
 
-                        if best_tid is not None:
-                            matched_tids.add(best_tid)
-                            trk = self._crowd_tracks[best_tid]
-                            prev_c = trk["centroid"]
-                            prev_tc = trk.get("top_center", (prev_c[0], trk["bbox"][1]))
-                            prev_bc = trk["bottom_center"]
+                            # Check trajectory segments across el1 -> el2 over last 6 history frames
+                            for i in range(max(0, len(hist) - 6), len(hist) - 1):
+                                p_a = hist[i][0]
+                                p_b = hist[i + 1][0]
+                                # Centroid trajectory crossing
+                                if _segments_cross(p_a, p_b, el1, el2):
+                                    has_crossed = True
+                                    crossing_prev = p_a
+                                    break
+                                # Feet trajectory crossing
+                                bh = trk["bbox"][3] - trk["bbox"][1]
+                                bc_a = (p_a[0], p_a[1] + bh * 0.45)
+                                bc_b = (p_b[0], p_b[1] + bh * 0.45)
+                                if _segments_cross(bc_a, bc_b, el1, el2):
+                                    has_crossed = True
+                                    crossing_prev = p_a
+                                    break
 
-                            trk["bbox"] = det_box
-                            trk["centroid"] = det_c
-                            trk["top_center"] = det_tc
-                            trk["bottom_center"] = det_bc
-                            trk["last_seen"] = curr_time
-                            trk["hits"] += 1
-                            if "history" not in trk:
-                                trk["history"] = deque(maxlen=10)
-                            trk["history"].append(det_c)
-                            det["track_id"] = best_tid
+                            if not has_crossed:
+                                continue
 
-                            # Line crossing evaluation for active track
-                            if self._cached_roi_lines:
-                                for line in self._cached_roi_lines:
-                                    line_id = str(line.get("id") or line.get("name") or "line")
-                                    l1 = (int(line["start"]["x"] * w_orig), int(line["start"]["y"] * h_orig))
-                                    l2 = (int(line["end"]["x"] * w_orig), int(line["end"]["y"] * h_orig))
+                            # Rule A: Mark line crossed for this track IMMEDIATELY
+                            trk["crossed_lines"].add(line_id)
+                            trk["cooldown_until"] = curr_time + 4.0
 
-                                    # Extend line slightly (25px) at endpoints for edge robustness
-                                    vx = l2[0] - l1[0]
-                                    vy = l2[1] - l1[1]
-                                    l_len = math.hypot(vx, vy)
-                                    if l_len > 0:
-                                        ext_x = int(vx / l_len * 25)
-                                        ext_y = int(vy / l_len * 25)
-                                        el1 = (l1[0] - ext_x, l1[1] - ext_y)
-                                        el2 = (l2[0] + ext_x, l2[1] + ext_y)
-                                    else:
-                                        el1, el2 = l1, l2
-
-                                    # 1. Check if bounding box touches or crosses line segment
-                                    box_touches = _box_touches_line(det_box, el1, el2)
-                                    cross_tc = _segments_cross(prev_tc, det_tc, el1, el2)
-                                    cross_c  = _segments_cross(prev_c,  det_c,  el1, el2)
-                                    cross_bc = _segments_cross(prev_bc, det_bc, el1, el2)
-
-                                    is_touching = box_touches or cross_tc or cross_c or cross_bc
-                                    if not is_touching:
-                                        continue
-
-                                    # 2. Strict Deduplication:
-                                    # Rule A: Has this track already been counted on this line?
-                                    if line_id in trk["crossed_lines"]:
-                                        continue
-
-                                    # Rule B: Track cooldown (minimum 3.0s between crossings for same track)
-                                    if curr_time < trk.get("cooldown_until", 0.0):
-                                        continue
-
-                                    # Rule C: SPATIAL-TEMPORAL DEDUPLICATION (1 PERSON = EXACTLY 1 COUNT)
-                                    # If a count was registered at this location on the line within 2.2s,
-                                    # it is the same physical person whose bounding box is still on the line!
-                                    is_duplicate = False
-                                    for rc in self._recent_crossings:
-                                        if (curr_time - rc["time"]) < 2.2 and rc.get("line_id") == line_id:
-                                            dist_to_recent = math.hypot(det_c[0] - rc["pos"][0], det_c[1] - rc["pos"][1])
-                                            if dist_to_recent < 130.0:
-                                                is_duplicate = True
-                                                trk["crossed_lines"].add(line_id)
-                                                trk["cooldown_until"] = curr_time + 3.0
-                                                break
-
-                                    if is_duplicate:
-                                        continue
-
-                                    # Rule D: Inherit crossed state from nearby track if ID switched
-                                    for old_tid, old_trk in self._crowd_tracks.items():
-                                        if old_tid != best_tid and line_id in old_trk.get("crossed_lines", set()):
-                                            if math.hypot(det_c[0] - old_trk["centroid"][0], det_c[1] - old_trk["centroid"][1]) < 110.0:
-                                                is_duplicate = True
-                                                trk["crossed_lines"].add(line_id)
-                                                trk["cooldown_until"] = curr_time + 3.0
-                                                break
-
-                                    if is_duplicate:
-                                        continue
-
-                                    # --- VALID NEW PERSON TOUCHING / CROSSING ROI: COUNT EXACTLY ONCE ---
-                                    trk["crossed_lines"].add(line_id)
-                                    trk["cooldown_until"] = curr_time + 4.0
-                                    self._recent_crossings.append({
-                                        "time": curr_time,
-                                        "pos": det_c,
-                                        "line_id": line_id,
-                                        "track_id": best_tid,
-                                    })
-                                    # Prune crossings older than 10s
-                                    self._recent_crossings = [rc for rc in self._recent_crossings if (curr_time - rc["time"]) < 10.0]
-
-                                    # Direction determination using track history
-                                    hist = trk.get("history")
-                                    if hist and len(hist) >= 2:
-                                        start_c = hist[0]
-                                        mv_x = det_c[0] - start_c[0]
-                                        mv_y = det_c[1] - start_c[1]
-                                    else:
-                                        mv_x = det_c[0] - prev_c[0]
-                                        mv_y = det_c[1] - prev_c[1]
-
-                                    cross_prod = vx * mv_y - vy * mv_x
-                                    line_type = str(line.get("type") or "").upper()
-                                    line_dir = (line.get("direction") or ("IN" if "ENTRY" in line_type else ("OUT" if "EXIT" in line_type else "BOTH"))).upper()
-
-                                    is_pure_entry = ("ENTRY" in purposes and "EXIT" not in purposes) or line_type == "ENTRY_LINE"
-                                    is_pure_exit = ("EXIT" in purposes and "ENTRY" not in purposes) or line_type == "EXIT_LINE"
-
-                                    if is_pure_exit or (not is_pure_entry and (line_dir == "OUT" or (cross_prod < 0 and line_dir == "BOTH"))):
-                                        self.state.out_count += 1
-                                        inflow_d, outflow_d = 0, 1
-                                        crossing_label = "OUT"
-                                    else:
-                                        self.state.in_count += 1
-                                        inflow_d, outflow_d = 1, 0
-                                        crossing_label = "IN"
-
-                                    self.state.occupancy_count = max(0, self.state.in_count - self.state.out_count)
-                                    logger.info(
-                                        f"[YOLO11x-Crowd:{self.state.camera_id}] Track #{best_tid} touched/crossed '{line.get('name')}': "
-                                        f"{crossing_label} | IN={self.state.in_count} OUT={self.state.out_count} OCCUPANCY={self.state.occupancy_count}"
-                                    )
-
-                                    # 1. Real-time WebSocket emission
-                                    _emit_frs_event_threadsafe("crowd_telemetry", {
-                                        "camera_id": self.state.camera_id,
-                                        "camera_code": self.state.camera_id,
-                                        "in_count": self.state.in_count,
-                                        "out_count": self.state.out_count,
-                                        "occupancy": self.state.occupancy_count,
-                                        "headcount": len(new_crowd_boxes),
-                                        "timestamp": datetime.now(timezone.utc).isoformat(),
-                                    })
-
-                                    # 2. Database Persistence for Dashboard, Analytics & Reports
-                                    _persist_crowd_snapshot_threadsafe(
-                                        camera_code=self.state.camera_id,
-                                        inflow_delta=inflow_d,
-                                        outflow_delta=outflow_d,
-                                        headcount=len(new_crowd_boxes),
-                                    )
-                        else:
-                            # Register new track
-                            new_tid = self._next_track_id
-                            self._next_track_id += 1
-                            det["track_id"] = new_tid
-                            new_crossed = set()
-                            # If new track is spawned near a track that already crossed, inherit crossed status
-                            for old_tid, old_trk in self._crowd_tracks.items():
-                                if old_trk.get("crossed_lines"):
-                                    if math.hypot(det_c[0] - old_trk["centroid"][0], det_c[1] - old_trk["centroid"][1]) < 110.0:
-                                        new_crossed.update(old_trk["crossed_lines"])
+                            # Rule B: Spatial deduplication against recent crossings
+                            is_dup = False
+                            for rc in self._recent_crossings:
+                                if (curr_time - rc["time"]) < 2.2 and rc.get("line_id") == line_id:
+                                    if math.hypot(trk["centroid"][0] - rc["pos"][0], trk["centroid"][1] - rc["pos"][1]) < 120.0:
+                                        is_dup = True
                                         break
-                            self._crowd_tracks[new_tid] = {
-                                "track_id": new_tid,
-                                "bbox": det_box,
-                                "centroid": det_c,
-                                "top_center": det_tc,
-                                "bottom_center": det_bc,
-                                "last_seen": curr_time,
-                                "hits": 1,
-                                "history": deque([det_c], maxlen=10),
-                                "cooldown_until": 0.0,
-                                "crossed_lines": new_crossed,
-                            }
+                            if is_dup:
+                                continue
 
-                    # Prune stale tracks inactive for > 2.5 seconds (prevents track loss on momentary frame skip)
-                    stale_tids = [tid for tid, trk in self._crowd_tracks.items() if (curr_time - trk["last_seen"]) > 2.5]
-                    for tid in stale_tids:
-                        del self._crowd_tracks[tid]
+                            self._recent_crossings.append({
+                                "time": curr_time,
+                                "pos": trk["centroid"],
+                                "line_id": line_id,
+                                "track_id": trk["track_id"],
+                            })
+                            self._recent_crossings = [rc for rc in self._recent_crossings if (curr_time - rc["time"]) < 10.0]
+
+                            # Direction determination using trajectory vector
+                            start_c = crossing_prev or hist[0][0]
+                            end_c = trk["centroid"]
+                            mv_x = end_c[0] - start_c[0]
+                            mv_y = end_c[1] - start_c[1]
+
+                            cross_prod = vx * mv_y - vy * mv_x
+                            line_type = str(line.get("type") or "").upper()
+                            line_dir = (line.get("direction") or ("IN" if "ENTRY" in line_type else ("OUT" if "EXIT" in line_type else "BOTH"))).upper()
+
+                            is_pure_entry = ("ENTRY" in purposes and "EXIT" not in purposes) or line_type == "ENTRY_LINE"
+                            is_pure_exit = ("EXIT" in purposes and "ENTRY" not in purposes) or line_type == "EXIT_LINE"
+
+                            if is_pure_exit or (not is_pure_entry and (line_dir == "OUT" or (cross_prod < 0 and line_dir == "BOTH"))):
+                                self.state.out_count += 1
+                                inflow_d, outflow_d = 0, 1
+                                crossing_label = "OUT"
+                            else:
+                                self.state.in_count += 1
+                                inflow_d, outflow_d = 1, 0
+                                crossing_label = "IN"
+
+                            self.state.occupancy_count = max(0, self.state.in_count - self.state.out_count)
+                            logger.info(
+                                f"[YOLO11x-Crowd:{self.state.camera_id}] Track #{trk['track_id']} CROSSED '{line.get('name')}': "
+                                f"{crossing_label} | IN={self.state.in_count} OUT={self.state.out_count} OCCUPANCY={self.state.occupancy_count}"
+                            )
+
+                            _emit_frs_event_threadsafe("crowd_telemetry", {
+                                "camera_id": self.state.camera_id,
+                                "camera_code": self.state.camera_id,
+                                "in_count": self.state.in_count,
+                                "out_count": self.state.out_count,
+                                "occupancy": self.state.occupancy_count,
+                                "headcount": len(self._crowd_tracks),
+                                "timestamp": datetime.now(timezone.utc).isoformat(),
+                            })
+
+                            _persist_crowd_snapshot_threadsafe(
+                                camera_code=self.state.camera_id,
+                                inflow_delta=inflow_d,
+                                outflow_delta=outflow_d,
+                                headcount=len(self._crowd_tracks),
+                            )
 
                     # Periodic telemetry snapshot flush (every 30s)
                     if (curr_time - self._last_snapshot_persist) > 30.0:
@@ -1167,12 +1225,13 @@ class RTSPCameraWorker:
                             camera_code=self.state.camera_id,
                             inflow_delta=0,
                             outflow_delta=0,
-                            headcount=len(new_crowd_boxes),
+                            headcount=len(self._crowd_tracks),
                         )
 
                 # -----------------------------------------------------------
                 # 2. ZONE Mode: Point-in-polygon headcount + density alert
                 # -----------------------------------------------------------
+                curr_centroids = [trk["centroid"] for trk in self._crowd_tracks.values() if trk.get("misses", 0) <= 10 and trk.get("hits", 0) >= 1]
                 if "ZONE" in purposes:
                     zone_stats = []
                     total_zone_count = 0
@@ -1227,7 +1286,6 @@ class RTSPCameraWorker:
                     ]
 
                     # Periodic zone persistence (every 5s or significant count change)
-                    curr_time = time.time()
                     if (curr_time - getattr(self, "_last_zone_persist", 0.0)) > 5.0 or abs(eff_count - getattr(self, "_last_zone_count", -999)) >= 2:
                         self._last_zone_persist = curr_time
                         self._last_zone_count = eff_count
@@ -1267,160 +1325,62 @@ class RTSPCameraWorker:
                         })
 
                 # -----------------------------------------------------------
-                # 3. QUEUE Mode: Centroid flow & speed prediction
-                # -----------------------------------------------------------
-                # -----------------------------------------------------------
-                # 3. QUEUE Mode: Ground-truth locomotion tracking & walking vs standing classification
+                # 3. QUEUE Mode: Ground-truth locomotion tracking
                 # -----------------------------------------------------------
                 if "QUEUE" in purposes:
-                    curr_time = time.time()
                     queue_polygons = [p for p in self._cached_roi_polygons if p.get("type") in ("QUEUE_ROI", "QUEUE_AREA")]
 
-                    # For each detected person in new_crowd_boxes, check if they are in the queue polygon
-                    queue_detections = []
-                    for det in new_crowd_boxes:
-                        x1, y1, x2, y2 = det["bbox"]
-                        cx = (x1 + x2) // 2
-                        cy = (y1 + y2) // 2
-                        bc = (cx, y2)  # ground contact / feet
-                        hip = (cx, int(y1 * 0.35 + y2 * 0.65))  # lower body
-                        det["bottom_center"] = bc
-                        det["height"] = max(10, y2 - y1)
-
+                    q_count = 0
+                    for trk in self._crowd_tracks.values():
+                        if trk.get("misses", 0) > 10:
+                            continue
+                        cx, cy = trk["centroid"]
+                        bc = trk["bottom_center"]
+                        in_q = False
                         if queue_polygons:
                             norm_c = (cx / float(w_orig), cy / float(h_orig))
-                            norm_bc = (cx / float(w_orig), y2 / float(h_orig))
-                            norm_hip = (cx / float(w_orig), hip[1] / float(h_orig))
-                            in_q = False
+                            norm_bc = (bc[0] / float(w_orig), bc[1] / float(h_orig))
                             for poly in queue_polygons:
                                 pts = poly["points"]
-                                if _point_in_polygon(norm_c, pts) or _point_in_polygon(norm_bc, pts) or _point_in_polygon(norm_hip, pts):
+                                if _point_in_polygon(norm_c, pts) or _point_in_polygon(norm_bc, pts):
                                     in_q = True
                                     break
-                            det["in_queue"] = in_q
                         else:
-                            det["in_queue"] = True
+                            in_q = True
 
-                        if det["in_queue"]:
-                            queue_detections.append(det)
-
-                    # Match queue detections to persistent queue tracks (IoU + ground position)
-                    matched_q_tids = set()
-                    for det in queue_detections:
-                        det_box = det["bbox"]
-                        det_bc = det["bottom_center"]
-                        det_c = det["centroid"]
-                        det_h = det["height"]
-
-                        best_tid = None
-                        best_score = -1.0
-                        for q_tid, trk in list(self._queue_tracks.items()):
-                            if q_tid in matched_q_tids:
-                                continue
-                            iou = _box_iou(det_box, trk["bbox"])
-                            dist_bc = math.hypot(det_bc[0] - trk["ground"][0], det_bc[1] - trk["ground"][1])
-                            dist_c = math.hypot(det_c[0] - trk["centroid"][0], det_c[1] - trk["centroid"][1])
-                            max_d = max(160.0, det_h * 0.9)
-                            if iou > 0.20:
-                                score = 2.0 + iou
-                            elif min(dist_bc, dist_c) < max_d:
-                                score = 1.0 - (min(dist_bc, dist_c) / max_d)
-                            else:
-                                score = -1.0
-
-                            if score > best_score:
-                                best_score = score
-                                best_tid = q_tid
-
-                        if best_tid is not None:
-                            matched_q_tids.add(best_tid)
-                            trk = self._queue_tracks[best_tid]
-                            trk["bbox"] = det_box
-                            trk["centroid"] = det_c
-                            trk["ground"] = det_bc
-                            trk["height"] = det_h
-                            trk["last_seen"] = curr_time
-                            trk["history"].append((curr_time, det_bc[0], det_bc[1], det_c[0], det_c[1], det_h))
-                        else:
-                            new_tid = self._next_queue_track_id
-                            self._next_queue_track_id += 1
-                            matched_q_tids.add(new_tid)
-                            hist = deque(maxlen=25)
-                            hist.append((curr_time, det_bc[0], det_bc[1], det_c[0], det_c[1], det_h))
-                            self._queue_tracks[new_tid] = {
-                                "track_id": new_tid,
-                                "bbox": det_box,
-                                "centroid": det_c,
-                                "ground": det_bc,
-                                "height": det_h,
-                                "last_seen": curr_time,
-                                "history": hist,
-                                "movement_state": "STOPPED",
-                                "speed_px": 0.0,
-                            }
-                            trk = self._queue_tracks[new_tid]
-
-                        # Compute net locomotion velocity (filtering out hand, head, and upper-body gestures)
-                        hist = trk["history"]
-                        best_sample = None
-                        for s in hist:
-                            dt = curr_time - s[0]
-                            if 0.6 <= dt <= 1.8:
-                                best_sample = s
-                                break
-                        if best_sample is None and len(hist) >= 4:
-                            best_sample = hist[0]
-
-                        if best_sample is not None:
-                            dt = curr_time - best_sample[0]
-                            if dt >= 0.5:
-                                # Net ground displacement (feet position)
-                                d_ground = math.hypot(det_bc[0] - best_sample[1], det_bc[1] - best_sample[2])
-                                # Net centroid displacement
-                                d_c = math.hypot(det_c[0] - best_sample[3], det_c[1] - best_sample[4])
-                                # Weighted displacement (feet 65%, centroid 35%)
-                                net_disp = 0.65 * d_ground + 0.35 * d_c
-                                speed_px_s = net_disp / dt
-                                norm_speed = speed_px_s / max(50.0, det_h)
-
-                                # Path length across samples to check directional efficiency (net vs total jitter)
-                                path_len = 0.0
-                                sample_list = [s for s in hist if s[0] >= best_sample[0]]
-                                for i in range(1, len(sample_list)):
-                                    path_len += math.hypot(sample_list[i][1] - sample_list[i-1][1], sample_list[i][2] - sample_list[i-1][2])
-                                coherence = net_disp / max(1.0, path_len)
-
-                                trk["speed_px"] = speed_px_s
-
-                                # Classification:
-                                # STANDING: hand waves, phone talks, head turns, body shake stay in place
-                                # SLOW: slow walking / inching in queue
-                                # MOVING: actual walking locomotion
-                                if speed_px_s < 25.0 or net_disp < 20.0 or norm_speed < 0.07 or coherence < 0.35:
-                                    trk["movement_state"] = "STOPPED"
-                                elif speed_px_s < 65.0 or norm_speed < 0.22:
-                                    trk["movement_state"] = "SLOW"
+                        trk["in_queue"] = in_q
+                        if in_q:
+                            q_count += 1
+                            hist = list(trk.get("history", []))
+                            if len(hist) >= 4:
+                                s_first = hist[0]
+                                s_last = hist[-1]
+                                dt_q = s_last[1] - s_first[1]
+                                if dt_q >= 0.4:
+                                    d_c = math.hypot(s_last[0][0] - s_first[0][0], s_last[0][1] - s_first[0][1])
+                                    speed_px_s = d_c / dt_q
+                                    bh = trk["bbox"][3] - trk["bbox"][1]
+                                    norm_speed = speed_px_s / max(50.0, bh)
+                                    if speed_px_s < 20.0 or norm_speed < 0.06:
+                                        trk["movement_state"] = "STOPPED"
+                                    elif speed_px_s < 55.0 or norm_speed < 0.20:
+                                        trk["movement_state"] = "SLOW"
+                                    else:
+                                        trk["movement_state"] = "MOVING"
                                 else:
-                                    trk["movement_state"] = "MOVING"
+                                    trk["movement_state"] = trk.get("movement_state", "STOPPED")
+                            else:
+                                trk["movement_state"] = trk.get("movement_state", "STOPPED")
+                        else:
+                            trk["movement_state"] = "STOPPED"
 
-                        det["movement_state"] = trk.get("movement_state", "STOPPED")
-
-                    # Prune stale queue tracks (not seen for > 1.5s)
-                    stale_q_tids = [tid for tid, trk in self._queue_tracks.items() if (curr_time - trk["last_seen"]) > 1.5]
-                    for tid in stale_q_tids:
-                        del self._queue_tracks[tid]
-
-                    # Aggregate queue-level movement status
-                    q_count = len(queue_detections)
                     self.state.occupancy_count = q_count
-
                     if q_count == 0:
                         self.state.queue_movement_status = "EMPTY"
                     else:
-                        active_states = [trk.get("movement_state", "STOPPED") for tid, trk in self._queue_tracks.items() if (curr_time - trk["last_seen"]) <= 0.8]
+                        active_states = [trk.get("movement_state", "STOPPED") for trk in self._crowd_tracks.values() if trk.get("in_queue") and trk.get("misses", 0) <= 6]
                         if not active_states:
                             active_states = ["STOPPED"]
-
                         if "MOVING" in active_states:
                             self.state.queue_movement_status = "MOVING"
                         elif "SLOW" in active_states:
@@ -1428,10 +1388,6 @@ class RTSPCameraWorker:
                         else:
                             self.state.queue_movement_status = "STOPPED"
 
-                    if q_count > 0:
-                        logger.info(f"[Crowd-AI-Worker:{self.state.camera_id}] QUEUE: {q_count} person(s), Status: {self.state.queue_movement_status}")
-
-                    # Periodic queue persistence (every 8s or status change)
                     if (curr_time - getattr(self, "_last_queue_persist", 0.0)) > 8.0 or self.state.queue_movement_status != getattr(self, "_last_queue_status", ""):
                         self._last_queue_persist = curr_time
                         self._last_queue_status = self.state.queue_movement_status
@@ -1453,8 +1409,24 @@ class RTSPCameraWorker:
 
                 self._prev_centroids = curr_centroids
                 with self._crowd_boxes_lock:
-                    self._crowd_boxes = new_crowd_boxes
-                self.state.detections_count = len(new_crowd_boxes)
+                    self._crowd_boxes = [
+                        {
+                            "track_id": trk["track_id"],
+                            "bbox": [int(round(v)) for v in trk["bbox"]],
+                            "head": [int(round(trk["top_center"][0])), int(round(trk["bbox"][1] + max(4, (trk["bbox"][3] - trk["bbox"][1]) * 0.18)))],
+                            "centroid": [int(round(trk["centroid"][0])), int(round(trk["centroid"][1]))],
+                            "bottom_center": [int(round(trk["bottom_center"][0])), int(round(trk["bottom_center"][1]))],
+                            "label": f"HUMAN {round(trk.get('confidence', 0.85) * 100)}%",
+                            "confidence": trk.get("confidence", 0.85),
+                            "expiry": curr_time + 1.5,
+                            "in_queue": trk.get("in_queue", False),
+                            "movement_state": trk.get("movement_state", "STOPPED"),
+                            "misses": trk.get("misses", 0),
+                        }
+                        for trk in self._crowd_tracks.values()
+                        if trk.get("misses", 0) <= 12 and trk.get("hits", 0) >= 1
+                    ]
+                self.state.detections_count = len(self._crowd_boxes)
 
             except Exception as e:
                 logger.warning(f"[Crowd-AI-Worker:{self.state.camera_id}] Inference loop warning: {type(e).__name__}: {e}")
