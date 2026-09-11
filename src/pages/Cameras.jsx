@@ -93,6 +93,7 @@ export default function Cameras() {
   const [selectedZone, setSelectedZone] = useState("ALL"); // "ALL", "ZONE-A", "ZONE-B", "ZONE-C", "ZONE-D"
   const [gridCols, setGridCols] = useState(3);
   const [showAddModal, setShowAddModal] = useState(false);
+  const [isAddModalFullscreen, setIsAddModalFullscreen] = useState(false);
   const [addForm, setAddForm] = useState({
     name: "Entry Gate 1 Camera",
     rtsp_url: DEFAULT_RTSP,
@@ -1120,30 +1121,130 @@ export default function Cameras() {
           style={{
             position: "fixed",
             inset: 0,
-            background: "rgba(0,0,0,0.75)",
-            backdropFilter: "blur(3px)",
+            background: "rgba(0,0,0,0.8)",
+            backdropFilter: "blur(4px)",
             zIndex: 1000,
             display: "flex",
             alignItems: "center",
             justifyContent: "center",
+            padding: isAddModalFullscreen ? 0 : 16,
+          }}
+          onClick={(e) => {
+            if (e.target === e.currentTarget && !isAddModalFullscreen) {
+              setShowAddModal(false);
+              setAddError("");
+            }
           }}
         >
-          <div className="cc-card" style={{ width: 500, padding: 24, position: "relative" }}>
-            <button
-              onClick={() => { setShowAddModal(false); setAddError(""); }}
-              style={{ position: "absolute", top: 14, right: 14, background: "none", border: "none", color: "var(--cc-text-muted)", fontSize: 18, cursor: "pointer" }}
+          <div
+            className="cc-card"
+            style={{
+              width: isAddModalFullscreen ? "100vw" : 620,
+              maxWidth: isAddModalFullscreen ? "100vw" : "95vw",
+              height: isAddModalFullscreen ? "100vh" : "auto",
+              maxHeight: isAddModalFullscreen ? "100vh" : "92vh",
+              padding: 0,
+              position: "relative",
+              display: "flex",
+              flexDirection: "column",
+              overflow: "hidden",
+              borderRadius: isAddModalFullscreen ? 0 : 12,
+              boxShadow: "0 25px 50px -12px rgba(0, 0, 0, 0.9)",
+              border: "1px solid var(--cc-border)",
+            }}
+            onClick={(e) => e.stopPropagation()}
+          >
+            {/* Modal Header — Fixed */}
+            <div
+              style={{
+                padding: "14px 20px",
+                borderBottom: "1px solid var(--cc-border)",
+                display: "flex",
+                alignItems: "center",
+                justifyContent: "space-between",
+                background: "rgba(15, 23, 42, 0.85)",
+                flexShrink: 0,
+              }}
             >
-              <i className="bi bi-x-lg" />
-            </button>
-            <div className="cc-section-title" style={{ marginBottom: 6, display: "flex", alignItems: "center", gap: 8 }}>
-              <i className="bi bi-camera-video-fill" style={{ color: "var(--cc-accent)" }} />
-              <span>Add Live RTSP Camera</span>
-            </div>
-            <div style={{ fontSize: 11, color: "var(--cc-text-muted)", marginBottom: 16 }}>
-              Connect a real RTSP stream URL to immediately add a working camera to the grid.
+              <div style={{ display: "flex", alignItems: "center", gap: 10 }}>
+                <div
+                  style={{
+                    width: 32,
+                    height: 32,
+                    borderRadius: 6,
+                    background: "rgba(88, 166, 255, 0.15)",
+                    border: "1px solid rgba(88, 166, 255, 0.35)",
+                    display: "flex",
+                    alignItems: "center",
+                    justifyContent: "center",
+                    color: "var(--cc-accent)",
+                    fontSize: 16,
+                  }}
+                >
+                  <i className="bi bi-camera-video-fill" />
+                </div>
+                <div>
+                  <div style={{ fontSize: 14, fontWeight: 700, color: "var(--cc-text-primary)" }}>
+                    Add Live RTSP Camera
+                  </div>
+                  <div style={{ fontSize: 11, color: "var(--cc-text-muted)" }}>
+                    Connect a real RTSP stream URL to immediately add a working camera to the grid.
+                  </div>
+                </div>
+              </div>
+
+              <div style={{ display: "flex", alignItems: "center", gap: 6 }}>
+                <button
+                  type="button"
+                  className="cc-btn"
+                  onClick={() => setIsAddModalFullscreen((prev) => !prev)}
+                  style={{
+                    padding: "4px 10px",
+                    fontSize: 11,
+                    display: "flex",
+                    alignItems: "center",
+                    gap: 5,
+                    color: isAddModalFullscreen ? "var(--cc-accent)" : "var(--cc-text-muted)",
+                    borderColor: isAddModalFullscreen ? "var(--cc-blue-border)" : "var(--cc-border)",
+                  }}
+                  title={isAddModalFullscreen ? "Restore Window Size" : "Full Screen Modal"}
+                >
+                  <i className={`bi ${isAddModalFullscreen ? "bi-fullscreen-exit" : "bi-arrows-fullscreen"}`} />
+                  {isAddModalFullscreen ? "Exit Fullscreen" : "Full Screen"}
+                </button>
+                <button
+                  type="button"
+                  onClick={() => {
+                    setShowAddModal(false);
+                    setAddError("");
+                    setIsAddModalFullscreen(false);
+                  }}
+                  style={{
+                    background: "none",
+                    border: "none",
+                    color: "var(--cc-text-muted)",
+                    fontSize: 18,
+                    cursor: "pointer",
+                    padding: "4px 8px",
+                  }}
+                  title="Close (Esc)"
+                >
+                  <i className="bi bi-x-lg" />
+                </button>
+              </div>
             </div>
 
-            <div style={{ display: "flex", flexDirection: "column", gap: 14 }}>
+            {/* Modal Body — Scrollable */}
+            <div
+              style={{
+                flex: 1,
+                overflowY: "auto",
+                padding: isAddModalFullscreen ? "22px 32px" : "18px 22px",
+                display: "flex",
+                flexDirection: "column",
+                gap: 14,
+              }}
+            >
               {/* Camera Type Selector */}
               <div>
                 <div className="cc-label" style={{ marginBottom: 6 }}>Camera Purpose / Section</div>
@@ -1186,35 +1287,35 @@ export default function Cameras() {
                         title: "1. Entry Gate (IN Only)",
                         icon: "bi-box-arrow-in-right",
                         color: "#3fb950",
-                        desc: "ఎంట్రీ గేట్ వద్ద లోపలికి వచ్చే భక్తులను మాత్రమే లెక్కిస్తుంది (Dedicated Entry Gate Camera)",
+                        desc: "Counts incoming visitors at dedicated entry gates (+1 IN footfall)",
                       },
                       {
                         key: "EXIT",
                         title: "2. Exit Gate (OUT Only)",
                         icon: "bi-box-arrow-right",
                         color: "#f85149",
-                        desc: "ఎగ్జిట్ గేట్ వద్ద బయటకు వెళ్ళే భక్తులను మాత్రమే లెక్కిస్తుంది (Dedicated Exit Gate Camera)",
+                        desc: "Counts outgoing visitors at dedicated exit gates (+1 OUT footfall)",
                       },
                       {
                         key: "ENTRY_EXIT",
                         title: "3. Two-Way Gate (IN & OUT)",
                         icon: "bi-arrow-left-right",
                         color: "#bc8cff",
-                        desc: "రెండు వైపులా ప్రయాణించే గేట్ వద్ద IN & OUT రెండింటినీ లెక్కిస్తుంది (Bi-directional)",
+                        desc: "Counts both entering and exiting visitors at two-way gates (Bi-directional)",
                       },
                       {
                         key: "ZONE",
                         title: "4. Zone Density Monitoring",
                         icon: "bi-bounding-box",
                         color: "#58a6ff",
-                        desc: "ఆవరణ లేదా మండపంలో జనం సాంద్రత (Density) & Capacity % లెక్కిస్తుంది",
+                        desc: "Calculates crowd density, occupancy count, and capacity % in this zone",
                       },
                       {
                         key: "QUEUE",
                         title: "5. Queue Management",
                         icon: "bi-people",
                         color: "#d29922",
-                        desc: "క్యూ లైన్ బారికేడ్లలో భక్తుల సంఖ్య & కదలిక వేగం ట్రాక్ చేస్తుంది",
+                        desc: "Tracks queue headcount, waiting times, and movement speed in barricades",
                       },
                     ].map((item) => {
                       const isChecked = (addForm.ai_purposes || []).includes(item.key);
@@ -1291,7 +1392,7 @@ export default function Cameras() {
                   <div className="cc-label" style={{ marginBottom: 8, fontWeight: 700, fontSize: 11, display: "flex", alignItems: "center", gap: 6 }}>
                     <i className="bi bi-geo-alt-fill" style={{ color: "#58a6ff" }} /> Assign to Zone:
                   </div>
-                  <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 8 }}>
+                  <div style={{ display: "grid", gridTemplateColumns: isAddModalFullscreen ? "repeat(4, 1fr)" : "1fr 1fr", gap: 8 }}>
                     {ZONE_PRESETS.map((z) => (
                       <div
                         key={z.code}
@@ -1362,16 +1463,56 @@ export default function Cameras() {
                   {addError}
                 </div>
               )}
+            </div>
 
-              <div style={{ display: "flex", gap: 8, justifyContent: "flex-end", marginTop: 6 }}>
-                <button className="cc-btn" onClick={() => { setShowAddModal(false); setAddError(""); }}>
+            {/* Modal Footer — Fixed & Always Visible */}
+            <div
+              style={{
+                padding: "12px 20px",
+                borderTop: "1px solid var(--cc-border)",
+                background: "rgba(15, 23, 42, 0.95)",
+                display: "flex",
+                alignItems: "center",
+                justifyContent: "space-between",
+                gap: 12,
+                flexShrink: 0,
+              }}
+            >
+              <div style={{ fontSize: 11, color: "var(--cc-text-muted)", display: "flex", alignItems: "center", gap: 6 }}>
+                <span className="cc-live-dot" style={{ width: 6, height: 6 }} />
+                <span>
+                  {addForm.camera_type === "FRS" ? "Biometric Facial Recognition" : `${addForm.ai_purposes?.length || 0}/2 Active`}
+                  {addForm.camera_type === "CROWD" && (addForm.ai_purposes || []).includes("ZONE") && ` • ${addForm.zone_code}`}
+                </span>
+              </div>
+
+              <div style={{ display: "flex", gap: 8 }}>
+                <button
+                  type="button"
+                  className="cc-btn"
+                  onClick={() => { setShowAddModal(false); setAddError(""); setIsAddModalFullscreen(false); }}
+                  style={{ padding: "7px 16px", fontSize: 12 }}
+                >
                   Cancel
                 </button>
-                <button className="cc-btn cc-btn-primary" onClick={handleAddCamera} disabled={addLoading}>
+                <button
+                  type="button"
+                  className="cc-btn cc-btn-primary"
+                  onClick={handleAddCamera}
+                  disabled={addLoading}
+                  style={{
+                    padding: "7px 20px",
+                    fontSize: 12,
+                    fontWeight: 700,
+                    display: "flex",
+                    alignItems: "center",
+                    gap: 6,
+                  }}
+                >
                   {addLoading ? (
                     <><i className="bi bi-hourglass-split" /> Initializing Stream...</>
                   ) : (
-                    <><i className="bi bi-play-fill" /> Add & Start Stream</>
+                    <><i className="bi bi-play-fill" style={{ fontSize: 16 }} /> Add & Start Stream</>
                   )}
                 </button>
               </div>
@@ -1811,7 +1952,7 @@ export default function Cameras() {
           style={{
             position: "fixed",
             inset: 0,
-            background: "rgba(0,0,0,0.75)",
+            background: "rgba(0,0,0,0.8)",
             backdropFilter: "blur(4px)",
             zIndex: 1050,
             display: "flex",
@@ -1819,162 +1960,247 @@ export default function Cameras() {
             justifyContent: "center",
             padding: 16,
           }}
+          onClick={(e) => {
+            if (e.target === e.currentTarget) {
+              setReassignSelectModal({ open: false, camera: null, selectedPurposes: [] });
+            }
+          }}
         >
-          <div className="cc-card" style={{ width: 520, maxWidth: "95vw", padding: 22, position: "relative", border: "1px solid var(--cc-border)" }}>
-            <button
-              onClick={() => setReassignSelectModal({ open: false, camera: null, selectedPurposes: [] })}
-              style={{ position: "absolute", top: 14, right: 14, background: "none", border: "none", color: "var(--cc-text-muted)", fontSize: 18, cursor: "pointer" }}
+          <div
+            className="cc-card"
+            style={{
+              width: 540,
+              maxWidth: "95vw",
+              maxHeight: "92vh",
+              padding: 0,
+              display: "flex",
+              flexDirection: "column",
+              overflow: "hidden",
+              borderRadius: 12,
+              border: "1px solid var(--cc-border)",
+              boxShadow: "0 25px 50px -12px rgba(0, 0, 0, 0.9)",
+            }}
+            onClick={(e) => e.stopPropagation()}
+          >
+            {/* Modal Header — Fixed */}
+            <div
+              style={{
+                padding: "14px 20px",
+                borderBottom: "1px solid var(--cc-border)",
+                display: "flex",
+                alignItems: "center",
+                justifyContent: "space-between",
+                background: "rgba(15, 23, 42, 0.85)",
+                flexShrink: 0,
+              }}
             >
-              <i className="bi bi-x-lg" />
-            </button>
-            <div className="cc-section-title" style={{ marginBottom: 4, display: "flex", alignItems: "center", gap: 8 }}>
-              <i className="bi bi-arrow-repeat" style={{ color: "#e3b341" }} />
-              <span>Configure Crowd Functionalities</span>
-            </div>
-            <div style={{ fontSize: 11, color: "var(--cc-text-muted)", marginBottom: 14 }}>
-              Camera: <strong style={{ color: "var(--cc-text-primary)" }}>{reassignSelectModal.camera.name || reassignSelectModal.camera.id}</strong> ({reassignSelectModal.camera.camera_code || reassignSelectModal.camera.id})
-            </div>
-
-            <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", marginBottom: 10, padding: "8px 12px", background: "rgba(227, 179, 65, 0.08)", border: "1px solid rgba(227, 179, 65, 0.25)", borderRadius: 6 }}>
-              <span style={{ fontSize: 11, color: "var(--cc-yellow)", fontWeight: 700 }}>
-                Select 1 or 2 Functionalities:
-              </span>
-              <span style={{ fontSize: 10, color: (reassignSelectModal.selectedPurposes?.length || 0) === 2 ? "var(--cc-green)" : "var(--cc-yellow)", fontWeight: 800 }}>
-                {reassignSelectModal.selectedPurposes?.length || 0}/2 Selected
-              </span>
-            </div>
-
-            <div style={{ display: "flex", flexDirection: "column", gap: 10, marginBottom: 18 }}>
-              {[
-                {
-                  key: "ENTRY",
-                  title: "1. Entry Gate (IN Only)",
-                  icon: "bi-box-arrow-in-right",
-                  color: "#3fb950",
-                  desc: "ఎంట్రీ గేట్ వద్ద లోపలికి వచ్చే వారిని మాత్రమే లెక్కిస్తుంది (Counts entering footfall)",
-                },
-                {
-                  key: "EXIT",
-                  title: "2. Exit Gate (OUT Only)",
-                  icon: "bi-box-arrow-right",
-                  color: "#f85149",
-                  desc: "ఎగ్జిట్ గేట్ వద్ద బయటకు వెళ్ళే వారిని మాత్రమే లెక్కిస్తుంది (Counts exiting footfall)",
-                },
-                {
-                  key: "ENTRY_EXIT",
-                  title: "3. Two-Way Gate (IN & OUT)",
-                  icon: "bi-arrow-left-right",
-                  color: "#bc8cff",
-                  desc: "రెండు వైపులా ప్రయాణించే గేట్ వద్ద IN & OUT రెండింటినీ లెక్కిస్తుంది",
-                },
-                {
-                  key: "ZONE",
-                  title: "4. Zone Density Monitoring",
-                  icon: "bi-bounding-box",
-                  color: "#58a6ff",
-                  desc: "ఆవరణ లేదా మండపంలో జనం సాంద్రత & Capacity % లెక్కిస్తుంది",
-                },
-                {
-                  key: "QUEUE",
-                  title: "5. Queue Management",
-                  icon: "bi-people",
-                  color: "#d29922",
-                  desc: "క్యూ లైన్ బారికేడ్లలో భక్తుల సంఖ్య & కదలిక వేగం ట్రాక్ చేస్తుంది",
-                },
-              ].map((item) => {
-                const isChecked = (reassignSelectModal.selectedPurposes || []).includes(item.key);
-                return (
-                  <div
-                    key={item.key}
-                    onClick={() => handleToggleReassignPurpose(item.key)}
-                    style={{
-                      padding: "10px 14px",
-                      borderRadius: 8,
-                      border: isChecked ? `2px solid ${item.color}` : "1px solid var(--cc-border)",
-                      background: isChecked ? `${item.color}15` : "rgba(15, 23, 42, 0.6)",
-                      cursor: "pointer",
-                      display: "flex",
-                      alignItems: "center",
-                      justifyContent: "space-between",
-                      transition: "all 0.15s ease",
-                    }}
-                  >
-                    <div style={{ display: "flex", alignItems: "center", gap: 12 }}>
-                      <div
-                        style={{
-                          width: 36,
-                          height: 36,
-                          borderRadius: 6,
-                          background: `${item.color}20`,
-                          color: item.color,
-                          display: "flex",
-                          alignItems: "center",
-                          justifyContent: "center",
-                          fontSize: 18,
-                        }}
-                      >
-                        <i className={`bi ${item.icon}`} />
-                      </div>
-                      <div>
-                        <div style={{ fontSize: 13, fontWeight: 700, color: isChecked ? item.color : "var(--cc-text-primary)" }}>
-                          {item.title}
-                        </div>
-                        <div style={{ fontSize: 11, color: "var(--cc-text-muted)" }}>
-                          {item.desc}
-                        </div>
-                      </div>
-                    </div>
-                    <input
-                      type="checkbox"
-                      checked={isChecked}
-                      onChange={() => {}}
-                      style={{ width: 16, height: 16, accentColor: item.color, cursor: "pointer" }}
-                    />
-                  </div>
-                );
-              })}
-            </div>
-
-            {/* Zone Assignment — ONLY displayed when Zone Density Monitoring (ZONE) is selected */}
-            {(reassignSelectModal.selectedPurposes || []).includes("ZONE") && (
-              <div style={{ background: "rgba(15,23,42,0.75)", padding: 12, borderRadius: 8, border: "1px solid var(--cc-border)", marginBottom: 14 }}>
-                <div className="cc-label" style={{ marginBottom: 8, fontWeight: 700, fontSize: 11, display: "flex", alignItems: "center", gap: 6 }}>
-                  <i className="bi bi-geo-alt-fill" style={{ color: "#58a6ff" }} /> Assign to Zone:
+              <div style={{ display: "flex", alignItems: "center", gap: 10 }}>
+                <div
+                  style={{
+                    width: 32,
+                    height: 32,
+                    borderRadius: 6,
+                    background: "rgba(227, 179, 65, 0.15)",
+                    border: "1px solid rgba(227, 179, 65, 0.35)",
+                    display: "flex",
+                    alignItems: "center",
+                    justifyContent: "center",
+                    color: "var(--cc-yellow)",
+                    fontSize: 16,
+                  }}
+                >
+                  <i className="bi bi-arrow-repeat" />
                 </div>
-                <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 8 }}>
-                  {ZONE_PRESETS.map((z) => {
-                    const isSelected = (reassignSelectModal.selectedZone || reassignSelectModal.camera?.zone_code || "ZONE-A") === z.code;
-                    return (
-                      <div
-                        key={z.code}
-                        onClick={() => setReassignSelectModal((prev) => ({ ...prev, selectedZone: z.code }))}
-                        style={{
-                          padding: "8px 10px",
-                          borderRadius: 6,
-                          cursor: "pointer",
-                          border: isSelected ? `2px solid ${z.color}` : "1px solid var(--cc-border)",
-                          background: isSelected ? `${z.color}22` : "transparent",
-                          transition: "all 0.15s",
-                        }}
-                      >
-                        <div style={{ fontWeight: 700, fontSize: 11, color: isSelected ? z.color : "var(--cc-text-primary)", display: "flex", alignItems: "center", gap: 5 }}>
-                          <i className={`bi ${z.icon}`} style={{ color: z.color }} /> {z.name}
-                        </div>
-                        <div style={{ fontSize: 9.5, color: "var(--cc-text-muted)", marginTop: 2 }}>{z.label}</div>
-                        <div style={{ fontSize: 9, color: "var(--cc-text-muted)", fontFamily: "var(--cc-font-mono)" }}>Cap: {z.capacity.toLocaleString()}</div>
-                      </div>
-                    );
-                  })}
+                <div>
+                  <div style={{ fontSize: 14, fontWeight: 700, color: "var(--cc-text-primary)" }}>
+                    Configure Crowd Functionalities
+                  </div>
+                  <div style={{ fontSize: 11, color: "var(--cc-text-muted)" }}>
+                    Camera: <strong style={{ color: "var(--cc-text-primary)" }}>{reassignSelectModal.camera.name || reassignSelectModal.camera.id}</strong> ({reassignSelectModal.camera.camera_code || reassignSelectModal.camera.id})
+                  </div>
                 </div>
               </div>
-            )}
 
-            <div style={{ fontSize: 10, color: "var(--cc-text-muted)", marginBottom: 16, lineHeight: 1.5 }}>
-              <i className="bi bi-info-circle" style={{ marginRight: 4 }} />
-              Updating functionalities re-initializes the camera AI pipeline and allows configuring new ROIs.
+              <button
+                type="button"
+                onClick={() => setReassignSelectModal({ open: false, camera: null, selectedPurposes: [] })}
+                style={{
+                  background: "none",
+                  border: "none",
+                  color: "var(--cc-text-muted)",
+                  fontSize: 18,
+                  cursor: "pointer",
+                  padding: "4px 8px",
+                }}
+                title="Close (Esc)"
+              >
+                <i className="bi bi-x-lg" />
+              </button>
             </div>
 
-            <div style={{ display: "flex", justifyContent: "flex-end", gap: 10 }}>
+            {/* Modal Body — Scrollable */}
+            <div
+              style={{
+                flex: 1,
+                overflowY: "auto",
+                padding: "18px 22px",
+                display: "flex",
+                flexDirection: "column",
+                gap: 12,
+              }}
+            >
+              <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", padding: "8px 12px", background: "rgba(227, 179, 65, 0.08)", border: "1px solid rgba(227, 179, 65, 0.25)", borderRadius: 6 }}>
+                <span style={{ fontSize: 11, color: "var(--cc-yellow)", fontWeight: 700 }}>
+                  Select 1 or 2 Functionalities:
+                </span>
+                <span style={{ fontSize: 10, color: (reassignSelectModal.selectedPurposes?.length || 0) === 2 ? "var(--cc-green)" : "var(--cc-yellow)", fontWeight: 800 }}>
+                  {reassignSelectModal.selectedPurposes?.length || 0}/2 Selected
+                </span>
+              </div>
+
+              <div style={{ display: "flex", flexDirection: "column", gap: 10 }}>
+                {[
+                  {
+                    key: "ENTRY",
+                    title: "1. Entry Gate (IN Only)",
+                    icon: "bi-box-arrow-in-right",
+                    color: "#3fb950",
+                    desc: "Counts incoming visitors at dedicated entry gates (+1 IN footfall)",
+                  },
+                  {
+                    key: "EXIT",
+                    title: "2. Exit Gate (OUT Only)",
+                    icon: "bi-box-arrow-right",
+                    color: "#f85149",
+                    desc: "Counts outgoing visitors at dedicated exit gates (+1 OUT footfall)",
+                  },
+                  {
+                    key: "ENTRY_EXIT",
+                    title: "3. Two-Way Gate (IN & OUT)",
+                    icon: "bi-arrow-left-right",
+                    color: "#bc8cff",
+                    desc: "Counts both entering and exiting visitors at two-way gates (Bi-directional)",
+                  },
+                  {
+                    key: "ZONE",
+                    title: "4. Zone Density Monitoring",
+                    icon: "bi-bounding-box",
+                    color: "#58a6ff",
+                    desc: "Calculates crowd density, occupancy count, and capacity % in this zone",
+                  },
+                  {
+                    key: "QUEUE",
+                    title: "5. Queue Management",
+                    icon: "bi-people",
+                    color: "#d29922",
+                    desc: "Tracks queue headcount, waiting times, and movement speed in barricades",
+                  },
+                ].map((item) => {
+                  const isChecked = (reassignSelectModal.selectedPurposes || []).includes(item.key);
+                  return (
+                    <div
+                      key={item.key}
+                      onClick={() => handleToggleReassignPurpose(item.key)}
+                      style={{
+                        padding: "10px 14px",
+                        borderRadius: 8,
+                        border: isChecked ? `2px solid ${item.color}` : "1px solid var(--cc-border)",
+                        background: isChecked ? `${item.color}15` : "rgba(15, 23, 42, 0.6)",
+                        cursor: "pointer",
+                        display: "flex",
+                        alignItems: "center",
+                        justifyContent: "space-between",
+                        transition: "all 0.15s ease",
+                      }}
+                    >
+                      <div style={{ display: "flex", alignItems: "center", gap: 12 }}>
+                        <div
+                          style={{
+                            width: 36,
+                            height: 36,
+                            borderRadius: 6,
+                            background: `${item.color}20`,
+                            color: item.color,
+                            display: "flex",
+                            alignItems: "center",
+                            justifyContent: "center",
+                            fontSize: 18,
+                          }}
+                        >
+                          <i className={`bi ${item.icon}`} />
+                        </div>
+                        <div>
+                          <div style={{ fontSize: 13, fontWeight: 700, color: isChecked ? item.color : "var(--cc-text-primary)" }}>
+                            {item.title}
+                          </div>
+                          <div style={{ fontSize: 11, color: "var(--cc-text-muted)" }}>
+                            {item.desc}
+                          </div>
+                        </div>
+                      </div>
+                      <input
+                        type="checkbox"
+                        checked={isChecked}
+                        onChange={() => {}}
+                        style={{ width: 16, height: 16, accentColor: item.color, cursor: "pointer" }}
+                      />
+                    </div>
+                  );
+                })}
+              </div>
+
+              {/* Zone Assignment — ONLY displayed when Zone Density Monitoring (ZONE) is selected */}
+              {(reassignSelectModal.selectedPurposes || []).includes("ZONE") && (
+                <div style={{ background: "rgba(15,23,42,0.75)", padding: 12, borderRadius: 8, border: "1px solid var(--cc-border)" }}>
+                  <div className="cc-label" style={{ marginBottom: 8, fontWeight: 700, fontSize: 11, display: "flex", alignItems: "center", gap: 6 }}>
+                    <i className="bi bi-geo-alt-fill" style={{ color: "#58a6ff" }} /> Assign to Zone:
+                  </div>
+                  <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 8 }}>
+                    {ZONE_PRESETS.map((z) => {
+                      const isSelected = (reassignSelectModal.selectedZone || reassignSelectModal.camera?.zone_code || "ZONE-A") === z.code;
+                      return (
+                        <div
+                          key={z.code}
+                          onClick={() => setReassignSelectModal((prev) => ({ ...prev, selectedZone: z.code }))}
+                          style={{
+                            padding: "8px 10px",
+                            borderRadius: 6,
+                            cursor: "pointer",
+                            border: isSelected ? `2px solid ${z.color}` : "1px solid var(--cc-border)",
+                            background: isSelected ? `${z.color}22` : "transparent",
+                            transition: "all 0.15s",
+                          }}
+                        >
+                          <div style={{ fontWeight: 700, fontSize: 11, color: isSelected ? z.color : "var(--cc-text-primary)", display: "flex", alignItems: "center", gap: 5 }}>
+                            <i className={`bi ${z.icon}`} style={{ color: z.color }} /> {z.name}
+                          </div>
+                          <div style={{ fontSize: 9.5, color: "var(--cc-text-muted)", marginTop: 2 }}>{z.label}</div>
+                          <div style={{ fontSize: 9, color: "var(--cc-text-muted)", fontFamily: "var(--cc-font-mono)" }}>Cap: {z.capacity.toLocaleString()}</div>
+                        </div>
+                      );
+                    })}
+                  </div>
+                </div>
+              )}
+
+              <div style={{ fontSize: 10, color: "var(--cc-text-muted)", lineHeight: 1.5 }}>
+                <i className="bi bi-info-circle" style={{ marginRight: 4 }} />
+                Updating functionalities re-initializes the camera AI pipeline and allows configuring new ROIs.
+              </div>
+            </div>
+
+            {/* Modal Footer — Fixed & Always Visible */}
+            <div
+              style={{
+                padding: "12px 20px",
+                borderTop: "1px solid var(--cc-border)",
+                background: "rgba(15, 23, 42, 0.95)",
+                display: "flex",
+                justifyContent: "flex-end",
+                gap: 10,
+                flexShrink: 0,
+              }}
+            >
               <button
                 type="button"
                 className="cc-btn"
