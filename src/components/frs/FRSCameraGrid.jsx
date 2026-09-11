@@ -2,7 +2,7 @@
 import { useState, useEffect } from "react";
 import { useNavigate } from "react-router-dom";
 
-const BACKEND = `http://${window.location.hostname}:8000`;
+const BACKEND = import.meta.env.VITE_API_BASE_URL || `http://${window.location.hostname}:8000`;
 
 export default function FRSCameraGrid({ cameras = [] }) {
   const navigate = useNavigate();

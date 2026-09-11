@@ -306,6 +306,8 @@ def get_shared_yolo_engine():
                 if valid_path:
                     avail = ort.get_available_providers()
                     provs = []
+                    if "CUDAExecutionProvider" in avail:
+                        provs.append("CUDAExecutionProvider")
                     if "DmlExecutionProvider" in avail:
                         provs.append("DmlExecutionProvider")
                     provs.append("CPUExecutionProvider")

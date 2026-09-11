@@ -1,6 +1,8 @@
 import { useState, useEffect } from "react";
 import StatusBadge from "../common/StatusBadge.jsx";
 
+const BACKEND = import.meta.env.VITE_API_BASE_URL || `http://${window.location.hostname || "localhost"}:8000`;
+
 function CameraPlaceholder({ status, id, isFrs }) {
   const isInactive = status === "offline" || status === "stopped" || status === "disconnected";
   if (isInactive) {
@@ -103,7 +105,7 @@ export default function CameraCard({ camera, onSelect, onToggleFrs, onFullscreen
         <div className="cc-camera-placeholder" style={{ position: "relative", overflow: "hidden", background: "#000", height: 180 }}>
           <img
             key={retryCount}
-            src={camera.stream_url.startsWith("http") ? `${camera.stream_url}?t=${retryCount}` : `http://${window.location.hostname || "localhost"}:8000${camera.stream_url}?t=${retryCount}`}
+            src={camera.stream_url.startsWith("http") ? `${camera.stream_url}?t=${retryCount}` : `${BACKEND}${camera.stream_url}?t=${retryCount}`}
             alt={`Stream ${camera.id}`}
             style={{ width: "100%", height: "100%", objectFit: "cover", display: "block" }}
             onError={() => setStreamError(true)}
