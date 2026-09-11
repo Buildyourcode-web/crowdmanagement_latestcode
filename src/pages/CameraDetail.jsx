@@ -29,7 +29,7 @@ function getAllPurposes(camera, liveData) {
   if (t === "QUEUE") return ["QUEUE"];
   if (t === "ZONE") return ["ZONE"];
   if (t === "EXIT") return ["EXIT"];
-  return ["ENTRY_EXIT"];
+  return ["ENTRY"];
 }
 
 function PurposeBadge({ camera, liveData }) {
@@ -37,7 +37,7 @@ function PurposeBadge({ camera, liveData }) {
   return (
     <div style={{ display: "flex", flexWrap: "wrap", gap: 6 }}>
       {purposes.map((key) => {
-        const m = PURPOSE_META[key] || PURPOSE_META.ENTRY_EXIT;
+        const m = PURPOSE_META[key] || PURPOSE_META.ENTRY;
         return (
           <span
             key={key}

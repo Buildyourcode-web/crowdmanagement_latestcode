@@ -160,7 +160,7 @@ export default function Cameras() {
             zone_code: c.is_frs ? "ZONE-A" : "ZONE-B",
             detections_count: c.detections_count || 0,
             ai_status: c.status === "online" ? "online" : "offline",
-            ai_purposes: c.ai_purposes || (c.is_frs ? [] : ["ENTRY_EXIT"]),
+            ai_purposes: (c.ai_purposes || (c.is_frs ? [] : ["ENTRY"])).filter((p) => p !== "ENTRY_EXIT"),
           }))
         );
       }
@@ -264,7 +264,7 @@ export default function Cameras() {
         fps: 25,
         zone_code: eng.zone_code || "ZONE-A",
         detections_count: eng.detections_count || 0,
-        ai_purposes: eng.ai_purposes || (isFrs ? [] : ["ENTRY_EXIT", "ZONE"]),
+        ai_purposes: (eng.ai_purposes || (isFrs ? [] : ["ENTRY", "ZONE"])).filter((p) => p !== "ENTRY_EXIT"),
         is_running: true,
       });
     }
@@ -294,7 +294,7 @@ export default function Cameras() {
         is_running: true,
         stream_url: `/api/v1/frs-engine/cameras/${camKey}/stream`,
         fps: cam.fps || 25,
-        ai_purposes: cam.ai_purposes || (isFrs ? [] : ["ENTRY_EXIT", "ZONE"]),
+        ai_purposes: (cam.ai_purposes || (isFrs ? [] : ["ENTRY", "ZONE"])).filter((p) => p !== "ENTRY_EXIT"),
       });
     }
   }
@@ -438,9 +438,11 @@ export default function Cameras() {
   };
 
   const handleOpenReassign = (camera) => {
-    const existing = (Array.isArray(camera.ai_purposes) && camera.ai_purposes.length > 0)
+    let existing = (Array.isArray(camera.ai_purposes) && camera.ai_purposes.length > 0)
       ? camera.ai_purposes
-      : ["ENTRY_EXIT"];
+      : ["ENTRY"];
+    existing = existing.filter((p) => p !== "ENTRY_EXIT");
+    if (existing.length === 0) existing = ["ENTRY"];
     setReassignSelectModal({
       open: true,
       camera: camera,
@@ -1086,8 +1088,8 @@ export default function Cameras() {
                   }}
                 >
                   {crowdCameras.map((cam) => {
-                    const currentPurp = (cam.ai_purposes && cam.ai_purposes[0]) || "ENTRY_EXIT";
-                    const meta = PURPOSE_META[currentPurp] || PURPOSE_META.ENTRY_EXIT;
+                    const currentPurp = (cam.ai_purposes && cam.ai_purposes[0]) || "ENTRY";
+                    const meta = PURPOSE_META[currentPurp] || PURPOSE_META.ENTRY;
                     return (
                       <CameraCard
                         key={cam.id}
@@ -1297,22 +1299,15 @@ export default function Cameras() {
                         desc: "Counts outgoing visitors at dedicated exit gates (+1 OUT footfall)",
                       },
                       {
-                        key: "ENTRY_EXIT",
-                        title: "3. Two-Way Gate (IN & OUT)",
-                        icon: "bi-arrow-left-right",
-                        color: "#bc8cff",
-                        desc: "Counts both entering and exiting visitors at two-way gates (Bi-directional)",
-                      },
-                      {
                         key: "ZONE",
-                        title: "4. Zone Density Monitoring",
+                        title: "3. Zone Density Monitoring",
                         icon: "bi-bounding-box",
                         color: "#58a6ff",
                         desc: "Calculates crowd density, occupancy count, and capacity % in this zone",
                       },
                       {
                         key: "QUEUE",
-                        title: "5. Queue Management",
+                        title: "4. Queue Management",
                         icon: "bi-people",
                         color: "#d29922",
                         desc: "Tracks queue headcount, waiting times, and movement speed in barricades",
@@ -2075,22 +2070,15 @@ export default function Cameras() {
                     desc: "Counts outgoing visitors at dedicated exit gates (+1 OUT footfall)",
                   },
                   {
-                    key: "ENTRY_EXIT",
-                    title: "3. Two-Way Gate (IN & OUT)",
-                    icon: "bi-arrow-left-right",
-                    color: "#bc8cff",
-                    desc: "Counts both entering and exiting visitors at two-way gates (Bi-directional)",
-                  },
-                  {
                     key: "ZONE",
-                    title: "4. Zone Density Monitoring",
+                    title: "3. Zone Density Monitoring",
                     icon: "bi-bounding-box",
                     color: "#58a6ff",
                     desc: "Calculates crowd density, occupancy count, and capacity % in this zone",
                   },
                   {
                     key: "QUEUE",
-                    title: "5. Queue Management",
+                    title: "4. Queue Management",
                     icon: "bi-people",
                     color: "#d29922",
                     desc: "Tracks queue headcount, waiting times, and movement speed in barricades",
