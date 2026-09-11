@@ -1,0 +1,17 @@
+[Unit]
+Description=BYC AI Platform - CPU Frontend Service
+Requires=docker.service
+After=docker.service network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+WorkingDirectory=/opt/khairatabad_ganesh/deploy/cpu-frontend
+ExecStart=/usr/bin/docker compose -f docker-compose.yml up -d
+ExecStop=/usr/bin/docker compose -f docker-compose.yml down
+Restart=on-failure
+TimeoutStartSec=300
+
+[Install]
+WantedBy=multi-user.target

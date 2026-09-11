@@ -221,3 +221,71 @@ docker exec -t byc_gpu_postgres pg_dump -U postgres main_crowd_ai > backup_$(dat
 # Restore a database backup
 cat backup_file.sql | docker exec -i byc_gpu_postgres psql -U postgres -d main_crowd_ai
 ```
+
+---
+
+## 6. One-Click Automated Deployment Scripts
+
+For convenience, ready-to-run deployment scripts are included for both environments:
+
+### On GPU Instance:
+```bash
+cd /opt/khairatabad_ganesh/deploy/gpu-backend
+bash deploy.sh
+```
+*This verifies NVIDIA drivers & Docker toolkit, checks models, launches the compose stack, waits for PostgreSQL to be healthy, and initializes all database tables automatically.*
+
+### On CPU Instance:
+```bash
+cd /opt/khairatabad_ganesh/deploy/cpu-frontend
+bash deploy.sh
+```
+*This prompts for the GPU backend URL, configures `.env`, builds the production React image, and starts Nginx with reverse proxy.*
+
+---
+
+## 7. Enabling HTTPS / SSL with Let's Encrypt (Production Domain)
+
+If you have a domain pointing to your CPU instance (e.g. `khb-ai.yourdomain.com`):
+
+1. Install Certbot on the CPU host:
+   ```bash
+   sudo apt update && sudo apt install -y certbot
+   ```
+2. Obtain a certificate:
+   ```bash
+   sudo certbot certonly --standalone -d yourdomain.com -d www.yourdomain.com
+   ```
+3. Use the included `nginx-ssl.conf`:
+   ```bash
+   # In deploy/cpu-frontend/nginx-ssl.conf, replace yourdomain.com and <GPU_INSTANCE_IP>
+   # Then mount or replace the Nginx configuration in docker-compose.yml:
+   volumes:
+     - /etc/letsencrypt:/etc/letsencrypt:ro
+     - ./nginx-ssl.conf:/etc/nginx/conf.d/default.conf:ro
+   ```
+4. Restart Nginx:
+   ```bash
+   docker compose restart frontend
+   ```
+
+---
+
+## 8. Automatic System Startup on Host Reboot (Systemd)
+
+To ensure both services start automatically if the cloud instance reboots:
+
+### On CPU Instance:
+```bash
+sudo cp deploy/cpu-frontend/byc-frontend.service /etc/systemd/system/
+sudo systemctl daemon-reload
+sudo systemctl enable byc-frontend
+```
+
+### On GPU Instance:
+```bash
+sudo cp deploy/gpu-backend/byc-backend.service /etc/systemd/system/
+sudo systemctl daemon-reload
+sudo systemctl enable byc-backend
+```
+

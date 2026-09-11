@@ -38,6 +38,8 @@ COPY --from=builder /app/dist /usr/share/nginx/html
 
 # Copy Nginx configuration template (envsubst will populate $BACKEND_URL at startup)
 COPY deploy/cpu-frontend/default.conf.template /etc/nginx/templates/default.conf.template
+COPY deploy/cpu-frontend/nginx.conf /etc/nginx/nginx.conf.example
+COPY deploy/cpu-frontend/nginx-ssl.conf /etc/nginx/nginx-ssl.conf.example
 
 # Default GPU backend URL fallback
 ENV BACKEND_URL="http://localhost:8000"
