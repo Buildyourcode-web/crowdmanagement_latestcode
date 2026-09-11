@@ -28,3 +28,36 @@ export async function getZoneAnalytics() {
     longestQueue: "—",
   };
 }
+
+export async function getOperationalFlowAnalytics() {
+  const res = await apiClient.get("/api/v1/analytics/operational-flow");
+  return res.data;
+}
+
+export async function getFestival10DaysAnalytics() {
+  const res = await apiClient.get("/api/v1/analytics/festival-10days");
+  return res.data;
+}
+
+export async function downloadFestival10DaysCsv() {
+  const baseURL = import.meta.env.VITE_API_BASE_URL || "http://localhost:8000";
+  const token = localStorage.getItem("byc_access_token");
+  const eventId = localStorage.getItem("byc_active_event_id");
+  const headers = {};
+  if (token) headers["Authorization"] = `Bearer ${token}`;
+  if (eventId) headers["X-Event-ID"] = eventId;
+
+  const res = await fetch(`${baseURL}/api/v1/reports/festival-10days/export`, { headers });
+  if (!res.ok) throw new Error("Failed to export report");
+  const blob = await res.blob();
+  const url = window.URL.createObjectURL(blob);
+  const a = document.createElement("a");
+  a.href = url;
+  a.download = `Khairatabad_Ganesh_10Days_Attendance_Report.csv`;
+  document.body.appendChild(a);
+  a.click();
+  window.URL.revokeObjectURL(url);
+  document.body.removeChild(a);
+}
+
+

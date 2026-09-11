@@ -1,4 +1,4 @@
-﻿// Event & Site Zustand Store
+// Event & Site Zustand Store
 import { create } from "zustand";
 import { eventService } from "../services/eventService";
 
@@ -19,11 +19,15 @@ export const useEventStore = create((set, get) => ({
       set({ events, isLoadingEvents: false });
 
       const currentActiveId = get().activeEventId;
+      const khbEvent = events.find((e) => e.code === "KHB-2026" || e.name?.toLowerCase().includes("khairatabad"));
       let matched = events.find((e) => e.id === currentActiveId);
 
-      // If saved activeEventId is not in user's accessible events, select first or active
-      if (!matched && events.length > 0) {
-        matched = events.find((e) => e.status === "ACTIVE" || e.status === "LIVE") || events[0];
+      // Prioritize Khairatabad Ganesh Festival 2026 by default
+      if (!matched) {
+        matched = khbEvent || events.find((e) => e.status === "ACTIVE" || e.status === "LIVE") || events[0];
+      } else if (matched.code !== "KHB-2026" && khbEvent && !localStorage.getItem("byc_user_explicit_event")) {
+        // If it was auto-selected previously to Tank Bund, auto-switch to Khairatabad
+        matched = khbEvent;
       }
 
       if (matched) {

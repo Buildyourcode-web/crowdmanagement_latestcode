@@ -1,6 +1,9 @@
+import csv
 from datetime import datetime, timezone
+import io
 from typing import List
 from fastapi import APIRouter, Depends, status
+from fastapi.responses import StreamingResponse
 from sqlalchemy import func, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -8,8 +11,10 @@ from app.dependencies import get_current_user, get_db, get_event_context, requir
 from app.models.crowd import CrowdSnapshot
 from app.models.incident import Incident
 from app.models.user import User
+from app.schemas.analytics import Festival10DaysResponse
 from app.schemas.common import StandardResponse
 from app.security.permissions import Permissions
+from app.services.analytics_service import AnalyticsService
 from app.utils.response import success_response
 
 router = APIRouter(prefix="/reports", tags=["Reports"])
@@ -108,3 +113,76 @@ async def generate_report(
         "status": "GENERATED",
         "message": f"Report '{report_type}' generated successfully with live event telemetry",
     })
+
+
+@router.get("/festival-10days", response_model=StandardResponse[Festival10DaysResponse])
+async def get_reports_festival_10days(
+    ctx: EventContext = Depends(get_event_context),
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(require_permission(Permissions.REPORTS_READ)),
+):
+    """Retrieve 10-day day-wise festival attendance and footfall metrics."""
+    service = AnalyticsService(db)
+    data = await service.get_festival_10days_attendance(event_id=ctx.event_id)
+    return success_response(data)
+
+
+@router.get("/festival-10days/export")
+async def export_festival_10days_csv(
+    ctx: EventContext = Depends(get_event_context),
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(require_permission(Permissions.REPORTS_READ)),
+):
+    """Export 10-Day Festival Day-Wise Attendance Audit as downloadable CSV."""
+    service = AnalyticsService(db)
+    fest_data = await service.get_festival_10days_attendance(event_id=ctx.event_id)
+
+    output = io.StringIO()
+    writer = csv.writer(output)
+
+    # Metadata headers
+    writer.writerow(["# Khairatabad Ganesh Festival 2026 - Official 10-Day Attendance & Footfall Audit Report"])
+    writer.writerow(["# Generated At", datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S UTC")])
+    writer.writerow(["# Festival Dates", f"{fest_data.start_date} to {fest_data.end_date}"])
+    writer.writerow(["# Total Entries (4 Entry Gates)", fest_data.total_entries_10days])
+    writer.writerow(["# Total Exits (4 Exit Gates)", fest_data.total_exits_10days])
+    writer.writerow(["# Grand Total Traffic (Entry + Exit)", fest_data.grand_total_footfall])
+    writer.writerow([])
+
+    # Table columns
+    writer.writerow([
+        "Day Number",
+        "Date",
+        "Day Name",
+        "Entry Count (4 Gates)",
+        "Exit Count (4 Gates)",
+        "Total Count (Entry + Exit)",
+        "Net Inside",
+        "Peak Hour",
+        "Status",
+    ])
+
+    for d in fest_data.days:
+        writer.writerow([
+            d.day_number,
+            d.date,
+            d.day_name,
+            d.entry_count,
+            d.exit_count,
+            d.total_count,
+            d.net_inside,
+            d.peak_hour,
+            d.status,
+        ])
+
+    output.seek(0)
+    filename = f"Khairatabad_Ganesh_10Days_Attendance_{datetime.now().strftime('%Y%m%d_%H%M%S')}.csv"
+    return StreamingResponse(
+        io.BytesIO(output.getvalue().encode("utf-8")),
+        media_type="text/csv",
+        headers={
+            "Content-Disposition": f'attachment; filename="{filename}"',
+            "Access-Control-Expose-Headers": "Content-Disposition",
+        },
+    )
+

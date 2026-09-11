@@ -67,6 +67,8 @@ fi
 
 # 5. Build and launch Backend + DB + Redis
 echo -e "${GREEN}==> Launching Backend, PostgreSQL (PostGIS), and Redis...${NC}"
+export COMPOSE_BAKE=false
+export DOCKER_BUILDKIT=1
 docker compose -f docker-compose.yml up -d --build
 
 # 6. Wait for DB to be healthy and initialize schema
@@ -79,8 +81,18 @@ for i in {1..30}; do
     sleep 2
 done
 
+echo -e "${GREEN}==> Waiting for Backend container to be running...${NC}"
+for i in {1..30}; do
+    if [ "$(docker inspect -f '{{.State.Running}}' byc_gpu_backend 2>/dev/null)" = "true" ]; then
+        echo -e "${GREEN}[✓] Backend container is running.${NC}"
+        break
+    fi
+    sleep 2
+done
+
 echo -e "${GREEN}==> Initializing Database Tables...${NC}"
 docker exec byc_gpu_backend python scripts/init_db.py
+
 
 echo -e "${GREEN}======================================================${NC}"
 echo -e "${GREEN}   [✓] GPU Backend stack successfully running!        ${NC}"

@@ -3,6 +3,7 @@ import { useEffect, useState, useCallback, useRef, useMemo } from "react";
 import { useNavigate } from "react-router-dom";
 import ReactECharts from "echarts-for-react";
 import { getDashboardSummary } from "../services/dashboardService.js";
+import { getFestival10DaysAnalytics, downloadFestival10DaysCsv } from "../services/analyticsService.js";
 import { realtimeService } from "../services/realtimeService.js";
 import { useDashboardStore } from "../store/useDashboardStore.js";
 import { useAppStore } from "../store/useAppStore.js";
@@ -31,6 +32,8 @@ export default function Dashboard() {
 
   const [selectedZoneCode, setSelectedZoneCode] = useState("all");
   const [clockStr, setClockStr] = useState("");
+  const [fest10Data, setFest10Data] = useState(null);
+  const [downloadingCsv, setDownloadingCsv] = useState(false);
   const inFlightRef = useRef(false);
   const pendingRef = useRef(false);
   const timerRef = useRef(null);
@@ -58,9 +61,17 @@ export default function Dashboard() {
 
     try {
       const range = (store.dateRange || "today").toLowerCase();
-      const res = await getDashboardSummary(range);
+      const [res, festRes] = await Promise.allSettled([
+        getDashboardSummary(range),
+        getFestival10DaysAnalytics(),
+      ]);
       if (!isMountedRef.current) return;
-      store.setDashboardData(res);
+      if (res.status === "fulfilled" && res.value) {
+        store.setDashboardData(res.value);
+      }
+      if (festRes.status === "fulfilled" && festRes.value) {
+        setFest10Data(festRes.value?.data || festRes.value);
+      }
     } catch (err) {
       console.error("[Dashboard] Fetch error:", err);
       if (!isMountedRef.current) return;
@@ -357,11 +368,11 @@ export default function Dashboard() {
         {/* HERO KPI */}
         <div
           className="cc-card"
-          onClick={() => navigate("/crowd-management")}
+          onClick={() => navigate("/reports")}
           style={{
             cursor: "pointer",
-            background: "linear-gradient(135deg, rgba(56, 139, 253, 0.12) 0%, rgba(13, 17, 23, 0.95) 100%)",
-            border: "1.5px solid rgba(88, 166, 255, 0.4)",
+            background: "linear-gradient(135deg, rgba(188, 140, 255, 0.12) 0%, rgba(13, 17, 23, 0.95) 100%)",
+            border: "1.5px solid rgba(188, 140, 255, 0.4)",
             display: "flex",
             flexDirection: "column",
             justifyContent: "space-between",
@@ -369,20 +380,20 @@ export default function Dashboard() {
           }}
         >
           <div style={{ display: "flex", justifyContent: "space-between", alignItems: "flex-start" }}>
-            <span style={{ fontSize: 11, fontWeight: 600, color: "var(--cc-text-muted)", letterSpacing: "0.05em", textTransform: "uppercase" }}>
-              Total Visitors — All Days
+            <span style={{ fontSize: 11, fontWeight: 700, color: "var(--cc-text-muted)", letterSpacing: "0.05em", textTransform: "uppercase" }}>
+              Total Footfall (Entry + Exit)
             </span>
-            <span style={{ fontSize: 10, background: "rgba(56, 139, 253, 0.2)", border: "1px solid rgba(56, 139, 253, 0.4)", color: "var(--cc-blue)", padding: "1px 6px", borderRadius: 4, fontFamily: "var(--cc-font-mono)" }}>
-              {data?.festival_day_label || "Day 1 of 10"}
+            <span style={{ fontSize: 10, background: "rgba(188, 140, 255, 0.2)", border: "1px solid rgba(188, 140, 255, 0.4)", color: "#bc8cff", padding: "1px 6px", borderRadius: 4, fontFamily: "var(--cc-font-mono)", fontWeight: 700 }}>
+              {fest10Data ? `Day ${fest10Data.current_day} of 10` : (data?.festival_day_label || "Day 1 of 10")}
             </span>
           </div>
 
           <div style={{ margin: "6px 0" }}>
-            <div style={{ fontSize: 28, fontWeight: 800, fontFamily: "var(--cc-font-mono)", color: "#fff", letterSpacing: "0.02em" }}>
-              {loading && !data ? "—" : (data?.total_visitors_festival || 0).toLocaleString()}
+            <div style={{ fontSize: 28, fontWeight: 800, fontFamily: "var(--cc-font-mono)", color: "var(--cc-text-primary)", letterSpacing: "0.02em" }}>
+              {loading && !data ? "—" : ((data?.today_entries || 0) + (data?.today_exits || 0)).toLocaleString()}
             </div>
             <div style={{ fontSize: 11, color: "var(--cc-text-muted)" }}>
-              Today: <strong style={{ color: "#3fb950" }}>{(data?.today_entries || 0).toLocaleString()}</strong> entries
+              Formula: <strong style={{ color: "#3fb950" }}>{(data?.today_entries || 0).toLocaleString()}</strong> (In) + <strong style={{ color: "#f85149" }}>{(data?.today_exits || 0).toLocaleString()}</strong> (Out)
             </div>
           </div>
         </div>
@@ -390,23 +401,23 @@ export default function Dashboard() {
         {/* PEOPLE MOVEMENT: ENTRY */}
         <div className="cc-card" style={{ padding: "12px 14px", display: "flex", flexDirection: "column", justifyContent: "space-between" }}>
           <span style={{ fontSize: 11, fontWeight: 600, color: "var(--cc-text-muted)", letterSpacing: "0.05em", textTransform: "uppercase" }}>
-            Total Entry
+            Total Entry (4 Gates)
           </span>
           <div style={{ fontSize: 24, fontWeight: 700, fontFamily: "var(--cc-font-mono)", color: "#3fb950" }}>
             {loading && !data ? "—" : (data?.today_entries || 0).toLocaleString()}
           </div>
-          <span style={{ fontSize: 10, color: "var(--cc-text-muted)" }}>Valid line IN crossings</span>
+          <span style={{ fontSize: 10, color: "var(--cc-text-muted)" }}>CAM-ENTRY 01–04 crossings</span>
         </div>
 
         {/* PEOPLE MOVEMENT: EXIT */}
         <div className="cc-card" style={{ padding: "12px 14px", display: "flex", flexDirection: "column", justifyContent: "space-between" }}>
           <span style={{ fontSize: 11, fontWeight: 600, color: "var(--cc-text-muted)", letterSpacing: "0.05em", textTransform: "uppercase" }}>
-            Total Exit
+            Total Exit (4 Gates)
           </span>
-          <div style={{ fontSize: 24, fontWeight: 700, fontFamily: "var(--cc-font-mono)", color: "#58a6ff" }}>
+          <div style={{ fontSize: 24, fontWeight: 700, fontFamily: "var(--cc-font-mono)", color: "#f85149" }}>
             {loading && !data ? "—" : (data?.today_exits || 0).toLocaleString()}
           </div>
-          <span style={{ fontSize: 10, color: "var(--cc-text-muted)" }}>Valid line OUT crossings</span>
+          <span style={{ fontSize: 10, color: "var(--cc-text-muted)" }}>CAM-EXIT 01–04 crossings</span>
         </div>
 
         {/* PEOPLE MOVEMENT: NET FLOW */}
@@ -423,12 +434,12 @@ export default function Dashboard() {
         {/* PEOPLE MOVEMENT: CURRENT OCCUPANCY */}
         <div className="cc-card" style={{ padding: "12px 14px", display: "flex", flexDirection: "column", justifyContent: "space-between", borderLeft: "3px solid #e3b341" }}>
           <span style={{ fontSize: 11, fontWeight: 600, color: "var(--cc-text-muted)", letterSpacing: "0.05em", textTransform: "uppercase" }}>
-            Current Occupancy
+            Inside Complex (Net)
           </span>
           <div style={{ fontSize: 24, fontWeight: 700, fontFamily: "var(--cc-font-mono)", color: "#e3b341" }}>
             {loading && !data ? "—" : (data?.current_occupancy || 0).toLocaleString()}
           </div>
-          <span style={{ fontSize: 10, color: "var(--cc-text-muted)" }}>Active tracked people inside</span>
+          <span style={{ fontSize: 10, color: "var(--cc-text-muted)" }}>Total Entry minus Total Exit</span>
         </div>
       </div>
 
@@ -684,40 +695,95 @@ export default function Dashboard() {
       {/* SECTION 4 & 10: DAILY VISITOR TREND + TOP RISK AREAS */}
       {/* ========================================================================= */}
       <div style={{ display: "grid", gridTemplateColumns: "1.3fr 1fr", gap: 10 }}>
-        {/* DAILY ENTRY / EXIT TREND */}
+        {/* 10-DAY FESTIVAL DAY-WISE FOOTFALL & AUDIT */}
         <div className="cc-card" style={{ padding: 0, overflow: "hidden" }}>
-          <div className="cc-section-header" style={{ padding: "10px 14px" }}>
-            <span style={{ fontWeight: 700, fontSize: 13, color: "var(--cc-text-primary)", letterSpacing: "0.04em" }}>
-              DAILY ENTRY / EXIT TREND
-            </span>
+          <div className="cc-section-header" style={{ padding: "10px 14px", display: "flex", justifyContent: "space-between", alignItems: "center" }}>
+            <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
+              <i className="bi bi-calendar3" style={{ color: "var(--cc-accent)" }} />
+              <span style={{ fontWeight: 700, fontSize: 13, color: "var(--cc-text-primary)", letterSpacing: "0.04em" }}>
+                10-DAY FESTIVAL DAY-WISE REPORT
+              </span>
+            </div>
+            <div style={{ display: "flex", gap: 6 }}>
+              <button
+                className="cc-btn cc-btn-sm"
+                style={{ fontSize: 10 }}
+                onClick={async () => {
+                  try {
+                    setDownloadingCsv(true);
+                    await downloadFestival10DaysCsv();
+                  } catch (e) {
+                    alert("Export failed: " + e.message);
+                  } finally {
+                    setDownloadingCsv(false);
+                  }
+                }}
+                disabled={downloadingCsv}
+              >
+                <i className={`bi ${downloadingCsv ? "bi-hourglass-split" : "bi-download"}`} /> CSV
+              </button>
+              <button className="cc-btn cc-btn-sm" style={{ fontSize: 10 }} onClick={() => navigate("/reports")}>
+                Full Report
+              </button>
+            </div>
           </div>
 
-          <div style={{ padding: "6px 12px" }}>
+          <div style={{ padding: "6px 12px", maxHeight: 290, overflowY: "auto" }}>
             <table className="cc-table" style={{ width: "100%", fontSize: 11 }}>
               <thead>
                 <tr>
+                  <th style={{ textAlign: "left" }}>Day</th>
                   <th style={{ textAlign: "left" }}>Date</th>
-                  <th style={{ textAlign: "right" }}>Entries</th>
-                  <th style={{ textAlign: "right" }}>Exits</th>
-                  <th style={{ textAlign: "right" }}>Net Flow</th>
+                  <th style={{ textAlign: "right", color: "#3fb950" }}>Entry (4 Gates)</th>
+                  <th style={{ textAlign: "right", color: "#f85149" }}>Exit (4 Gates)</th>
+                  <th style={{ textAlign: "right", color: "var(--cc-accent)" }}>Total (Entry+Exit)</th>
+                  <th style={{ textAlign: "center" }}>Peak</th>
+                  <th style={{ textAlign: "center" }}>Status</th>
                 </tr>
               </thead>
               <tbody>
-                {loading && !data ? (
-                  <tr><td colSpan={4} style={{ textAlign: "center", padding: 16, color: "var(--cc-text-muted)" }}>Loading Daily Trends...</td></tr>
-                ) : !data?.daily_trend || data.daily_trend.length === 0 ? (
-                  <tr><td colSpan={4} style={{ textAlign: "center", padding: 16, color: "var(--cc-text-muted)" }}>NO HISTORICAL RECORDS</td></tr>
+                {!fest10Data?.days || fest10Data.days.length === 0 ? (
+                  <tr><td colSpan={7} style={{ textAlign: "center", padding: 16, color: "var(--cc-text-muted)" }}>Loading 10-Day Festival Report...</td></tr>
                 ) : (
-                  data.daily_trend.slice(0, 5).map((row, idx) => (
-                    <tr key={idx}>
-                      <td style={{ fontWeight: 600, fontFamily: "var(--cc-font-mono)" }}>{row.date}</td>
-                      <td style={{ textAlign: "right", color: "#3fb950", fontFamily: "var(--cc-font-mono)" }}>{row.entries.toLocaleString()}</td>
-                      <td style={{ textAlign: "right", color: "#58a6ff", fontFamily: "var(--cc-font-mono)" }}>{row.exits.toLocaleString()}</td>
-                      <td style={{ textAlign: "right", fontWeight: 700, color: row.net_flow >= 0 ? "#3fb950" : "#f85149", fontFamily: "var(--cc-font-mono)" }}>
-                        {row.net_flow > 0 ? "+" : ""}{row.net_flow.toLocaleString()}
-                      </td>
-                    </tr>
-                  ))
+                  fest10Data.days.map((row) => {
+                    const isToday = row.status === "TODAY";
+                    return (
+                      <tr key={row.day_number} style={{ background: isToday ? "rgba(188,140,255,0.07)" : "transparent" }}>
+                        <td style={{ fontWeight: 700, fontFamily: "var(--cc-font-mono)", color: isToday ? "var(--cc-accent)" : "inherit" }}>
+                          Day {row.day_number}
+                        </td>
+                        <td style={{ fontFamily: "var(--cc-font-mono)" }}>
+                          {row.date.slice(5)} ({row.day_name.slice(0, 3)})
+                        </td>
+                        <td style={{ textAlign: "right", color: "#3fb950", fontFamily: "var(--cc-font-mono)", fontWeight: 600 }}>
+                          {row.entry_count.toLocaleString()}
+                        </td>
+                        <td style={{ textAlign: "right", color: "#f85149", fontFamily: "var(--cc-font-mono)", fontWeight: 600 }}>
+                          {row.exit_count.toLocaleString()}
+                        </td>
+                        <td style={{ textAlign: "right", fontWeight: 800, color: "var(--cc-accent)", fontFamily: "var(--cc-font-mono)" }}>
+                          {row.total_count.toLocaleString()}
+                        </td>
+                        <td style={{ textAlign: "center", fontSize: 10, color: "var(--cc-text-muted)" }}>
+                          {row.peak_hour}
+                        </td>
+                        <td style={{ textAlign: "center" }}>
+                          <span
+                            style={{
+                              fontSize: 9,
+                              fontWeight: 700,
+                              padding: "2px 6px",
+                              borderRadius: 4,
+                              background: isToday ? "rgba(188,140,255,0.2)" : row.status === "COMPLETED" ? "rgba(63,185,80,0.15)" : "rgba(255,255,255,0.05)",
+                              color: isToday ? "#bc8cff" : row.status === "COMPLETED" ? "#3fb950" : "var(--cc-text-muted)",
+                            }}
+                          >
+                            {row.status}
+                          </span>
+                        </td>
+                      </tr>
+                    );
+                  })
                 )}
               </tbody>
             </table>

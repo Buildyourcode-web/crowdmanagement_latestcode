@@ -1,14 +1,23 @@
 // Dashboard Store — State management for Command Center Dashboard
 import { create } from "zustand";
 
+// Load initial cached snapshot for instant 0ms render (no blank dashes)
+let initialCachedData = null;
+try {
+  const cachedStr = sessionStorage.getItem("byc_dashboard_cache");
+  if (cachedStr) {
+    initialCachedData = JSON.parse(cachedStr);
+  }
+} catch (_) {}
+
 export const useDashboardStore = create((set, get) => ({
   dateRange: "TODAY",
-  data: null,
-  loading: true,
+  data: initialCachedData,
+  loading: initialCachedData ? false : true,
   isRefreshing: false,
   error: null,
   dataStatus: "LIVE DATA",
-  lastUpdated: null,
+  lastUpdated: initialCachedData ? new Date().toISOString() : null,
 
   setDateRange: (range) =>
     set((s) => (s.dateRange === range ? s : { dateRange: range })),
@@ -21,14 +30,20 @@ export const useDashboardStore = create((set, get) => ({
   setError: (error) =>
     set((s) => (s.error === error ? s : { error })),
 
-  setDashboardData: (payload) =>
+  setDashboardData: (payload) => {
+    try {
+      if (payload) {
+        sessionStorage.setItem("byc_dashboard_cache", JSON.stringify(payload));
+      }
+    } catch (_) {}
     set({
       data: payload,
       loading: false,
       isRefreshing: false,
       error: null,
       lastUpdated: new Date().toISOString(),
-    }),
+    });
+  },
 
   // Partial real-time patch from WebSocket events
   patchDashboardMetrics: (patch) =>

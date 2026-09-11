@@ -211,32 +211,40 @@ export default function CameraCard({ camera, onSelect, onToggleFrs, onFullscreen
         </div>
 
         {!isFrs && (() => {
-          const purp = camera.ai_purposes?.[0] || "ENTRY_EXIT";
-          const meta = {
-            ENTRY: { label: "Entry Gate (IN)", color: "#3fb950", bg: "rgba(63, 185, 80, 0.12)", icon: "bi-box-arrow-in-right" },
-            EXIT: { label: "Exit Gate (OUT)", color: "#f85149", bg: "rgba(248, 81, 73, 0.12)", icon: "bi-box-arrow-right" },
-            ZONE: { label: "Zone Density", color: "#bc8cff", bg: "rgba(188, 140, 255, 0.12)", icon: "bi-bounding-box" },
+          const purposes = (Array.isArray(camera.ai_purposes) && camera.ai_purposes.length > 0)
+            ? camera.ai_purposes
+            : ["ENTRY_EXIT"];
+          const metaMap = {
+            ENTRY: { label: "Entry Gate (IN Only)", color: "#3fb950", bg: "rgba(63, 185, 80, 0.12)", icon: "bi-box-arrow-in-right" },
+            EXIT: { label: "Exit Gate (OUT Only)", color: "#f85149", bg: "rgba(248, 81, 73, 0.12)", icon: "bi-box-arrow-right" },
+            ENTRY_EXIT: { label: "Two-Way Gate (IN & OUT)", color: "#bc8cff", bg: "rgba(188, 140, 255, 0.12)", icon: "bi-arrow-left-right" },
+            ZONE: { label: "Zone Density", color: "#58a6ff", bg: "rgba(88, 166, 255, 0.12)", icon: "bi-bounding-box" },
             QUEUE: { label: "Queue Management", color: "#d29922", bg: "rgba(210, 153, 34, 0.12)", icon: "bi-people" },
-            ENTRY_EXIT: { label: "Entry/Exit Counting", color: "#3fb950", bg: "rgba(63, 185, 80, 0.12)", icon: "bi-arrow-left-right" },
-          }[purp] || { label: "Crowd Analytics", color: "var(--cc-green)", bg: "rgba(63, 185, 80, 0.12)", icon: "bi-people-fill" };
+          };
           return (
-            <div style={{ marginBottom: 6 }}>
-              <span
-                style={{
-                  fontSize: 9,
-                  fontWeight: 700,
-                  padding: "2px 7px",
-                  borderRadius: 3,
-                  color: meta.color,
-                  background: meta.bg,
-                  border: `1px solid ${meta.color}40`,
-                  display: "inline-flex",
-                  alignItems: "center",
-                  gap: 4,
-                }}
-              >
-                <i className={`bi ${meta.icon}`} /> {meta.label}
-              </span>
+            <div style={{ display: "flex", flexWrap: "wrap", gap: 4, marginBottom: 6 }}>
+              {purposes.map((purp) => {
+                const meta = metaMap[purp] || { label: purp, color: "var(--cc-green)", bg: "rgba(63, 185, 80, 0.12)", icon: "bi-people-fill" };
+                return (
+                  <span
+                    key={purp}
+                    style={{
+                      fontSize: 9,
+                      fontWeight: 700,
+                      padding: "2px 7px",
+                      borderRadius: 3,
+                      color: meta.color,
+                      background: meta.bg,
+                      border: `1px solid ${meta.color}40`,
+                      display: "inline-flex",
+                      alignItems: "center",
+                      gap: 4,
+                    }}
+                  >
+                    <i className={`bi ${meta.icon}`} /> {meta.label}
+                  </span>
+                );
+              })}
             </div>
           );
         })()}

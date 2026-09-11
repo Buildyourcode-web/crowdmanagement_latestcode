@@ -167,6 +167,11 @@ class EventContext:
     has_frs_access: bool = False
 
 
+_cached_events_by_id: dict[str, tuple[Any, float]] = {}
+_cached_default_event: Optional[Any] = None
+_cached_default_event_exp: float = 0.0
+
+
 async def get_event_context(
     x_event_id: Optional[str] = Header(None, alias="X-Event-ID"),
     current_user: User = Depends(get_current_user),
@@ -188,18 +193,24 @@ async def get_event_context(
 
     if is_super:
         if x_event_id:
-            try:
-                target_uuid = uuid.UUID(x_event_id)
-                stmt = select(Event).where((Event.id == target_uuid) | (Event.code == x_event_id))
-            except ValueError:
-                stmt = select(Event).where(Event.code == x_event_id)
-            res = await db.execute(stmt)
-            target_event = res.scalars().first()
-            if not target_event:
-                raise HTTPException(
-                    status_code=status.HTTP_404_NOT_FOUND,
-                    detail={"code": "EVENT_NOT_FOUND", "message": f"Event '{x_event_id}' not found"},
-                )
+            global _cached_events_by_id
+            now_ts = time.time()
+            if x_event_id in _cached_events_by_id and now_ts < _cached_events_by_id[x_event_id][1]:
+                target_event = _cached_events_by_id[x_event_id][0]
+            else:
+                try:
+                    target_uuid = uuid.UUID(x_event_id)
+                    stmt = select(Event).where((Event.id == target_uuid) | (Event.code == x_event_id))
+                except ValueError:
+                    stmt = select(Event).where(Event.code == x_event_id)
+                res = await db.execute(stmt)
+                target_event = res.scalars().first()
+                if not target_event:
+                    raise HTTPException(
+                        status_code=status.HTTP_404_NOT_FOUND,
+                        detail={"code": "EVENT_NOT_FOUND", "message": f"Event '{x_event_id}' not found"},
+                    )
+                _cached_events_by_id[x_event_id] = (target_event, now_ts + 300.0)
         else:
             global _cached_default_event, _cached_default_event_exp
             now_ts = time.time()

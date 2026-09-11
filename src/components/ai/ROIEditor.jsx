@@ -9,16 +9,30 @@ import {
 } from "../../services/aiService";
 
 const ROI_TYPE_META = {
+  ENTRY_LINE: {
+    label: "Entry Gate Line (IN Only)",
+    color: "#3fb950",
+    isLine: true,
+    direction: "IN",
+    hint: "ఎంట్రీ గేట్ వద్ద 2 పాయింట్లు క్లిక్ చేసి లైన్ గీయండి. లోపలికి ప్రవేశించే భక్తులను (IN Count) మాత్రమే గణిస్తుంది.",
+  },
+  EXIT_LINE: {
+    label: "Exit Gate Line (OUT Only)",
+    color: "#f85149",
+    isLine: true,
+    direction: "OUT",
+    hint: "ఎగ్జిట్ గేట్ వద్ద 2 పాయింట్లు క్లిక్ చేసి లైన్ గీయండి. బయటకు వెళ్ళే భక్తులను (OUT Count) మాత్రమే గణిస్తుంది.",
+  },
   COUNTING_LINE: {
-    label: "Entry / Exit Counting Line",
+    label: "Two-Way Gate Line (IN & OUT)",
     color: "#bc8cff",
     isLine: true,
     direction: "BOTH",
-    hint: "గేట్ వద్ద 2 పాయింట్లు క్లిక్ చేయండి. లోపలికి వచ్చే వారిని (Entry), బయటకు వెళ్ళే వారిని (Exit) గణిస్తుంది (Bi-directional gate counting).",
+    hint: "రెండు వైపులా ప్రయాణించే గేట్ వద్ద 2 పాయింట్లు క్లిక్ చేయండి. లోపలికి వచ్చే వారిని (IN), బయటకు వెళ్ళే వారిని (OUT) రెండింటినీ గణిస్తుంది.",
   },
   CROWD_ROI: {
     label: "Zone / Crowd Area Polygon",
-    color: "#3fb950",
+    color: "#58a6ff",
     isLine: false,
     hint: "హాల్ లేదా ఆవరణ చుట్టూ 3+ పాయింట్లు క్లిక్ చేసి పాలిగాన్ బాక్స్ గీయండి. జనం సాంద్రత (Density) మరియు ఆక్యుపెన్సీని లెక్కిస్తుంది.",
   },
@@ -27,20 +41,6 @@ const ROI_TYPE_META = {
     color: "#d29922",
     isLine: false,
     hint: "క్యూ బారికేడ్ల చుట్టూ పాలిగాన్ బాక్స్ గీయండి. క్యూ లో ఉన్నవారి సంఖ్య (Headcount) మరియు వెయిటింగ్ టైమ్ లెక్కిస్తుంది.",
-  },
-  ENTRY_LINE: {
-    label: "Queue Entry Line",
-    color: "#58a6ff",
-    isLine: true,
-    direction: "IN",
-    hint: "క్యూ లైన్ మొదలయ్యే చోట (Tail) 2 పాయింట్లు క్లిక్ చేయండి. క్యూ లోకి ప్రవేశించే వారిని గణిస్తుంది.",
-  },
-  EXIT_LINE: {
-    label: "Queue Exit Line",
-    color: "#f85149",
-    isLine: true,
-    direction: "OUT",
-    hint: "క్యూ పూర్తయ్యే కౌంటర్/దర్శనం వద్ద (Head) 2 పాయింట్లు క్లిక్ చేయండి. సర్వీస్ రేట్ లెక్కిస్తుంది.",
   },
   DIRECTION_LINE: {
     label: "Queue Flow Direction Line",
@@ -93,37 +93,40 @@ export default function ROIEditor({
       if (p === "EXIT" || (p.includes("EXIT") && !p.includes("ENTRY"))) return "EXIT";
       if (p.includes("QUEUE")) return "QUEUE";
       if (p.includes("ZONE")) return "ZONE";
-      return "ENTRY";
+      return "ENTRY_EXIT";
     }
     if (profileId?.includes("QUEUE")) return "QUEUE";
     if (profileId?.includes("ZONE")) return "ZONE";
     if (profileId?.includes("EXIT")) return "EXIT";
-    return "ENTRY";
+    return "ENTRY_EXIT";
   }, [initialObjective, camera?.ai_purposes, profileId]);
 
   const [objective, setObjective] = useState(assignedObjective);
 
-  // Available tools strictly locked to assigned profile (Single tool per purpose)
-  const availableTools = useMemo(() => {
-    if (objective === "ENTRY") {
-      return ["ENTRY_LINE"];
+  // Collect all active camera purposes (supports dual functionalities)
+  const cameraPurposes = useMemo(() => {
+    if (camera?.ai_purposes && Array.isArray(camera.ai_purposes) && camera.ai_purposes.length > 0) {
+      return camera.ai_purposes.map((p) => String(p).toUpperCase());
     }
-    if (objective === "EXIT") {
-      return ["EXIT_LINE"];
-    }
-    if (objective === "ZONE") {
-      return ["CROWD_ROI"];
-    }
-    if (objective === "QUEUE") {
-      return ["QUEUE_ROI"];
-    }
-    if (objective === "ENTRY_EXIT") {
-      return ["COUNTING_LINE"];
-    }
-    return ["ENTRY_LINE"];
-  }, [objective]);
+    return [assignedObjective];
+  }, [camera?.ai_purposes, assignedObjective]);
 
-  const [activeTool, setActiveTool] = useState(initialTool || availableTools[0] || "COUNTING_LINE");
+  // Available tools: include tools for ALL active purposes on this camera
+  const availableTools = useMemo(() => {
+    const tools = new Set();
+    for (const p of cameraPurposes) {
+      if (p === "ENTRY_EXIT") tools.add("COUNTING_LINE");
+      else if (p === "ENTRY") tools.add("ENTRY_LINE");
+      else if (p === "EXIT") tools.add("EXIT_LINE");
+      else if (p === "ZONE") tools.add("CROWD_ROI");
+      else if (p === "QUEUE") tools.add("QUEUE_ROI");
+    }
+    if (initialTool) tools.add(initialTool);
+    if (tools.size === 0) tools.add("ENTRY_LINE");
+    return Array.from(tools);
+  }, [cameraPurposes, initialTool]);
+
+  const [activeTool, setActiveTool] = useState(initialTool || availableTools[0] || "ENTRY_LINE");
 
   useEffect(() => {
     setObjective(assignedObjective);
@@ -131,7 +134,7 @@ export default function ROIEditor({
 
   useEffect(() => {
     if (!availableTools.includes(activeTool)) {
-      setActiveTool(availableTools[0] || "COUNTING_LINE");
+      setActiveTool(availableTools[0] || "ENTRY_LINE");
     }
   }, [availableTools, activeTool]);
   const [currentPoints, setCurrentPoints] = useState([]); // [{x: 0..1, y: 0..1}]
@@ -342,7 +345,8 @@ export default function ROIEditor({
         setValidationStatus({ valid: false, message: "Line endpoints must be distinct. Click two different points across the gate or walkway." });
         return;
       }
-      geom = { start: currentPoints[0], end: currentPoints[1], direction };
+      const effectiveDirection = activeTool === "ENTRY_LINE" ? "IN" : (activeTool === "EXIT_LINE" ? "OUT" : (meta?.direction || direction || "BOTH"));
+      geom = { start: currentPoints[0], end: currentPoints[1], direction: effectiveDirection };
     } else {
       if (currentPoints.length < 3) {
         setValidationStatus({ valid: false, message: "Polygon requires at least 3 vertices" });
@@ -358,50 +362,21 @@ export default function ROIEditor({
       };
     }
 
-    // Check if camera already has ROIs of another purpose/model
-    const conflictingRois = (rois || []).filter((r) => {
-      if (activeTool === "ENTRY_LINE") {
-        return r.roi_type !== "ENTRY_LINE";
-      }
-      if (activeTool === "EXIT_LINE") {
-        return r.roi_type !== "EXIT_LINE";
-      }
-      if (activeTool === "QUEUE_ROI" || activeTool === "DIRECTION_LINE") {
-        return r.roi_type !== "QUEUE_ROI" && r.roi_type !== "DIRECTION_LINE";
-      }
-      if (activeTool === "CROWD_ROI" || activeTool === "ZONE_BOUNDARY") {
-        return r.roi_type !== "CROWD_ROI" && r.roi_type !== "ZONE_BOUNDARY";
-      }
-      if (activeTool === "COUNTING_LINE") {
-        return r.roi_type !== "COUNTING_LINE";
-      }
+    // For multi-purpose cameras, replace previous ROIs of the SAME specific category
+    // (e.g., a new counting line replaces previous lines, while preserving zone or queue polygons)
+    const isLine = ["COUNTING_LINE", "ENTRY_LINE", "EXIT_LINE"].includes(activeTool);
+    const isZone = ["CROWD_ROI", "ZONE_BOUNDARY"].includes(activeTool);
+    const isQueue = ["QUEUE_ROI", "DIRECTION_LINE"].includes(activeTool);
+
+    const sameCategoryRois = (rois || []).filter((r) => {
+      if (isLine) return ["COUNTING_LINE", "ENTRY_LINE", "EXIT_LINE"].includes(r.roi_type);
+      if (isZone) return ["CROWD_ROI", "ZONE_BOUNDARY"].includes(r.roi_type);
+      if (isQueue) return ["QUEUE_ROI", "DIRECTION_LINE"].includes(r.roi_type);
       return false;
     });
 
-    if (conflictingRois.length > 0) {
-      const getPurposeName = (t) => {
-        if (t === "ENTRY_LINE") return "Entry Gate (IN)";
-        if (t === "EXIT_LINE") return "Exit Gate (OUT)";
-        if (t.includes("QUEUE")) return "Queue Management";
-        if (t.includes("CROWD") || t.includes("ZONE")) return "Zone Density";
-        return "Line Counting";
-      };
-
-      const prevName = conflictingRois[0].name || conflictingRois[0].roi_type;
-      const prevPurpose = getPurposeName(conflictingRois[0].roi_type);
-      const newPurpose = getPurposeName(activeTool);
-
-      const confirmMsg =
-        `ఈ కెమెరా ఇప్పటికే "${prevPurpose}" (${prevName}) కొరకు ఉపయోగించబడుతోంది.\n\n` +
-        `ఇప్పుడు మీరు "${newPurpose}" మోడల్‌ను సెట్ చేస్తున్నారు.\n` +
-        `పాత ROI ని తీసివేసి (Remove) కొత్త కాన్ఫిగరేషన్‌ను సేవ్‌ చేయాలా?`;
-
-      if (!window.confirm(confirmMsg)) {
-        return;
-      }
-
-      // Delete conflicting previous ROIs from DB
-      for (const cr of conflictingRois) {
+    if (sameCategoryRois.length > 0) {
+      for (const cr of sameCategoryRois) {
         try {
           await deleteCameraROI(camera.id, cr.id);
         } catch (_) {}
@@ -617,19 +592,23 @@ export default function ROIEditor({
               />
               <span>
                 {objective === "ENTRY"
-                  ? "Assigned: Entry Gate (IN)"
+                  ? "Assigned: Entry Gate (IN Only)"
                   : objective === "EXIT"
-                  ? "Assigned: Exit Gate (OUT)"
+                  ? "Assigned: Exit Gate (OUT Only)"
+                  : objective === "ENTRY_EXIT"
+                  ? "Assigned: Two-Way Gate (IN & OUT)"
                   : objective === "QUEUE"
                   ? "Assigned: Queue Management"
-                  : "Assigned: Zone Density Management"}
+                  : "Assigned: Zone Density Monitoring"}
               </span>
             </div>
             <div style={{ fontSize: 10, color: "var(--cc-text-muted)", marginTop: 4, lineHeight: 1.3 }}>
               {objective === "ENTRY"
-                ? "Draw an Entry Line across the gate to count visitors entering (IN)."
+                ? "Draw an Entry Line across the gate. Visitors crossing this line will be counted as IN (+1 Entry Count)."
                 : objective === "EXIT"
-                ? "Draw an Exit Line across the gate to count visitors leaving (OUT)."
+                ? "Draw an Exit Line across the gate. Visitors crossing this line will be counted as OUT (+1 Exit Count)."
+                : objective === "ENTRY_EXIT"
+                ? "Draw a line across the gate. Visitors crossing this line in either direction will be counted (IN & OUT)."
                 : objective === "QUEUE"
                 ? "Draw a waiting queue polygon around barricades to track people waiting."
                 : "Draw a crowd density zone polygon to monitor area capacity."}
@@ -650,6 +629,11 @@ export default function ROIEditor({
                     key={tool}
                     onClick={() => {
                       setActiveTool(tool);
+                      if (tool === "COUNTING_LINE") setObjective("ENTRY_EXIT");
+                      else if (tool === "ENTRY_LINE") setObjective("ENTRY");
+                      else if (tool === "EXIT_LINE") setObjective("EXIT");
+                      else if (tool === "CROWD_ROI") setObjective("ZONE");
+                      else if (tool === "QUEUE_ROI") setObjective("QUEUE");
                       handleReset();
                     }}
                     style={{

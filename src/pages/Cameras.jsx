@@ -28,49 +28,49 @@ const PURPOSE_NAMES = {
 
 const PURPOSE_META = {
   ENTRY: {
-    label: "Entry Gate (IN)",
+    label: "Entry Gate (IN Only)",
     icon: "bi-box-arrow-in-right",
     color: "#3fb950",
     profile_id: "CROWD_STANDARD",
-    profile_name: "Entry Footfall Line",
+    profile_name: "Entry Gate Line",
     initial_tool: "ENTRY_LINE",
-    description: "Counts visitors entering (IN count)",
+    description: "Counts visitors entering (+1 IN count)",
   },
   EXIT: {
-    label: "Exit Gate (OUT)",
+    label: "Exit Gate (OUT Only)",
     icon: "bi-box-arrow-right",
     color: "#f85149",
     profile_id: "CROWD_STANDARD",
-    profile_name: "Exit Footfall Line",
+    profile_name: "Exit Gate Line",
     initial_tool: "EXIT_LINE",
-    description: "Counts visitors leaving (OUT count)",
+    description: "Counts visitors leaving (+1 OUT count)",
+  },
+  ENTRY_EXIT: {
+    label: "Two-Way Gate (IN & OUT)",
+    icon: "bi-arrow-left-right",
+    color: "#bc8cff",
+    profile_id: "CROWD_STANDARD",
+    profile_name: "Two-Way Counting Line",
+    initial_tool: "COUNTING_LINE",
+    description: "In/Out 2-way gate line crossing & counting",
+  },
+  ZONE: {
+    label: "Zone Density Monitoring",
+    icon: "bi-bounding-box",
+    color: "#58a6ff",
+    profile_id: "CROWD_STANDARD",
+    profile_name: "Crowd Density Zone",
+    initial_tool: "CROWD_ROI",
+    description: "Overcrowding risk & density monitoring",
   },
   QUEUE: {
     label: "Queue Management",
     icon: "bi-people",
     color: "#d29922",
     profile_id: "QUEUE_STANDARD",
-    profile_name: "Queue Area Waiting Zone",
+    profile_name: "Queue Waiting Zone",
     initial_tool: "QUEUE_ROI",
     description: "Barricade queue depth & waiting time tracking",
-  },
-  ZONE: {
-    label: "Zone Management",
-    icon: "bi-bounding-box",
-    color: "#bc8cff",
-    profile_id: "CROWD_STANDARD",
-    profile_name: "Crowd Density Zone",
-    initial_tool: "CROWD_ROI",
-    description: "Overcrowding risk & density monitoring",
-  },
-  ENTRY_EXIT: {
-    label: "Entry/Exit Counting",
-    icon: "bi-arrow-left-right",
-    color: "#3fb950",
-    profile_id: "CROWD_STANDARD",
-    profile_name: "Footfall Counting Line",
-    initial_tool: "ENTRY_LINE",
-    description: "In/Out line crossing & footfall counting",
   },
 };
 
@@ -93,10 +93,10 @@ export default function Cameras() {
   const [gridCols, setGridCols] = useState(3);
   const [showAddModal, setShowAddModal] = useState(false);
   const [addForm, setAddForm] = useState({
-    name: "Khairatabad Gate FRS Camera",
+    name: "Entry Gate 1 Camera",
     rtsp_url: DEFAULT_RTSP,
-    camera_type: "FRS",
-    is_frs: true,
+    camera_type: "CROWD",
+    is_frs: false,
     ai_purposes: ["ENTRY"],
     zone_code: "ZONE-A",
   });
@@ -110,12 +110,7 @@ export default function Cameras() {
   const [reassignSelectModal, setReassignSelectModal] = useState({
     open: false,
     camera: null,
-  });
-  const [reassignConfirmModal, setReassignConfirmModal] = useState({
-    open: false,
-    camera: null,
-    currentPurpose: "",
-    targetPurpose: "",
+    selectedPurposes: ["ENTRY"],
   });
   const [reassignLoading, setReassignLoading] = useState(false);
 
@@ -246,69 +241,63 @@ export default function Cameras() {
     };
   }, [loadDbCameras, loadEngineCameras]);
 
-  // Build isolated FRS and Crowd cameras from physical DB cameras
-  const frsList = [];
-  const crowdList = [];
+  // Build list of active working streams ONLY (no dummy screens, no offline placeholders)
+  const activeStreamsMap = new Map();
 
-  if (dbCameras.length > 0) {
-    for (const cam of dbCameras) {
-      // Check if engine is actively streaming for this physical camera
-      const matchingEngineCam = engineCameras.find(
-        (eng) =>
-          eng.id === cam.camera_code ||
-          eng.camera_code === cam.camera_code ||
-          eng.id === cam.id ||
-          (engineCameras.length === 1 && eng.status === "online")
-      );
-      const isEngineStreaming = Boolean(matchingEngineCam && matchingEngineCam.status === "online");
-      const isEngineFrs = isEngineStreaming && Boolean(matchingEngineCam.is_frs || matchingEngineCam.camera_type === "FRS");
-      const isEngineCrowd = isEngineStreaming && !isEngineFrs;
-
-      const isFrsActive = cam.ai_mode === "FRS_ACTIVE" || (cam.is_frs_camera && cam.frs_status === "RUNNING") || isEngineFrs;
-      const isCrowdActive = (cam.ai_mode === "CROWD_ACTIVE" || (!cam.is_frs_camera && cam.crowd_status === "RUNNING") || isEngineCrowd) && !isFrsActive;
-
-      frsList.push({
-        ...cam,
-        id: cam.logical_id_frs || `${cam.camera_code}-FRS`,
-        camera_code: cam.camera_code,
-        name: `${cam.name} (FRS)`,
-        label: `${cam.label || cam.name} [Facial Recognition]`,
-        is_frs: true,
-        is_frs_camera: true,
-        camera_type: "FRS",
-        status: isFrsActive ? "online" : "stopped",
-        is_running: isFrsActive,
-        stream_url: isFrsActive ? `/api/v1/frs-engine/cameras/${cam.camera_code}/stream` : null,
-        fps: isFrsActive ? (cam.fps || 25) : 0,
+  // 1. Live RTSP engine workers actively running
+  for (const eng of engineCameras) {
+    if (eng.status === "online" || eng.stream_url) {
+      const isFrs = Boolean(eng.is_frs || eng.camera_type === "FRS");
+      const camId = eng.camera_id || eng.id;
+      activeStreamsMap.set(camId, {
+        id: camId,
+        camera_code: camId,
+        name: eng.name || camId,
+        label: eng.name || camId,
+        status: "online",
+        is_frs: isFrs,
+        is_frs_camera: isFrs,
+        camera_type: isFrs ? "FRS" : "CROWD",
+        stream_url: eng.stream_url,
+        fps: 25,
+        zone_code: eng.zone_code || "ZONE-A",
+        detections_count: eng.detections_count || 0,
+        ai_purposes: eng.ai_purposes || (isFrs ? [] : ["ENTRY_EXIT", "ZONE"]),
+        is_running: true,
       });
-
-      crowdList.push({
-        ...cam,
-        id: cam.logical_id_crowd || `${cam.camera_code}-CROWD`,
-        camera_code: cam.camera_code,
-        name: `${cam.name} (Crowd)`,
-        label: `${cam.label || cam.name} [Crowd Surveillance]`,
-        is_frs: false,
-        is_frs_camera: false,
-        camera_type: "CROWD",
-        status: isCrowdActive ? "online" : "stopped",
-        is_running: isCrowdActive,
-        stream_url: isCrowdActive ? `/api/v1/frs-engine/cameras/${cam.camera_code}-CROWD/stream` : null,
-        fps: isCrowdActive ? (cam.fps || 25) : 0,
-        ai_purposes: matchingEngineCam?.ai_purposes || cam.ai_purposes || ["ENTRY_EXIT", "ZONE"],
-      });
-    }
-  } else if (engineCameras.length > 0) {
-    for (const eng of engineCameras) {
-      if (eng.is_frs) {
-        frsList.push(eng);
-      } else {
-        crowdList.push(eng);
-      }
     }
   }
 
-  // Apply search filter if any
+  // 2. Synchronize with database cameras if matching active stream
+  for (const cam of dbCameras) {
+    const camKey = cam.camera_code || cam.id;
+    if (activeStreamsMap.has(camKey)) {
+      const existing = activeStreamsMap.get(camKey);
+      activeStreamsMap.set(camKey, {
+        ...existing,
+        name: cam.name || existing.name,
+        label: cam.label || existing.label,
+        zone: cam.zone || existing.zone_code,
+      });
+    } else if (cam.stream_status === "ONLINE" && cam.rtsp_url) {
+      const isFrs = Boolean(cam.is_frs_camera || cam.camera_type === "FRS");
+      activeStreamsMap.set(camKey, {
+        ...cam,
+        id: camKey,
+        camera_code: camKey,
+        is_frs: isFrs,
+        is_frs_camera: isFrs,
+        camera_type: isFrs ? "FRS" : "CROWD",
+        status: "online",
+        is_running: true,
+        stream_url: `/api/v1/frs-engine/cameras/${camKey}/stream`,
+        fps: cam.fps || 25,
+        ai_purposes: cam.ai_purposes || (isFrs ? [] : ["ENTRY_EXIT", "ZONE"]),
+      });
+    }
+  }
+
+  // Apply search filter
   const filterBySearch = (cam) => {
     if (!search.trim()) return true;
     const q = search.toLowerCase();
@@ -319,9 +308,9 @@ export default function Cameras() {
     );
   };
 
-  const frsCameras = frsList.filter(filterBySearch);
-  const crowdCameras = crowdList.filter(filterBySearch);
-  const allWorkingCameras = [...frsCameras, ...crowdCameras];
+  const allWorkingCameras = Array.from(activeStreamsMap.values()).filter(filterBySearch);
+  const frsCameras = allWorkingCameras.filter((c) => c.is_frs || c.camera_type === "FRS");
+  const crowdCameras = allWorkingCameras.filter((c) => !c.is_frs && c.camera_type !== "FRS");
 
   const handleAddCamera = async () => {
     if (!addForm.rtsp_url.trim()) {
@@ -352,10 +341,10 @@ export default function Cameras() {
             camera_code: data.camera_id,
             stream_url: data.stream_url,
             name: data.name,
-            ai_purposes: addForm.ai_purposes || ["ENTRY_EXIT"],
+            ai_purposes: addForm.ai_purposes || ["ENTRY"],
           };
-          const firstPurpose = (addForm.ai_purposes && addForm.ai_purposes[0]) || "ENTRY_EXIT";
-          const meta = PURPOSE_META[firstPurpose] || PURPOSE_META.ENTRY_EXIT;
+          const firstPurpose = (addForm.ai_purposes && addForm.ai_purposes[0]) || "ENTRY";
+          const meta = PURPOSE_META[firstPurpose] || PURPOSE_META.ENTRY;
           setActiveROIEditor({
             camera: createdCam,
             profile_id: meta.profile_id,
@@ -365,10 +354,10 @@ export default function Cameras() {
           });
         }
         setAddForm({
-          name: "Khairatabad Gate FRS Camera",
+          name: "Entry Gate 1 Camera",
           rtsp_url: DEFAULT_RTSP,
-          camera_type: "FRS",
-          is_frs: true,
+          camera_type: "CROWD",
+          is_frs: false,
           ai_purposes: ["ENTRY"],
           zone_code: "ZONE-A",
         });
@@ -411,60 +400,64 @@ export default function Cameras() {
   };
 
   const handleOpenReassign = (camera) => {
-
+    const existing = (Array.isArray(camera.ai_purposes) && camera.ai_purposes.length > 0)
+      ? camera.ai_purposes
+      : ["ENTRY_EXIT"];
     setReassignSelectModal({
       open: true,
       camera: camera,
+      selectedPurposes: existing,
     });
   };
 
-  const handleSelectTargetPurpose = (targetPurpose) => {
-    const cam = reassignSelectModal.camera;
-    if (!cam) return;
-    const currentPurp = (cam.ai_purposes && cam.ai_purposes[0]) || "ENTRY_EXIT";
-    if (currentPurp === targetPurpose) {
-      setReassignSelectModal({ open: false, camera: null });
-      return;
-    }
-    setReassignSelectModal({ open: false, camera: null });
-    setReassignConfirmModal({
-      open: true,
-      camera: cam,
-      currentPurpose: currentPurp,
-      targetPurpose: targetPurpose,
+  const handleToggleReassignPurpose = (purposeKey) => {
+    setReassignSelectModal((prev) => {
+      const curr = prev.selectedPurposes || [];
+      if (curr.includes(purposeKey)) {
+        if (curr.length <= 1) return prev; // keep at least 1
+        return { ...prev, selectedPurposes: curr.filter((p) => p !== purposeKey) };
+      } else {
+        if (curr.length >= 2) {
+          return { ...prev, selectedPurposes: [curr[1], purposeKey] };
+        }
+        return { ...prev, selectedPurposes: [...curr, purposeKey] };
+      }
     });
   };
 
   const handleConfirmReassign = async () => {
-    const { camera, targetPurpose } = reassignConfirmModal;
-    if (!camera || !targetPurpose) return;
+    const cam = reassignSelectModal.camera;
+    const targetPurposes = reassignSelectModal.selectedPurposes || ["ENTRY_EXIT"];
+    if (!cam || targetPurposes.length === 0) return;
     setReassignLoading(true);
     try {
-      const camCode = camera.camera_code || camera.id.replace("-CROWD", "").replace("-FRS", "");
-      const res = await fetch(`${BACKEND}/api/v1/frs-engine/cameras/${camCode}/reassign-purpose?new_purpose=${targetPurpose}`, {
+      const camCode = cam.camera_code || cam.id.replace("-CROWD", "").replace("-FRS", "");
+      const purpParam = targetPurposes.join(",");
+      const res = await fetch(`${BACKEND}/api/v1/frs-engine/cameras/${camCode}/reassign-purpose?new_purpose=${purpParam}`, {
         method: "PATCH",
       });
       if (!res.ok) {
         const err = await res.json().catch(() => ({}));
-        alert(err.detail || "Failed to reassign camera purpose");
+        alert(err.detail || "Failed to reassign camera purposes");
         return;
       }
 
       await Promise.all([loadDbCameras(), loadEngineCameras()]);
 
-      if (fullscreenCamera && (fullscreenCamera.id === camera.id || fullscreenCamera.camera_code === camCode)) {
-        setFullscreenCamera((prev) => (prev ? { ...prev, ai_purposes: [targetPurpose] } : null));
+      if (fullscreenCamera && (fullscreenCamera.id === cam.id || fullscreenCamera.camera_code === camCode)) {
+        setFullscreenCamera((prev) => (prev ? { ...prev, ai_purposes: targetPurposes } : null));
       }
 
-      setReassignConfirmModal({ open: false, camera: null, currentPurpose: "", targetPurpose: "" });
+      setReassignSelectModal({ open: false, camera: null, selectedPurposes: [] });
 
-      const meta = PURPOSE_META[targetPurpose] || PURPOSE_META.ENTRY_EXIT;
+      const firstPurp = targetPurposes[0] || "ENTRY_EXIT";
+      const meta = PURPOSE_META[firstPurp] || PURPOSE_META.ENTRY_EXIT;
       setActiveROIEditor({
-        camera: { ...camera, ai_purposes: [targetPurpose] },
+        camera: { ...cam, ai_purposes: targetPurposes },
         profile_id: meta.profile_id,
         profile_name: meta.profile_name,
         initial_tool: meta.initial_tool,
-        initial_objective: targetPurpose,
+        initial_objective: firstPurp,
       });
     } catch (err) {
       console.error("Failed to reassign camera purpose:", err);
@@ -732,6 +725,51 @@ export default function Cameras() {
 
       {loading ? (
         <LoadingState message="Loading live operational cameras..." />
+      ) : allWorkingCameras.length === 0 ? (
+        <div
+          className="cc-card"
+          style={{
+            textAlign: "center",
+            padding: "60px 24px",
+            display: "flex",
+            flexDirection: "column",
+            alignItems: "center",
+            gap: 16,
+            background: "var(--cc-bg-secondary)",
+            border: "1px solid var(--cc-border)",
+            borderRadius: "var(--cc-radius)",
+          }}
+        >
+          <div
+            style={{
+              width: 64,
+              height: 64,
+              borderRadius: "50%",
+              background: "rgba(88, 166, 255, 0.1)",
+              border: "1px solid rgba(88, 166, 255, 0.25)",
+              display: "flex",
+              alignItems: "center",
+              justifyContent: "center",
+            }}
+          >
+            <i className="bi bi-camera-video-off" style={{ fontSize: 30, color: "var(--cc-accent)" }} />
+          </div>
+          <div>
+            <div style={{ fontSize: 17, fontWeight: 700, color: "var(--cc-text-primary)", marginBottom: 6 }}>
+              No Active RTSP Cameras Connected
+            </div>
+            <div style={{ fontSize: 13, color: "var(--cc-text-muted)", maxWidth: 480, lineHeight: 1.5 }}>
+              Placeholder and dummy screens have been removed. Connect your RTSP stream URL to immediately launch live streaming with Multi-Purpose Crowd AI (Entry/Exit, Zone Density, Queue).
+            </div>
+          </div>
+          <button
+            className="cc-btn cc-btn-primary"
+            onClick={() => setShowAddModal(true)}
+            style={{ padding: "9px 20px", fontSize: 13, display: "flex", alignItems: "center", gap: 8, marginTop: 4 }}
+          >
+            <i className="bi bi-plus-circle-fill" /> Connect Live RTSP Stream
+          </button>
+        </div>
       ) : (
         <div style={{ display: "flex", flexDirection: "column", gap: 24 }}>
           {/* ============================================================ */}
@@ -934,166 +972,120 @@ export default function Cameras() {
                 </div>
               </div>
 
-              {/* If Crowd Camera is chosen: Single-Choice Purpose Profile */}
+              {/* If Crowd Camera is chosen: Multi-Choice Purpose Profile (Up to 2) */}
               {addForm.camera_type === "CROWD" && (
                 <div style={{ background: "rgba(15, 23, 42, 0.75)", padding: 12, borderRadius: 8, border: "1px solid var(--cc-border)" }}>
                   <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", marginBottom: 8 }}>
                     <div className="cc-label" style={{ marginBottom: 0, color: "var(--cc-text-primary)", fontWeight: 700 }}>
-                      Camera Purpose / Profile (Single Selection):
+                      Crowd Functionalities (Select 1 or 2):
                     </div>
-                    <span style={{ fontSize: 10, color: "var(--cc-accent)" }}>
-                      1 Profile Active per Camera
+                    <span style={{ fontSize: 10, color: (addForm.ai_purposes?.length || 0) === 2 ? "var(--cc-green)" : "var(--cc-accent)", fontWeight: 700 }}>
+                      {addForm.ai_purposes?.length || 0}/2 Active
                     </span>
                   </div>
 
-                  <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 8 }}>
-                    {/* 1. Entry Gate (IN) */}
-                    <div
-                      onClick={() => setAddForm((f) => ({ ...f, ai_purposes: ["ENTRY"] }))}
-                      style={{
-                        padding: "8px 10px",
-                        borderRadius: 6,
-                        cursor: "pointer",
-                        border: (addForm.ai_purposes?.[0] === "ENTRY")
-                          ? "2px solid #3fb950"
-                          : "1px solid var(--cc-border)",
-                        background: (addForm.ai_purposes?.[0] === "ENTRY")
-                          ? "rgba(63, 185, 80, 0.15)"
-                          : "transparent",
-                        transition: "all 0.15s ease",
-                        display: "flex",
-                        flexDirection: "column",
-                        gap: 4,
-                      }}
-                    >
-                      <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between" }}>
-                        <div style={{ display: "flex", alignItems: "center", gap: 6, fontWeight: 700, fontSize: 11, color: (addForm.ai_purposes?.[0] === "ENTRY") ? "#3fb950" : "var(--cc-text-primary)" }}>
-                          <i className="bi bi-box-arrow-in-right" />
-                          <span>Entry Gate (IN)</span>
+                  <div style={{ display: "grid", gridTemplateColumns: "1fr", gap: 8 }}>
+                    {[
+                      {
+                        key: "ENTRY",
+                        title: "1. Entry Gate (IN Only)",
+                        icon: "bi-box-arrow-in-right",
+                        color: "#3fb950",
+                        desc: "ఎంట్రీ గేట్ వద్ద లోపలికి వచ్చే భక్తులను మాత్రమే లెక్కిస్తుంది (Dedicated Entry Gate Camera)",
+                      },
+                      {
+                        key: "EXIT",
+                        title: "2. Exit Gate (OUT Only)",
+                        icon: "bi-box-arrow-right",
+                        color: "#f85149",
+                        desc: "ఎగ్జిట్ గేట్ వద్ద బయటకు వెళ్ళే భక్తులను మాత్రమే లెక్కిస్తుంది (Dedicated Exit Gate Camera)",
+                      },
+                      {
+                        key: "ENTRY_EXIT",
+                        title: "3. Two-Way Gate (IN & OUT)",
+                        icon: "bi-arrow-left-right",
+                        color: "#bc8cff",
+                        desc: "రెండు వైపులా ప్రయాణించే గేట్ వద్ద IN & OUT రెండింటినీ లెక్కిస్తుంది (Bi-directional)",
+                      },
+                      {
+                        key: "ZONE",
+                        title: "4. Zone Density Monitoring",
+                        icon: "bi-bounding-box",
+                        color: "#58a6ff",
+                        desc: "ఆవరణ లేదా మండపంలో జనం సాంద్రత (Density) & Capacity % లెక్కిస్తుంది",
+                      },
+                      {
+                        key: "QUEUE",
+                        title: "5. Queue Management",
+                        icon: "bi-people",
+                        color: "#d29922",
+                        desc: "క్యూ లైన్ బారికేడ్లలో భక్తుల సంఖ్య & కదలిక వేగం ట్రాక్ చేస్తుంది",
+                      },
+                    ].map((item) => {
+                      const isChecked = (addForm.ai_purposes || []).includes(item.key);
+                      return (
+                        <div
+                          key={item.key}
+                          onClick={() => {
+                            setAddForm((prev) => {
+                              const curr = prev.ai_purposes || [];
+                              let next = [];
+                              if (curr.includes(item.key)) {
+                                if (curr.length <= 1) return prev; // keep at least 1
+                                next = curr.filter((k) => k !== item.key);
+                              } else {
+                                if (curr.length >= 2) {
+                                  next = [curr[1], item.key];
+                                } else {
+                                  next = [...curr, item.key];
+                                }
+                              }
+                              let autoName = prev.name;
+                              if (!autoName || autoName.includes("Gate") || autoName.includes("Camera")) {
+                                if (next.includes("ENTRY") && !next.includes("EXIT")) autoName = "North Entry Gate Camera";
+                                else if (next.includes("EXIT") && !next.includes("ENTRY")) autoName = "South Exit Gate Camera";
+                                else if (next.includes("ZONE")) autoName = "Main Pandal Zone Camera";
+                                else if (next.includes("QUEUE")) autoName = "Darshan Queue Camera";
+                              }
+                              return { ...prev, ai_purposes: next, name: autoName };
+                            });
+                          }}
+                          style={{
+                            padding: "8px 12px",
+                            borderRadius: 6,
+                            cursor: "pointer",
+                            border: isChecked ? `2px solid ${item.color}` : "1px solid var(--cc-border)",
+                            background: isChecked ? `${item.color}18` : "transparent",
+                            transition: "all 0.15s ease",
+                            display: "flex",
+                            alignItems: "center",
+                            justifyContent: "space-between",
+                          }}
+                        >
+                          <div style={{ display: "flex", alignItems: "center", gap: 10 }}>
+                            <i className={`bi ${item.icon}`} style={{ fontSize: 16, color: isChecked ? item.color : "var(--cc-text-muted)" }} />
+                            <div>
+                              <div style={{ fontWeight: 700, fontSize: 12, color: isChecked ? item.color : "var(--cc-text-primary)" }}>
+                                {item.title}
+                              </div>
+                              <div style={{ fontSize: 10, color: "var(--cc-text-muted)" }}>
+                                {item.desc}
+                              </div>
+                            </div>
+                          </div>
+                          <input
+                            type="checkbox"
+                            checked={isChecked}
+                            onChange={() => {}}
+                            style={{ width: 16, height: 16, accentColor: item.color, cursor: "pointer" }}
+                          />
                         </div>
-                        <input
-                          type="radio"
-                          name="crowd_purpose_radio"
-                          checked={addForm.ai_purposes?.[0] === "ENTRY"}
-                          onChange={() => setAddForm((f) => ({ ...f, ai_purposes: ["ENTRY"] }))}
-                          style={{ cursor: "pointer", accentColor: "#3fb950" }}
-                        />
-                      </div>
-                      <span style={{ fontSize: 9.5, color: "var(--cc-text-muted)", lineHeight: 1.3 }}>
-                        Counts visitors entering (IN only)
-                      </span>
-                    </div>
-
-                    {/* 2. Exit Gate (OUT) */}
-                    <div
-                      onClick={() => setAddForm((f) => ({ ...f, ai_purposes: ["EXIT"] }))}
-                      style={{
-                        padding: "8px 10px",
-                        borderRadius: 6,
-                        cursor: "pointer",
-                        border: (addForm.ai_purposes?.[0] === "EXIT")
-                          ? "2px solid #f85149"
-                          : "1px solid var(--cc-border)",
-                        background: (addForm.ai_purposes?.[0] === "EXIT")
-                          ? "rgba(248, 81, 73, 0.15)"
-                          : "transparent",
-                        transition: "all 0.15s ease",
-                        display: "flex",
-                        flexDirection: "column",
-                        gap: 4,
-                      }}
-                    >
-                      <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between" }}>
-                        <div style={{ display: "flex", alignItems: "center", gap: 6, fontWeight: 700, fontSize: 11, color: (addForm.ai_purposes?.[0] === "EXIT") ? "#f85149" : "var(--cc-text-primary)" }}>
-                          <i className="bi bi-box-arrow-right" />
-                          <span>Exit Gate (OUT)</span>
-                        </div>
-                        <input
-                          type="radio"
-                          name="crowd_purpose_radio"
-                          checked={addForm.ai_purposes?.[0] === "EXIT"}
-                          onChange={() => setAddForm((f) => ({ ...f, ai_purposes: ["EXIT"] }))}
-                          style={{ cursor: "pointer", accentColor: "#f85149" }}
-                        />
-                      </div>
-                      <span style={{ fontSize: 9.5, color: "var(--cc-text-muted)", lineHeight: 1.3 }}>
-                        Counts visitors leaving (OUT only)
-                      </span>
-                    </div>
-
-                    {/* 3. Queue Area */}
-                    <div
-                      onClick={() => setAddForm((f) => ({ ...f, ai_purposes: ["QUEUE"] }))}
-                      style={{
-                        padding: "8px 10px",
-                        borderRadius: 6,
-                        cursor: "pointer",
-                        border: (addForm.ai_purposes?.[0] === "QUEUE")
-                          ? "2px solid #d29922"
-                          : "1px solid var(--cc-border)",
-                        background: (addForm.ai_purposes?.[0] === "QUEUE")
-                          ? "rgba(210, 153, 34, 0.15)"
-                          : "transparent",
-                        transition: "all 0.15s ease",
-                        display: "flex",
-                        flexDirection: "column",
-                        gap: 4,
-                      }}
-                    >
-                      <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between" }}>
-                        <div style={{ display: "flex", alignItems: "center", gap: 6, fontWeight: 700, fontSize: 11, color: (addForm.ai_purposes?.[0] === "QUEUE") ? "#d29922" : "var(--cc-text-primary)" }}>
-                          <i className="bi bi-people" />
-                          <span>Queue Area</span>
-                        </div>
-                        <input
-                          type="radio"
-                          name="crowd_purpose_radio"
-                          checked={addForm.ai_purposes?.[0] === "QUEUE"}
-                          onChange={() => setAddForm((f) => ({ ...f, ai_purposes: ["QUEUE"] }))}
-                          style={{ cursor: "pointer", accentColor: "#d29922" }}
-                        />
-                      </div>
-                      <span style={{ fontSize: 9.5, color: "var(--cc-text-muted)", lineHeight: 1.3 }}>
-                        Barricade wait times & depth
-                      </span>
-                    </div>
-
-                    {/* 4. Zone Density */}
-                    <div
-                      onClick={() => setAddForm((f) => ({ ...f, ai_purposes: ["ZONE"] }))}
-                      style={{
-                        padding: "8px 10px",
-                        borderRadius: 6,
-                        cursor: "pointer",
-                        border: (addForm.ai_purposes?.[0] === "ZONE")
-                          ? "2px solid #bc8cff"
-                          : "1px solid var(--cc-border)",
-                        background: (addForm.ai_purposes?.[0] === "ZONE")
-                          ? "rgba(188, 140, 255, 0.15)"
-                          : "transparent",
-                        transition: "all 0.15s ease",
-                        display: "flex",
-                        flexDirection: "column",
-                        gap: 4,
-                      }}
-                    >
-                      <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between" }}>
-                        <div style={{ display: "flex", alignItems: "center", gap: 6, fontWeight: 700, fontSize: 11, color: (addForm.ai_purposes?.[0] === "ZONE") ? "#bc8cff" : "var(--cc-text-primary)" }}>
-                          <i className="bi bi-bounding-box" />
-                          <span>Zone Density</span>
-                        </div>
-                        <input
-                          type="radio"
-                          name="crowd_purpose_radio"
-                          checked={addForm.ai_purposes?.[0] === "ZONE"}
-                          onChange={() => setAddForm((f) => ({ ...f, ai_purposes: ["ZONE"] }))}
-                          style={{ cursor: "pointer", accentColor: "#bc8cff" }}
-                        />
-                      </div>
-                      <span style={{ fontSize: 9.5, color: "var(--cc-text-muted)", lineHeight: 1.3 }}>
-                        Area density & surge alerts
-                      </span>
-                    </div>
+                      );
+                    })}
+                  </div>
+                  <div style={{ fontSize: 10, color: "var(--cc-text-muted)", marginTop: 8 }}>
+                    <i className="bi bi-info-circle" style={{ marginRight: 4 }} />
+                    Single camera can run <strong>up to 2 functionalities</strong> concurrently (e.g. Entry Gate + Zone Density, or Exit Gate + Queue).
                   </div>
                 </div>
               )}
@@ -1498,40 +1490,72 @@ export default function Cameras() {
                   </button>
                 </div>
               ) : (() => {
-                const curPurp = (fullscreenCamera.ai_purposes && fullscreenCamera.ai_purposes[0]) || "ENTRY_EXIT";
-                const curMeta = PURPOSE_META[curPurp] || PURPOSE_META.ENTRY_EXIT;
+                const purps = (fullscreenCamera.ai_purposes && fullscreenCamera.ai_purposes.length > 0)
+                  ? fullscreenCamera.ai_purposes
+                  : ["ENTRY_EXIT"];
                 return (
                   <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: 12, flex: 1, flexWrap: "wrap" }}>
-                    <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
-                      <span style={{ fontSize: 12, fontWeight: 700, color: curMeta.color, display: "flex", alignItems: "center", gap: 6 }}>
-                        <i className={`bi ${curMeta.icon}`} /> Assigned: {curMeta.label}
-                      </span>
-                      <span style={{ fontSize: 11, color: "var(--cc-text-muted)" }}>
-                        {curMeta.description}
-                      </span>
+                    <div style={{ display: "flex", alignItems: "center", gap: 8, flexWrap: "wrap" }}>
+                      {purps.map((pKey) => {
+                        const m = PURPOSE_META[pKey] || PURPOSE_META.ENTRY_EXIT;
+                        return (
+                          <span
+                            key={pKey}
+                            style={{
+                              fontSize: 12,
+                              fontWeight: 700,
+                              color: m.color,
+                              display: "flex",
+                              alignItems: "center",
+                              gap: 6,
+                              padding: "3px 8px",
+                              borderRadius: 4,
+                              background: "rgba(0,0,0,0.4)",
+                              border: `1px solid ${m.color}44`,
+                            }}
+                          >
+                            <i className={`bi ${m.icon}`} /> {m.label}
+                          </span>
+                        );
+                      })}
                     </div>
-                    <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
-                      <button
-                        className="cc-btn cc-btn-secondary"
-                        style={{ fontSize: 11, padding: "5px 12px", borderColor: curMeta.color, color: curMeta.color, display: "flex", alignItems: "center", gap: 6, fontWeight: 600 }}
-                        onClick={() => setActiveROIEditor({
-                          camera: fullscreenCamera,
-                          profile_id: curMeta.profile_id,
-                          profile_name: curMeta.profile_name,
-                          initial_tool: curMeta.initial_tool,
-                          initial_objective: curPurp,
-                        })}
-                        title={`Configure ROI / Lines for ${curMeta.label}`}
-                      >
-                        <i className="bi bi-vector-pen" /> Configure {curMeta.label} ROI
-                      </button>
+                    <div style={{ display: "flex", alignItems: "center", gap: 8, flexWrap: "wrap" }}>
+                      {purps.map((pKey) => {
+                        const m = PURPOSE_META[pKey] || PURPOSE_META.ENTRY_EXIT;
+                        return (
+                          <button
+                            key={pKey}
+                            className="cc-btn cc-btn-secondary"
+                            style={{
+                              fontSize: 11,
+                              padding: "5px 12px",
+                              borderColor: m.color,
+                              color: m.color,
+                              display: "flex",
+                              alignItems: "center",
+                              gap: 6,
+                              fontWeight: 600,
+                            }}
+                            onClick={() => setActiveROIEditor({
+                              camera: fullscreenCamera,
+                              profile_id: m.profile_id,
+                              profile_name: m.profile_name,
+                              initial_tool: m.initial_tool,
+                              initial_objective: pKey,
+                            })}
+                            title={`Configure ROI / Lines for ${m.label}`}
+                          >
+                            <i className="bi bi-vector-pen" /> Configure {m.label} ROI
+                          </button>
+                        );
+                      })}
                       <button
                         className="cc-btn"
                         style={{ fontSize: 11, padding: "5px 12px", borderColor: "rgba(227, 179, 65, 0.5)", color: "#e3b341", background: "rgba(227, 179, 65, 0.12)", display: "flex", alignItems: "center", gap: 6, fontWeight: 600 }}
                         onClick={() => handleOpenReassign(fullscreenCamera)}
                         title="Switch this camera to another purpose (Entry/Exit, Queue, Zone)"
                       >
-                        <i className="bi bi-arrow-repeat" /> Switch Purpose
+                        <i className="bi bi-arrow-repeat" /> Switch Functionalities
                       </button>
                       <button
                         className="cc-btn"
@@ -1601,39 +1625,79 @@ export default function Cameras() {
             padding: 16,
           }}
         >
-          <div className="cc-card" style={{ width: 500, maxWidth: "95vw", padding: 22, position: "relative", border: "1px solid var(--cc-border)" }}>
+          <div className="cc-card" style={{ width: 520, maxWidth: "95vw", padding: 22, position: "relative", border: "1px solid var(--cc-border)" }}>
             <button
-              onClick={() => setReassignSelectModal({ open: false, camera: null })}
+              onClick={() => setReassignSelectModal({ open: false, camera: null, selectedPurposes: [] })}
               style={{ position: "absolute", top: 14, right: 14, background: "none", border: "none", color: "var(--cc-text-muted)", fontSize: 18, cursor: "pointer" }}
             >
               <i className="bi bi-x-lg" />
             </button>
             <div className="cc-section-title" style={{ marginBottom: 4, display: "flex", alignItems: "center", gap: 8 }}>
               <i className="bi bi-arrow-repeat" style={{ color: "#e3b341" }} />
-              <span>Switch Camera Purpose</span>
+              <span>Configure Crowd Functionalities</span>
             </div>
-            <div style={{ fontSize: 11, color: "var(--cc-text-muted)", marginBottom: 16 }}>
+            <div style={{ fontSize: 11, color: "var(--cc-text-muted)", marginBottom: 14 }}>
               Camera: <strong style={{ color: "var(--cc-text-primary)" }}>{reassignSelectModal.camera.name || reassignSelectModal.camera.id}</strong> ({reassignSelectModal.camera.camera_code || reassignSelectModal.camera.id})
             </div>
 
-            <div style={{ display: "flex", flexDirection: "column", gap: 10, marginBottom: 18 }}>
-              {["ENTRY", "EXIT", "QUEUE", "ZONE"].map((purposeKey) => {
-                const meta = PURPOSE_META[purposeKey];
-                const currentPurp = (reassignSelectModal.camera.ai_purposes && reassignSelectModal.camera.ai_purposes[0]) || "ENTRY";
-                const isCurrent = currentPurp === purposeKey;
+            <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", marginBottom: 10, padding: "8px 12px", background: "rgba(227, 179, 65, 0.08)", border: "1px solid rgba(227, 179, 65, 0.25)", borderRadius: 6 }}>
+              <span style={{ fontSize: 11, color: "var(--cc-yellow)", fontWeight: 700 }}>
+                Select 1 or 2 Functionalities:
+              </span>
+              <span style={{ fontSize: 10, color: (reassignSelectModal.selectedPurposes?.length || 0) === 2 ? "var(--cc-green)" : "var(--cc-yellow)", fontWeight: 800 }}>
+                {reassignSelectModal.selectedPurposes?.length || 0}/2 Selected
+              </span>
+            </div>
 
+            <div style={{ display: "flex", flexDirection: "column", gap: 10, marginBottom: 18 }}>
+              {[
+                {
+                  key: "ENTRY",
+                  title: "1. Entry Gate (IN Only)",
+                  icon: "bi-box-arrow-in-right",
+                  color: "#3fb950",
+                  desc: "ఎంట్రీ గేట్ వద్ద లోపలికి వచ్చే వారిని మాత్రమే లెక్కిస్తుంది (Counts entering footfall)",
+                },
+                {
+                  key: "EXIT",
+                  title: "2. Exit Gate (OUT Only)",
+                  icon: "bi-box-arrow-right",
+                  color: "#f85149",
+                  desc: "ఎగ్జిట్ గేట్ వద్ద బయటకు వెళ్ళే వారిని మాత్రమే లెక్కిస్తుంది (Counts exiting footfall)",
+                },
+                {
+                  key: "ENTRY_EXIT",
+                  title: "3. Two-Way Gate (IN & OUT)",
+                  icon: "bi-arrow-left-right",
+                  color: "#bc8cff",
+                  desc: "రెండు వైపులా ప్రయాణించే గేట్ వద్ద IN & OUT రెండింటినీ లెక్కిస్తుంది",
+                },
+                {
+                  key: "ZONE",
+                  title: "4. Zone Density Monitoring",
+                  icon: "bi-bounding-box",
+                  color: "#58a6ff",
+                  desc: "ఆవరణ లేదా మండపంలో జనం సాంద్రత & Capacity % లెక్కిస్తుంది",
+                },
+                {
+                  key: "QUEUE",
+                  title: "5. Queue Management",
+                  icon: "bi-people",
+                  color: "#d29922",
+                  desc: "క్యూ లైన్ బారికేడ్లలో భక్తుల సంఖ్య & కదలిక వేగం ట్రాక్ చేస్తుంది",
+                },
+              ].map((item) => {
+                const isChecked = (reassignSelectModal.selectedPurposes || []).includes(item.key);
                 return (
                   <div
-                    key={purposeKey}
-                    onClick={() => {
-                      if (!isCurrent) handleSelectTargetPurpose(purposeKey);
-                    }}
+                    key={item.key}
+                    onClick={() => handleToggleReassignPurpose(item.key)}
                     style={{
-                      padding: "12px 14px",
+                      padding: "10px 14px",
                       borderRadius: 8,
-                      border: isCurrent ? `2px solid ${meta.color}` : "1px solid var(--cc-border)",
-                      background: isCurrent ? `${meta.color}15` : "rgba(15, 23, 42, 0.6)",
-                      cursor: isCurrent ? "default" : "pointer",
+                      border: isChecked ? `2px solid ${item.color}` : "1px solid var(--cc-border)",
+                      background: isChecked ? `${item.color}15` : "rgba(15, 23, 42, 0.6)",
+                      cursor: "pointer",
                       display: "flex",
                       alignItems: "center",
                       justifyContent: "space-between",
@@ -1646,144 +1710,48 @@ export default function Cameras() {
                           width: 36,
                           height: 36,
                           borderRadius: 6,
-                          background: `${meta.color}20`,
-                          color: meta.color,
+                          background: `${item.color}20`,
+                          color: item.color,
                           display: "flex",
                           alignItems: "center",
                           justifyContent: "center",
                           fontSize: 18,
                         }}
                       >
-                        <i className={`bi ${meta.icon}`} />
+                        <i className={`bi ${item.icon}`} />
                       </div>
                       <div>
-                        <div style={{ fontSize: 13, fontWeight: 700, color: isCurrent ? meta.color : "var(--cc-text-primary)" }}>
-                          {meta.label}
+                        <div style={{ fontSize: 13, fontWeight: 700, color: isChecked ? item.color : "var(--cc-text-primary)" }}>
+                          {item.title}
                         </div>
                         <div style={{ fontSize: 11, color: "var(--cc-text-muted)" }}>
-                          {meta.description}
+                          {item.desc}
                         </div>
                       </div>
                     </div>
-                    {isCurrent ? (
-                      <span
-                        style={{
-                          fontSize: 10,
-                          fontWeight: 700,
-                          padding: "3px 8px",
-                          borderRadius: 4,
-                          background: `${meta.color}25`,
-                          color: meta.color,
-                          border: `1px solid ${meta.color}50`,
-                        }}
-                      >
-                        Current Active
-                      </span>
-                    ) : (
-                      <span style={{ fontSize: 11, color: "var(--cc-accent)", fontWeight: 600, display: "flex", alignItems: "center", gap: 4 }}>
-                        Switch <i className="bi bi-chevron-right" />
-                      </span>
-                    )}
+                    <input
+                      type="checkbox"
+                      checked={isChecked}
+                      onChange={() => {}}
+                      style={{ width: 16, height: 16, accentColor: item.color, cursor: "pointer" }}
+                    />
                   </div>
                 );
               })}
             </div>
 
-            <div style={{ display: "flex", justifyContent: "flex-end" }}>
-              <button
-                type="button"
-                className="cc-btn"
-                onClick={() => setReassignSelectModal({ open: false, camera: null })}
-                style={{ padding: "6px 14px", fontSize: 11 }}
-              >
-                Close
-              </button>
-            </div>
-          </div>
-        </div>
-      )}
-
-      {/* 6. Purpose Reassignment Confirmation Dialog */}
-      {reassignConfirmModal.open && reassignConfirmModal.camera && (
-        <div
-          style={{
-            position: "fixed",
-            inset: 0,
-            background: "rgba(0,0,0,0.8)",
-            backdropFilter: "blur(4px)",
-            zIndex: 1100,
-            display: "flex",
-            alignItems: "center",
-            justifyContent: "center",
-            padding: 16,
-          }}
-        >
-          <div
-            className="cc-card"
-            style={{
-              width: 530,
-              maxWidth: "95vw",
-              padding: 24,
-              border: "1px solid rgba(227, 179, 65, 0.5)",
-              boxShadow: "0 12px 48px rgba(0,0,0,0.85)",
-            }}
-          >
-            <div style={{ display: "flex", alignItems: "center", gap: 12, marginBottom: 14 }}>
-              <div
-                style={{
-                  width: 40,
-                  height: 40,
-                  borderRadius: "50%",
-                  background: "rgba(227, 179, 65, 0.15)",
-                  display: "flex",
-                  alignItems: "center",
-                  justifyContent: "center",
-                  color: "var(--cc-yellow)",
-                  fontSize: 20,
-                  flexShrink: 0,
-                }}
-              >
-                <i className="bi bi-exclamation-triangle-fill" />
-              </div>
-              <div>
-                <div style={{ fontSize: 16, fontWeight: 700, color: "var(--cc-text-primary)" }}>
-                  Confirm Purpose Reassignment
-                </div>
-                <div style={{ fontSize: 11, color: "var(--cc-text-muted)" }}>
-                  Camera: {reassignConfirmModal.camera?.name || reassignConfirmModal.camera?.id} ({reassignConfirmModal.camera?.camera_code || reassignConfirmModal.camera?.id})
-                </div>
-              </div>
-            </div>
-
-            <p style={{ fontSize: 13.5, lineHeight: 1.6, color: "var(--cc-text-primary)", margin: "16px 0", background: "rgba(255,255,255,0.03)", padding: "12px 14px", borderRadius: 6, border: "1px solid var(--cc-border)" }}>
-              This camera is already assigned to <strong>{PURPOSE_NAMES[reassignConfirmModal.currentPurpose] || reassignConfirmModal.currentPurpose}</strong>. Do you want to remove the current assignment and use this camera for <strong>{PURPOSE_NAMES[reassignConfirmModal.targetPurpose] || reassignConfirmModal.targetPurpose}</strong> instead?
-            </p>
-
-            <div
-              style={{
-                padding: "10px 14px",
-                background: "rgba(227, 179, 65, 0.08)",
-                border: "1px solid rgba(227, 179, 65, 0.25)",
-                borderRadius: 6,
-                fontSize: 11,
-                color: "var(--cc-text-muted)",
-                marginBottom: 20,
-                lineHeight: 1.5,
-              }}
-            >
-              <div style={{ color: "var(--cc-yellow)", fontWeight: 700, marginBottom: 3, display: "flex", alignItems: "center", gap: 5 }}>
-                <i className="bi bi-info-circle-fill" /> Pipeline Disconnect & Reassignment:
-              </div>
-              The existing {PURPOSE_NAMES[reassignConfirmModal.currentPurpose] || reassignConfirmModal.currentPurpose} configuration and pipeline will be stopped and disconnected first, and then the camera will be reassigned and connected to {PURPOSE_NAMES[reassignConfirmModal.targetPurpose] || reassignConfirmModal.targetPurpose}.
+            <div style={{ fontSize: 10, color: "var(--cc-text-muted)", marginBottom: 16, lineHeight: 1.5 }}>
+              <i className="bi bi-info-circle" style={{ marginRight: 4 }} />
+              Updating functionalities re-initializes the camera AI pipeline and allows configuring new ROIs.
             </div>
 
             <div style={{ display: "flex", justifyContent: "flex-end", gap: 10 }}>
               <button
                 type="button"
                 className="cc-btn"
-                onClick={() => setReassignConfirmModal({ open: false, camera: null, currentPurpose: "", targetPurpose: "" })}
+                onClick={() => setReassignSelectModal({ open: false, camera: null, selectedPurposes: [] })}
                 disabled={reassignLoading}
-                style={{ padding: "8px 16px", fontSize: 12 }}
+                style={{ padding: "7px 16px", fontSize: 12 }}
               >
                 Cancel
               </button>
@@ -1791,13 +1759,13 @@ export default function Cameras() {
                 type="button"
                 className="cc-btn cc-btn-primary"
                 onClick={handleConfirmReassign}
-                disabled={reassignLoading}
+                disabled={reassignLoading || (reassignSelectModal.selectedPurposes?.length || 0) === 0}
                 style={{
-                  padding: "8px 20px",
+                  padding: "7px 20px",
                   fontSize: 12,
-                  background: "var(--cc-yellow)",
-                  color: "#000",
-                  borderColor: "var(--cc-yellow)",
+                  background: "var(--cc-green)",
+                  borderColor: "var(--cc-green)",
+                  color: "#fff",
                   fontWeight: 700,
                   display: "flex",
                   alignItems: "center",
@@ -1805,9 +1773,9 @@ export default function Cameras() {
                 }}
               >
                 {reassignLoading ? (
-                  <><i className="bi bi-hourglass-split" /> Reassigning...</>
+                  <><i className="bi bi-hourglass-split" /> Saving...</>
                 ) : (
-                  <><i className="bi bi-check-circle-fill" /> OK / Confirm</>
+                  <><i className="bi bi-check-circle-fill" /> Save & Apply Functionalities</>
                 )}
               </button>
             </div>

@@ -46,16 +46,19 @@ from app.schemas.dashboard import (
 
 
 class _DashboardCacheEntry:
-    __slots__ = ("data", "expires_at")
+    __slots__ = ("data", "fresh_until", "stale_until", "is_updating")
 
-    def __init__(self, data: DashboardSummaryResponse, expires_at: float):
+    def __init__(self, data: DashboardSummaryResponse, fresh_until: float, stale_until: float):
         self.data = data
-        self.expires_at = expires_at
+        self.fresh_until = fresh_until
+        self.stale_until = stale_until
+        self.is_updating = False
 
 
 _dashboard_cache: Dict[str, _DashboardCacheEntry] = {}
 _in_flight_requests: Dict[str, asyncio.Future] = {}
-_DASHBOARD_CACHE_TTL_SECONDS: float = 10.0
+_DASHBOARD_CACHE_FRESH_SECONDS: float = 8.0
+_DASHBOARD_CACHE_STALE_SECONDS: float = 300.0
 
 
 class DashboardService:
@@ -72,22 +75,32 @@ class DashboardService:
         allowed_site_ids: Optional[List[uuid.UUID]] = None,
     ) -> DashboardSummaryResponse:
         """
-        Consolidated Command Center Dashboard aggregator with fast-path caching
-        and single-flight request coalescing, scoped by Event and Site.
+        Consolidated Command Center Dashboard aggregator with Stale-While-Revalidate (SWR)
+        and single-flight request coalescing. Delivers instant <5ms responses while refreshing
+        the database asynchronously in the background.
         """
         cache_key = f"dashboard:{event_id}:{date_range.lower()}"
         now = time.monotonic()
 
-        # 1. Fast path: In-memory cache HIT (<1ms)
         cached = _dashboard_cache.get(cache_key)
-        if cached and now < cached.expires_at:
+
+        # 1. Fast path: In-memory cache HIT and Fresh (<8s) -> Return immediately (<1ms)
+        if cached and now < cached.fresh_until:
             return cached.data
 
-        # 2. In-flight coalescing: Wait for already executing query
+        # 2. SWR path: Cache is Stale (8s-300s) -> Return instantly, refresh in background!
+        if cached and now < cached.stale_until:
+            if not cached.is_updating:
+                cached.is_updating = True
+                asyncio.create_task(
+                    self._refresh_in_background(cache_key, date_range, event_id, allowed_site_ids)
+                )
+            return cached.data
+
+        # 3. Cache MISS: in-flight request coalescing
         if cache_key in _in_flight_requests:
             return await _in_flight_requests[cache_key]
 
-        # 3. Cache MISS: execute bulk database retrieval
         loop = asyncio.get_running_loop()
         future = loop.create_future()
         _in_flight_requests[cache_key] = future
@@ -100,8 +113,12 @@ class DashboardService:
                 allowed_site_ids=allowed_site_ids,
             )
             dt_ms = (time.perf_counter() - t0) * 1000
-            logger.debug(f"[DASHBOARD_QUERY_TIME] {dt_ms:.1f}ms for key={cache_key}")
-            _dashboard_cache[cache_key] = _DashboardCacheEntry(res, time.monotonic() + _DASHBOARD_CACHE_TTL_SECONDS)
+            logger.info(f"[DASHBOARD_COLD_FETCH] {dt_ms:.1f}ms for key={cache_key}")
+            _dashboard_cache[cache_key] = _DashboardCacheEntry(
+                res,
+                fresh_until=time.monotonic() + _DASHBOARD_CACHE_FRESH_SECONDS,
+                stale_until=time.monotonic() + _DASHBOARD_CACHE_STALE_SECONDS,
+            )
             if not future.done():
                 future.set_result(res)
             return res
@@ -111,6 +128,43 @@ class DashboardService:
             raise
         finally:
             _in_flight_requests.pop(cache_key, None)
+
+    @classmethod
+    async def _refresh_in_background(
+        cls,
+        cache_key: str,
+        date_range: str,
+        event_id: Optional[uuid.UUID],
+        allowed_site_ids: Optional[List[uuid.UUID]],
+    ) -> None:
+        """Asynchronously refreshes dashboard summary from database in background."""
+        try:
+            from app.db.session import AsyncSessionLocal
+            async with AsyncSessionLocal() as session:
+                svc = cls(session)
+                fresh_res = await svc._build_summary_uncached(
+                    date_range=date_range,
+                    event_id=event_id,
+                    allowed_site_ids=allowed_site_ids,
+                )
+                entry = _dashboard_cache.get(cache_key)
+                if entry:
+                    entry.data = fresh_res
+                    entry.fresh_until = time.monotonic() + _DASHBOARD_CACHE_FRESH_SECONDS
+                    entry.stale_until = time.monotonic() + _DASHBOARD_CACHE_STALE_SECONDS
+                    entry.is_updating = False
+                else:
+                    _dashboard_cache[cache_key] = _DashboardCacheEntry(
+                        fresh_res,
+                        fresh_until=time.monotonic() + _DASHBOARD_CACHE_FRESH_SECONDS,
+                        stale_until=time.monotonic() + _DASHBOARD_CACHE_STALE_SECONDS,
+                    )
+                logger.debug(f"[SWR] Background refresh completed for {cache_key}")
+        except Exception as exc:
+            logger.warning(f"[SWR] Background refresh failed for {cache_key}: {exc}")
+            entry = _dashboard_cache.get(cache_key)
+            if entry:
+                entry.is_updating = False
 
     async def _build_summary_uncached(
         self,
@@ -166,8 +220,11 @@ class DashboardService:
         all_cameras = list(res_cams.scalars().all())
         _step("2-cameras-query")
 
-        cams_online = sum(1 for c in all_cameras if c.enabled and (c.status or "").lower() == "online")
-        cams_offline = len(all_cameras) - cams_online
+        # Fallback: if selected event filter matched 0 cameras, retrieve festival fleet so live feeds are not hidden
+        if not all_cameras:
+            stmt_cams_fallback = select(Camera).order_by(Camera.camera_code)
+            res_cams_fallback = await self.db.execute(stmt_cams_fallback)
+            all_cameras = list(res_cams_fallback.scalars().all())
 
         # Check live AI pipelines & FRS workers
         live_crowd_pipes = {p.camera_code: p for p in CrowdPipelineRegistry.list_pipelines() if p.state == PipelineState.RUNNING}
@@ -199,7 +256,21 @@ class DashboardService:
         except Exception:
             pass
 
-        crowd_ai_running = len(live_crowd_pipes) + sum(1 for s in live_frs_workers.values() if getattr(s, "crowd_ai_active", False) and any(p in getattr(s, "ai_purposes", []) for p in ("ENTRY", "EXIT", "ENTRY_EXIT", "ZONE")))
+        # Check online cameras (DB status OR active running worker)
+        online_camera_codes = set()
+        for c in all_cameras:
+            is_worker_active = (
+                c.camera_code in live_crowd_pipes
+                or c.camera_code in live_queue_pipes
+                or c.camera_code in live_frs_workers
+            )
+            if (c.enabled and (c.status or "").lower() == "online") or is_worker_active:
+                online_camera_codes.add(c.camera_code)
+
+        cams_online = len(online_camera_codes)
+        cams_offline = max(0, len(all_cameras) - cams_online)
+
+        crowd_ai_running = len(live_crowd_pipes) + sum(1 for s in live_frs_workers.values() if getattr(s, "crowd_ai_active", False))
         queue_ai_running = len(live_queue_pipes) + sum(1 for s in live_frs_workers.values() if getattr(s, "crowd_ai_active", False) and "QUEUE" in getattr(s, "ai_purposes", []))
         if frs_running_count == 0 and any(getattr(s, "is_frs", False) for s in live_frs_workers.values()):
             frs_running_count = sum(1 for s in live_frs_workers.values() if getattr(s, "is_frs", False))
@@ -212,36 +283,45 @@ class DashboardService:
             crowd_ai_running=crowd_ai_running,
             queue_ai_running=queue_ai_running,
             frs_running=frs_running_count,
-            system_status="OPTIMAL" if cams_offline == 0 else ("DEGRADED" if cams_online > 0 else "OFFLINE"),
+            system_status="OPTIMAL" if (cams_offline == 0 and cams_online > 0) else ("DEGRADED" if cams_online > 0 else "OFFLINE"),
         )
 
         # -------------------------------------------------------------------
         # 3. Total Festival Visitors & Historical Entry / Exit Aggregation
         # -------------------------------------------------------------------
-        # Cumulative festival entries from crowd snapshots (NO event filter — count all cameras)
-        stmt_tot_entries = select(func.coalesce(func.sum(CrowdSnapshot.inflow_rate), 0))
+        # Cumulative festival entries and exits from crowd snapshots
+        stmt_tot_entries = select(
+            func.coalesce(func.sum(CrowdSnapshot.inflow_rate), 0).label("tot_in"),
+            func.coalesce(func.sum(CrowdSnapshot.outflow_rate), 0).label("tot_out"),
+        )
         res_tot = await self.db.execute(stmt_tot_entries)
-        db_total_entries = res_tot.scalar() or 0
-        total_visitors_festival = int(db_total_entries) + live_in_count
+        tot_row = res_tot.first()
+        db_total_entries = int(tot_row.tot_in if tot_row else 0)
+        db_total_exits = int(tot_row.tot_out if tot_row else 0)
         _step("4-total-entries")
 
-        # Today's entries, exits & hourly distribution calculated together in 1 query
-        today_start = datetime.combine(now_dt.date(), datetime.min.time(), tzinfo=timezone.utc)
+        # Today's entries, exits & hourly distribution calculated in IST (+05:30)
+        IST = timezone(timedelta(hours=5, minutes=30))
+        now_ist = now_dt.astimezone(IST)
+        today_start_ist = datetime.combine(now_ist.date(), datetime.min.time(), tzinfo=IST)
+        today_start = today_start_ist.astimezone(timezone.utc)
+
         hourly_map: Dict[int, Dict[str, int]] = {h: {"entry": 0, "exit": 0} for h in range(24)}
+        kolkata_ts = func.timezone("Asia/Kolkata", CrowdSnapshot.timestamp)
         stmt_hourly = (
             select(
-                func.extract("hour", CrowdSnapshot.timestamp).label("h"),
+                func.extract("hour", kolkata_ts).label("h"),
                 func.sum(CrowdSnapshot.inflow_rate).label("inflow"),
                 func.sum(CrowdSnapshot.outflow_rate).label("outflow"),
             )
             .where(CrowdSnapshot.timestamp >= today_start)
-            .group_by(func.extract("hour", CrowdSnapshot.timestamp))
+            .group_by(func.extract("hour", kolkata_ts))
         )
         res_hourly = await self.db.execute(stmt_hourly)
         db_today_in = 0
         db_today_out = 0
         for row in res_hourly.all():
-            h_val = int(row.h)
+            h_val = int(row.h) if row.h is not None else -1
             inf = int(row.inflow or 0)
             outf = int(row.outflow or 0)
             db_today_in += inf
@@ -250,8 +330,15 @@ class DashboardService:
                 hourly_map[h_val]["entry"] += inf
                 hourly_map[h_val]["exit"] += outf
 
-        today_entries = db_today_in + live_in_count
-        today_exits = db_today_out + live_out_count
+        # Prevent double counting: DB already persists line crossings synchronously.
+        # Only add unpersisted in-memory delta if live_in_count > db_today_in.
+        unpersisted_in = max(0, live_in_count - db_today_in)
+        unpersisted_out = max(0, live_out_count - db_today_out)
+        today_entries = db_today_in + unpersisted_in
+        today_exits = db_today_out + unpersisted_out
+
+        # Formula Requirement: Total Count = Total Entry + Total Exit (exact match)
+        total_visitors_festival = today_entries + today_exits
         _step("5-hourly-and-today-totals")
 
         # -------------------------------------------------------------------
@@ -373,7 +460,8 @@ class DashboardService:
                 )
             )
 
-        current_occupancy = live_occupancy_count if live_occupancy_count > 0 else (total_zone_people if total_zone_people > 0 else max(0, today_entries - today_exits))
+        # True net facility occupancy = Total Entry - Total Exit across all 4 entry + 4 exit gates
+        current_occupancy = max(0, today_entries - today_exits)
         net_flow = today_entries - today_exits
 
         # -------------------------------------------------------------------
@@ -463,10 +551,10 @@ class DashboardService:
         # -------------------------------------------------------------------
         hourly_flow: List[HourlyFlowPoint] = []
 
-        # Add live count to current hour
-        cur_hour = now_dt.hour
-        hourly_map[cur_hour]["entry"] += live_in_count
-        hourly_map[cur_hour]["exit"] += live_out_count
+        # Add only unpersisted live counts to current hour (prevents doubling)
+        cur_hour = now_ist.hour
+        hourly_map[cur_hour]["entry"] += unpersisted_in
+        hourly_map[cur_hour]["exit"] += unpersisted_out
 
         peak_h = "—"
         max_entry = -1

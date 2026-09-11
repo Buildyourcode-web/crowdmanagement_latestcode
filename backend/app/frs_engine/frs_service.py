@@ -204,16 +204,29 @@ def _fetch_rois_sync(state) -> tuple:
                 })
 
         # Dynamically sync camera purposes based on actual ROIs saved in DB
-        if "QUEUE_ROI" in found_types:
-            state.ai_purposes = ["QUEUE"]
-        elif "CROWD_ROI" in found_types or "ZONE_BOUNDARY" in found_types:
-            state.ai_purposes = ["ZONE"]
-        elif "ENTRY_LINE" in found_types and "EXIT_LINE" not in found_types:
-            state.ai_purposes = ["ENTRY"]
-        elif "EXIT_LINE" in found_types and "ENTRY_LINE" not in found_types:
-            state.ai_purposes = ["EXIT"]
+        derived_purposes = []
+        if "ENTRY_LINE" in found_types and "EXIT_LINE" not in found_types and "COUNTING_LINE" not in found_types:
+            derived_purposes.append("ENTRY")
+        elif "EXIT_LINE" in found_types and "ENTRY_LINE" not in found_types and "COUNTING_LINE" not in found_types:
+            derived_purposes.append("EXIT")
         elif any(t in found_types for t in ("COUNTING_LINE", "ENTRY_LINE", "EXIT_LINE")):
-            state.ai_purposes = ["ENTRY_EXIT"]
+            derived_purposes.append("ENTRY_EXIT")
+
+        if "CROWD_ROI" in found_types or "ZONE_BOUNDARY" in found_types:
+            derived_purposes.append("ZONE")
+        if "QUEUE_ROI" in found_types or "DIRECTION_LINE" in found_types:
+            derived_purposes.append("QUEUE")
+
+        if derived_purposes:
+            current_purps = getattr(state, "ai_purposes", None) or []
+            # Merge current and derived, preserving order, max 2
+            merged = []
+            for p in current_purps + derived_purposes:
+                if p in ("ENTRY_EXIT", "ZONE", "QUEUE", "ENTRY", "EXIT") and p not in merged:
+                    merged.append(p)
+                if len(merged) >= 2:
+                    break
+            state.ai_purposes = merged or derived_purposes[:2]
 
         return lines, polygons
 
@@ -1160,7 +1173,7 @@ class RTSPCameraWorker:
                 # -----------------------------------------------------------
                 # 2. ZONE Mode: Point-in-polygon headcount + density alert
                 # -----------------------------------------------------------
-                elif "ZONE" in purposes:
+                if "ZONE" in purposes:
                     zone_stats = []
                     total_zone_count = 0
                     for poly in self._cached_roi_polygons:
@@ -1259,7 +1272,7 @@ class RTSPCameraWorker:
                 # -----------------------------------------------------------
                 # 3. QUEUE Mode: Ground-truth locomotion tracking & walking vs standing classification
                 # -----------------------------------------------------------
-                elif "QUEUE" in purposes:
+                if "QUEUE" in purposes:
                     curr_time = time.time()
                     queue_polygons = [p for p in self._cached_roi_polygons if p.get("type") in ("QUEUE_ROI", "QUEUE_AREA")]
 
@@ -1576,23 +1589,12 @@ class RTSPCameraWorker:
                             my = (l1[1] + l2[1]) // 2
                             cv2.putText(bgr_crowd, tag, (max(10, mx - 100), max(22, my - 8)), cv2.FONT_HERSHEY_SIMPLEX, 0.45, (255, 255, 255), 1, cv2.LINE_AA)
 
-                        # Top HUD bar for Entry / Exit Counting
-                        cv2.rectangle(bgr_crowd, (0, 0), (w, 30), (15, 23, 42), -1)
-                        if is_entry:
-                            hud = f"YOLO11x ACTIVE | ENTRY GATE | TOTAL IN: {self.state.in_count}"
-                            hud_col = (46, 204, 113)
-                        elif is_exit:
-                            hud = f"YOLO11x ACTIVE | EXIT GATE | TOTAL OUT: {self.state.out_count}"
-                            hud_col = (0, 0, 235)
-                        else:
-                            hud = f"YOLO11x ACTIVE | ENTRY/EXIT | IN: {self.state.in_count} | OUT: {self.state.out_count} | OCCUPANCY: {self.state.occupancy_count}"
-                            hud_col = (255, 140, 188)
-                        cv2.putText(bgr_crowd, hud, (12, 20), cv2.FONT_HERSHEY_SIMPLEX, 0.5, hud_col, 2, cv2.LINE_AA)
+                        # End of Entry/Exit lines and boxes
 
                     # -------------------------------------------------------
                     # B. ZONE DENSITY MANAGEMENT OVERLAY (Polygons + Head Dots)
                     # -------------------------------------------------------
-                    elif "ZONE" in purposes:
+                    if "ZONE" in purposes:
                         worst_status = "NORMAL"
                         overlay = bgr_crowd.copy()
 
@@ -1640,16 +1642,10 @@ class RTSPCameraWorker:
                             # Center dot
                             cv2.circle(bgr_crowd, (hx, hy), 2, (0, 0, 0), -1, cv2.LINE_AA)
 
-                        # Top HUD bar for Zone Density
-                        hud_color = (0, 0, 235) if worst_status == "DANGER" else ((0, 140, 255) if worst_status == "WARNING" else (80, 185, 63))
-                        cv2.rectangle(bgr_crowd, (0, 0), (w, 30), (15, 23, 42), -1)
-                        hud = f"YOLO11x ACTIVE | ZONE DENSITY | OCCUPANCY: {self.state.occupancy_count} | STATUS: {worst_status}"
-                        cv2.putText(bgr_crowd, hud, (12, 20), cv2.FONT_HERSHEY_SIMPLEX, 0.5, hud_color, 2, cv2.LINE_AA)
-
                     # -------------------------------------------------------
                     # C. QUEUE MANAGEMENT OVERLAY (Queue Box + Speed Flow)
                     # -------------------------------------------------------
-                    elif "QUEUE" in purposes:
+                    if "QUEUE" in purposes:
                         # Draw Queue Polygons / Area Box in Amber
                         for poly in self._cached_roi_polygons:
                             if poly.get("type") not in ("QUEUE_ROI", "QUEUE_AREA"):
@@ -1710,24 +1706,29 @@ class RTSPCameraWorker:
                                 gx, gy = cb.get("bottom_center", ((x1 + x2) // 2, y2))
                                 cv2.circle(bgr_crowd, (gx, gy), 4, box_color, -1, cv2.LINE_AA)
 
-                        # Top HUD bar for Queue Management with movement speed status
-                        q_status = getattr(self.state, "queue_movement_status", "STOPPED")
-                        if q_status in ("FAST", "MOVING"):
-                            stat_color = (63, 185, 80)
-                            stat_label = "MOVING (WALKING)"
-                        elif q_status == "SLOW":
-                            stat_color = (34, 153, 210)
-                            stat_label = "SLOW (INCHING)"
-                        elif q_status == "EMPTY":
-                            stat_color = (180, 180, 180)
-                            stat_label = "EMPTY"
-                        else:
-                            stat_color = (0, 0, 235)
-                            stat_label = "STOPPED (STANDING)"
+                    # -------------------------------------------------------
+                    # D. CONSOLIDATED MULTI-PURPOSE TOP HUD BAR
+                    # -------------------------------------------------------
+                    cv2.rectangle(bgr_crowd, (0, 0), (w, 30), (15, 23, 42), -1)
+                    hud_parts = []
+                    if is_entry:
+                        hud_parts.append(f"ENTRY: {self.state.in_count}")
+                    elif is_exit:
+                        hud_parts.append(f"EXIT: {self.state.out_count}")
+                    elif "ENTRY_EXIT" in purposes or ("ENTRY" in purposes and "EXIT" in purposes):
+                        hud_parts.append(f"IN: {self.state.in_count} | OUT: {self.state.out_count}")
 
-                        cv2.rectangle(bgr_crowd, (0, 0), (w, 30), (15, 23, 42), -1)
-                        hud = f"YOLO11x ACTIVE | QUEUE: {self.state.occupancy_count} PERSON(S) | FLOW: {stat_label}"
-                        cv2.putText(bgr_crowd, hud, (12, 20), cv2.FONT_HERSHEY_SIMPLEX, 0.5, stat_color, 2, cv2.LINE_AA)
+                    if "ZONE" in purposes:
+                        z_occ = getattr(self.state, "occupancy_count", 0)
+                        hud_parts.append(f"ZONE: {z_occ} PAX")
+
+                    if "QUEUE" in purposes:
+                        q_stat = getattr(self.state, "queue_movement_status", "STOPPED")
+                        hud_parts.append(f"QUEUE: {self.state.occupancy_count} ({q_stat})")
+
+                    hud_body = " | ".join(hud_parts) if hud_parts else f"OCCUPANCY: {self.state.occupancy_count}"
+                    hud_final = f"YOLO11x AI | {hud_body}"
+                    cv2.putText(bgr_crowd, hud_final, (12, 20), cv2.FONT_HERSHEY_SIMPLEX, 0.45, (46, 204, 113), 2, cv2.LINE_AA)
 
                     ok_cr, crowd_buf = cv2.imencode(".jpg", bgr_crowd, [cv2.IMWRITE_JPEG_QUALITY, 72])
                     if ok_cr:
@@ -1791,10 +1792,11 @@ class CameraInfo(BaseModel):
 
 @router.post("/cameras", response_model=CameraInfo, status_code=201)
 async def add_frs_camera(req: AddCameraRequest):
-    """Add a new RTSP camera and start live stream / FRS detection."""
     cam_id = req.camera_id or "CAM-KHB-345"
     is_frs = req.is_frs if req.camera_type == "FRS" else False
-    ai_purp = req.ai_purposes or (["ENTRY_EXIT", "ZONE"] if req.camera_type == "CROWD" else ["FRS"])
+    ai_purp = req.ai_purposes or (["ENTRY"] if req.camera_type == "CROWD" else ["FRS"])
+    if req.camera_type == "CROWD" and isinstance(ai_purp, list):
+        ai_purp = ai_purp[:2]
     zone_cd = (req.zone_code or "ZONE-A").upper().strip()
 
     with _workers_lock:
@@ -2123,12 +2125,20 @@ async def api_reassign_camera_purpose(camera_id: str, new_purpose: str):
     and reassigns to the new purpose (ENTRY_EXIT, ZONE, or QUEUE).
     """
     valid_purposes = {"ENTRY", "EXIT", "ENTRY_EXIT", "ZONE", "QUEUE"}
-    new_purpose = new_purpose.upper().strip()
-    if new_purpose not in valid_purposes:
+    if isinstance(new_purpose, list):
+        parsed_purposes = [str(p).strip().upper() for p in new_purpose if p]
+    else:
+        parsed_purposes = [p.strip().upper() for p in str(new_purpose).split(",") if p.strip()]
+
+    invalid = [p for p in parsed_purposes if p not in valid_purposes]
+    if invalid or not parsed_purposes:
         raise HTTPException(
             status_code=400,
-            detail=f"Invalid purpose '{new_purpose}'. Must be one of: {', '.join(sorted(valid_purposes))}"
+            detail=f"Invalid purpose(s): {invalid}. Each must be one of: {', '.join(sorted(valid_purposes))}"
         )
+
+    # Maximum 2 crowd functionalities per camera
+    parsed_purposes = parsed_purposes[:2]
 
     state = get_worker_for_camera(camera_id)
     if state is None or not state.running:
@@ -2175,8 +2185,18 @@ async def api_reassign_camera_purpose(camera_id: str, new_purpose: str):
         state.queue_movement_status = "STOPPED"
         state.zone_data = []
 
-        # Assign new profile
-        state.ai_purposes = [new_purpose]
+        # Assign new profile (support up to 2 crowd purposes)
+        if isinstance(new_purpose, list):
+            parsed_purposes = [str(p).strip().upper() for p in new_purpose if p]
+        elif "," in str(new_purpose):
+            parsed_purposes = [str(p).strip().upper() for p in str(new_purpose).split(",") if p.strip()]
+        else:
+            parsed_purposes = [str(new_purpose).strip().upper()]
+
+        # Limit to maximum 2 crowd functionalities
+        parsed_purposes = parsed_purposes[:2] if parsed_purposes else ["ENTRY_EXIT"]
+
+        state.ai_purposes = parsed_purposes
         state.camera_type = "CROWD"
         state.is_frs = False
         state.crowd_ai_active = True
@@ -2185,15 +2205,15 @@ async def api_reassign_camera_purpose(camera_id: str, new_purpose: str):
     _emit_frs_event_threadsafe("camera_reassigned", {
         "camera_id": state.camera_id,
         "ai_purposes": state.ai_purposes,
-        "new_purpose": new_purpose,
+        "new_purpose": ",".join(state.ai_purposes),
         "timestamp": datetime.now(timezone.utc).isoformat(),
     })
 
-    logger.info(f"[FRS-Engine] Camera {camera_id} successfully reassigned to purpose: {new_purpose}. Previous pipeline deleted and disconnected.")
+    logger.info(f"[FRS-Engine] Camera {camera_id} successfully reassigned to purposes: {state.ai_purposes}. Previous pipeline deleted and disconnected.")
     return {
         "status": "success",
         "camera_id": state.camera_id,
-        "assigned_purpose": new_purpose,
+        "assigned_purpose": state.ai_purposes[0] if state.ai_purposes else "ENTRY_EXIT",
         "ai_purposes": state.ai_purposes,
         "in_count": state.in_count,
         "out_count": state.out_count,

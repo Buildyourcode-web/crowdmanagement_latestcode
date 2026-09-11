@@ -39,18 +39,17 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 RUN pip install --no-cache-dir --upgrade pip setuptools wheel
 
 # 3. Copy and install Python dependencies
-COPY requirements.txt /app/requirements.txt
+COPY deploy/gpu-backend/requirements.txt /app/requirements.txt
 RUN pip install --no-cache-dir -r /app/requirements.txt
 
 # 4. Create persistent volume mount points for data, models, and InsightFace cache
 RUN mkdir -p /app/media /app/models /app/data /root/.insightface/models
 
-# 5. Copy backend application source code
-# (Assumes docker build context is the repository root or backend directory)
-COPY app /app/app
-COPY alembic /app/alembic
-COPY alembic.ini /app/alembic.ini
-COPY scripts /app/scripts
+# 5. Copy backend application source code from backend directory
+COPY backend/app /app/app
+COPY backend/alembic /app/alembic
+COPY backend/alembic.ini /app/alembic.ini
+COPY backend/scripts /app/scripts
 
 # Copy YOLO model if present in local build context
 COPY models /app/models

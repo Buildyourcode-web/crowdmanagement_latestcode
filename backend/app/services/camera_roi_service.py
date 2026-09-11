@@ -40,6 +40,8 @@ from app.schemas.camera_roi import (
 # Profile-to-ROI compatibility matrix
 CROWD_ROIS = {
     ROIType.CROWD_ROI,
+    ROIType.ZONE_BOUNDARY,
+    ROIType.QUEUE_ROI,
     ROIType.EXCLUSION_ZONE,
     ROIType.COUNTING_LINE,
     ROIType.ENTRY_LINE,
@@ -49,6 +51,8 @@ CROWD_ROIS = {
 
 QUEUE_ROIS = {
     ROIType.QUEUE_ROI,
+    ROIType.CROWD_ROI,
+    ROIType.ZONE_BOUNDARY,
     ROIType.EXCLUSION_ZONE,
     ROIType.COUNTING_LINE,
     ROIType.ENTRY_LINE,
