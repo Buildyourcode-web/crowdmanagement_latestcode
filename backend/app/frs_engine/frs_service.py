@@ -1030,6 +1030,10 @@ class RTSPCameraWorker:
                     if "history" not in trk:
                         trk["history"] = deque(maxlen=20)
                     trk["history"].append((trk["centroid"], curr_time))
+                    if "loco_history" not in trk:
+                        trk["loco_history"] = deque(maxlen=25)
+                    bh_curr = trk["bbox"][3] - trk["bbox"][1]
+                    trk["loco_history"].append((curr_time, trk["centroid"], trk["bottom_center"], bh_curr))
 
                 # Update still unmatched tracks (coast mode: advances with velocity, keeps box alive!)
                 for tid in still_unmatched_t:
@@ -1042,6 +1046,10 @@ class RTSPCameraWorker:
                     if "history" not in trk:
                         trk["history"] = deque(maxlen=20)
                     trk["history"].append((trk["centroid"], curr_time))
+                    if "loco_history" not in trk:
+                        trk["loco_history"] = deque(maxlen=25)
+                    bh_curr = trk["bbox"][3] - trk["bbox"][1]
+                    trk["loco_history"].append((curr_time, trk["centroid"], trk["bottom_center"], bh_curr))
 
                 # Spawn new tracks for unassigned high detections
                 for d_idx in unassigned_high_d:
@@ -1064,6 +1072,7 @@ class RTSPCameraWorker:
                             if math.hypot(det_c[0] - old_trk["centroid"][0], det_c[1] - old_trk["centroid"][1]) < 100.0:
                                 new_crossed.update(old_trk["crossed_lines"])
                                 break
+                    bh_new = det["bbox"][3] - det["bbox"][1]
                     self._crowd_tracks[new_tid] = {
                         "track_id": new_tid,
                         "bbox": det["bbox"],
@@ -1076,8 +1085,12 @@ class RTSPCameraWorker:
                         "misses": 0,
                         "last_seen": curr_time,
                         "history": deque([(det_c, curr_time)], maxlen=20),
+                        "loco_history": deque([(curr_time, det_c, det["bottom_center"], bh_new)], maxlen=25),
                         "cooldown_until": 0.0,
                         "crossed_lines": new_crossed,
+                        "movement_state": "MOVING",
+                        "last_moving_time": curr_time,
+                        "stopped_frames": 0,
                     }
 
                 # Prune tracks inactive for > 18 frames (~2.5s) or off-screen
@@ -1325,14 +1338,90 @@ class RTSPCameraWorker:
                         })
 
                 # -----------------------------------------------------------
-                # 3. QUEUE Mode: Ground-truth locomotion tracking
+                # Locomotion Speed & Movement State for All Active Tracks
+                # -----------------------------------------------------------
+                for trk in self._crowd_tracks.values():
+                    if trk.get("misses", 0) > 4:
+                        continue
+                    l_hist = list(trk.get("loco_history", []))
+                    if len(l_hist) < 3:
+                        continue
+
+                    t_now = l_hist[-1][0]
+                    # Select baseline sample from ~0.35s - 1.0s ago
+                    s_base = l_hist[0]
+                    for s in l_hist:
+                        if (t_now - s[0]) <= 1.0:
+                            s_base = s
+                            break
+
+                    dt_loco = t_now - s_base[0]
+                    if dt_loco >= 0.28:
+                        # Ground feet displacement
+                        d_feet = math.hypot(l_hist[-1][2][0] - s_base[2][0], l_hist[-1][2][1] - s_base[2][1])
+                        # Centroid displacement
+                        d_c = math.hypot(l_hist[-1][1][0] - s_base[1][0], l_hist[-1][1][1] - s_base[1][1])
+                        # Perspective height expansion/contraction
+                        d_bh = abs(l_hist[-1][3] - s_base[3])
+
+                        speed_feet_s = d_feet / dt_loco
+                        speed_c_s = d_c / dt_loco
+                        speed_bh_s = d_bh / dt_loco
+
+                        # Combined effective locomotion speed:
+                        # Captures lateral walking (d_c/d_feet) and axial approach down hallway (d_feet + d_bh)
+                        eff_speed = max(speed_feet_s, speed_c_s, speed_feet_s * 0.7 + speed_bh_s * 0.5)
+
+                        current_bh = max(50.0, trk["bbox"][3] - trk["bbox"][1])
+                        norm_speed = eff_speed / current_bh
+
+                        # Locomotion classification:
+                        # WALKING: eff_speed >= 15.0 px/s OR feet speed >= 13.0 px/s OR height expansion >= 15.0 px/s OR norm_speed >= 0.05
+                        is_walking = (
+                            eff_speed >= 15.0
+                            or speed_feet_s >= 13.0
+                            or speed_bh_s >= 15.0
+                            or norm_speed >= 0.05
+                        )
+                        # SLOW WALK: creeping / shuffling in queue
+                        is_slow = (
+                            eff_speed >= 5.0
+                            or speed_feet_s >= 4.5
+                            or norm_speed >= 0.018
+                        )
+
+                        if is_walking:
+                            trk["last_moving_time"] = curr_time
+                            trk["movement_state"] = "MOVING"
+                            trk["stopped_frames"] = 0
+                        elif is_slow:
+                            # Hold MOVING through natural gait pauses between steps (up to 1.1s)
+                            if (curr_time - trk.get("last_moving_time", 0.0)) < 1.1:
+                                trk["movement_state"] = "MOVING"
+                            else:
+                                trk["movement_state"] = "SLOW"
+                            trk["stopped_frames"] = 0
+                        else:
+                            # Below slow threshold: potential stationary
+                            trk["stopped_frames"] = trk.get("stopped_frames", 0) + 1
+                            # Hold MOVING during step transitions (up to 1.2s)
+                            if (curr_time - trk.get("last_moving_time", 0.0)) < 1.2:
+                                trk["movement_state"] = "MOVING"
+                            elif trk["stopped_frames"] < 6:
+                                trk["movement_state"] = "SLOW"
+                            else:
+                                trk["movement_state"] = "STOPPED"
+
+                # -----------------------------------------------------------
+                # 3. QUEUE Mode: Ground-truth queue tracking
                 # -----------------------------------------------------------
                 if "QUEUE" in purposes:
                     queue_polygons = [p for p in self._cached_roi_polygons if p.get("type") in ("QUEUE_ROI", "QUEUE_AREA")]
 
                     q_count = 0
                     for trk in self._crowd_tracks.values():
-                        if trk.get("misses", 0) > 10:
+                        if trk.get("misses", 0) > 3:
+                            trk["in_queue"] = False
                             continue
                         cx, cy = trk["centroid"]
                         bc = trk["bottom_center"]
@@ -1351,37 +1440,19 @@ class RTSPCameraWorker:
                         trk["in_queue"] = in_q
                         if in_q:
                             q_count += 1
-                            hist = list(trk.get("history", []))
-                            if len(hist) >= 4:
-                                s_first = hist[0]
-                                s_last = hist[-1]
-                                dt_q = s_last[1] - s_first[1]
-                                if dt_q >= 0.4:
-                                    d_c = math.hypot(s_last[0][0] - s_first[0][0], s_last[0][1] - s_first[0][1])
-                                    speed_px_s = d_c / dt_q
-                                    bh = trk["bbox"][3] - trk["bbox"][1]
-                                    norm_speed = speed_px_s / max(50.0, bh)
-                                    if speed_px_s < 20.0 or norm_speed < 0.06:
-                                        trk["movement_state"] = "STOPPED"
-                                    elif speed_px_s < 55.0 or norm_speed < 0.20:
-                                        trk["movement_state"] = "SLOW"
-                                    else:
-                                        trk["movement_state"] = "MOVING"
-                                else:
-                                    trk["movement_state"] = trk.get("movement_state", "STOPPED")
-                            else:
-                                trk["movement_state"] = trk.get("movement_state", "STOPPED")
-                        else:
-                            trk["movement_state"] = "STOPPED"
 
                     self.state.occupancy_count = q_count
                     if q_count == 0:
                         self.state.queue_movement_status = "EMPTY"
                     else:
-                        active_states = [trk.get("movement_state", "STOPPED") for trk in self._crowd_tracks.values() if trk.get("in_queue") and trk.get("misses", 0) <= 6]
+                        active_states = [
+                            trk.get("movement_state", "STOPPED")
+                            for trk in self._crowd_tracks.values()
+                            if trk.get("in_queue") and trk.get("misses", 0) <= 2
+                        ]
                         if not active_states:
-                            active_states = ["STOPPED"]
-                        if "MOVING" in active_states:
+                            self.state.queue_movement_status = "STOPPED"
+                        elif "MOVING" in active_states:
                             self.state.queue_movement_status = "MOVING"
                         elif "SLOW" in active_states:
                             self.state.queue_movement_status = "SLOW"
@@ -1424,7 +1495,7 @@ class RTSPCameraWorker:
                             "misses": trk.get("misses", 0),
                         }
                         for trk in self._crowd_tracks.values()
-                        if trk.get("misses", 0) <= 12 and trk.get("hits", 0) >= 1
+                        if trk.get("misses", 0) <= 2 and trk.get("hits", 0) >= 1
                     ]
                 self.state.detections_count = len(self._crowd_boxes)
 
@@ -1660,7 +1731,7 @@ class RTSPCameraWorker:
                                 box_color = (34, 153, 210)  # Amber
                                 tag = "SLOW WALK"
                             else:
-                                box_color = (0, 100, 235)  # Red/Amber
+                                box_color = (0, 0, 235)  # Distinct Red
                                 tag = "STANDING"
 
                             cv2.rectangle(bgr_crowd, (x1, y1), (x2, y2), box_color, 2)
