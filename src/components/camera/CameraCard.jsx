@@ -67,7 +67,7 @@ function CameraPlaceholder({ status, id, isFrs }) {
   );
 }
 
-export default function CameraCard({ camera, onSelect, onToggleFrs, onFullscreen, onToggleCrowdAI, onConfigureROI, onRequestReassign }) {
+export default function CameraCard({ camera, onSelect, onToggleFrs, onFullscreen, onToggleCrowdAI, onConfigureROI, onRequestReassign, onRequestZoneSwitch }) {
   const [streamError, setStreamError] = useState(false);
   const [retryCount, setRetryCount] = useState(0);
 
@@ -350,9 +350,28 @@ export default function CameraCard({ camera, onSelect, onToggleFrs, onFullscreen
             >
               <i className="bi bi-arrows-fullscreen" /> Full Screen
             </button>
-            <span style={{ fontSize: 9, color: "var(--cc-text-muted)" }}>
-              {camera.zone_code || camera.zone}
-            </span>
+            <button
+              className="cc-btn"
+              style={{
+                fontSize: 9,
+                padding: "2px 7px",
+                display: "flex",
+                alignItems: "center",
+                gap: 4,
+                color: "var(--cc-text-muted)",
+                border: "1px solid var(--cc-border)",
+                background: "rgba(255,255,255,0.03)",
+                cursor: onRequestZoneSwitch ? "pointer" : "default",
+              }}
+              onClick={(e) => {
+                e.stopPropagation();
+                onRequestZoneSwitch?.(camera);
+              }}
+              title="Click to Switch Camera Zone (Zone A, B, C, D)"
+            >
+              <i className="bi bi-geo-alt-fill" style={{ color: "#58a6ff" }} />
+              {camera.zone_code || camera.zone || "Zone A"}
+            </button>
           </div>
         </div>
       </div>

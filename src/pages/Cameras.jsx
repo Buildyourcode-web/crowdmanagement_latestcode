@@ -90,6 +90,7 @@ export default function Cameras() {
   const [loading, setLoading] = useState(true);
   const [search, setSearch] = useState("");
   const [activeTab, setActiveTab] = useState("ALL"); // "ALL", "FRS", "CROWD"
+  const [selectedZone, setSelectedZone] = useState("ALL"); // "ALL", "ZONE-A", "ZONE-B", "ZONE-C", "ZONE-D"
   const [gridCols, setGridCols] = useState(3);
   const [showAddModal, setShowAddModal] = useState(false);
   const [addForm, setAddForm] = useState({
@@ -308,9 +309,45 @@ export default function Cameras() {
     );
   };
 
-  const allWorkingCameras = Array.from(activeStreamsMap.values()).filter(filterBySearch);
+  const filterByZone = (cam) => {
+    if (selectedZone === "ALL") return true;
+    const camZone = (cam.zone_code || cam.zone || "").toUpperCase().trim();
+    const targetCode = selectedZone.toUpperCase().trim();
+    if (camZone === targetCode) return true;
+    const normCam = camZone.replace(/[^A-Z0-9]/g, "");
+    const normTarget = targetCode.replace(/[^A-Z0-9]/g, "");
+    if (normCam === normTarget) return true;
+
+    const preset = ZONE_PRESETS.find((z) => z.code === selectedZone);
+    if (preset) {
+      const presetNorm = preset.name.toUpperCase().replace(/[^A-Z0-9]/g, "");
+      if (normCam.includes(presetNorm) || presetNorm.includes(normCam)) return true;
+      if (preset.label && camZone.includes(preset.label.toUpperCase())) return true;
+    }
+    return false;
+  };
+
+  const allUnfilteredCameras = Array.from(activeStreamsMap.values()).filter(filterBySearch);
+  const allWorkingCameras = allUnfilteredCameras.filter(filterByZone);
   const frsCameras = allWorkingCameras.filter((c) => c.is_frs || c.camera_type === "FRS");
   const crowdCameras = allWorkingCameras.filter((c) => !c.is_frs && c.camera_type !== "FRS");
+
+  const getZoneCamCount = (zoneCode) => {
+    if (zoneCode === "ALL") return allUnfilteredCameras.length;
+    return allUnfilteredCameras.filter((cam) => {
+      const camZone = (cam.zone_code || cam.zone || "").toUpperCase().trim();
+      const targetCode = zoneCode.toUpperCase().trim();
+      if (camZone === targetCode) return true;
+      if (camZone.replace(/[^A-Z0-9]/g, "") === targetCode.replace(/[^A-Z0-9]/g, "")) return true;
+      const preset = ZONE_PRESETS.find((z) => z.code === zoneCode);
+      if (preset) {
+        const presetNorm = preset.name.toUpperCase().replace(/[^A-Z0-9]/g, "");
+        if (camZone.replace(/[^A-Z0-9]/g, "").includes(presetNorm) || presetNorm.includes(camZone.replace(/[^A-Z0-9]/g, ""))) return true;
+        if (preset.label && camZone.includes(preset.label.toUpperCase())) return true;
+      }
+      return false;
+    }).length;
+  };
 
   const handleAddCamera = async () => {
     if (!addForm.rtsp_url.trim()) {
@@ -407,6 +444,7 @@ export default function Cameras() {
       open: true,
       camera: camera,
       selectedPurposes: existing,
+      selectedZone: camera.zone_code || camera.zone || "ZONE-A",
     });
   };
 
@@ -442,13 +480,22 @@ export default function Cameras() {
         return;
       }
 
+      // If ZONE purpose was chosen, also assign the selected zone
+      if (targetPurposes.includes("ZONE") && reassignSelectModal.selectedZone) {
+        try {
+          await fetch(`${BACKEND}/api/v1/frs-engine/cameras/${camCode}/assign-zone?zone_code=${reassignSelectModal.selectedZone}`, {
+            method: "PATCH",
+          });
+        } catch (_) {}
+      }
+
       await Promise.all([loadDbCameras(), loadEngineCameras()]);
 
       if (fullscreenCamera && (fullscreenCamera.id === cam.id || fullscreenCamera.camera_code === camCode)) {
-        setFullscreenCamera((prev) => (prev ? { ...prev, ai_purposes: targetPurposes } : null));
+        setFullscreenCamera((prev) => (prev ? { ...prev, ai_purposes: targetPurposes, zone_code: reassignSelectModal.selectedZone || prev.zone_code } : null));
       }
 
-      setReassignSelectModal({ open: false, camera: null, selectedPurposes: [] });
+      setReassignSelectModal({ open: false, camera: null, selectedPurposes: [], selectedZone: "ZONE-A" });
 
       const firstPurp = targetPurposes[0] || "ENTRY_EXIT";
       const meta = PURPOSE_META[firstPurp] || PURPOSE_META.ENTRY_EXIT;
@@ -723,53 +770,199 @@ export default function Cameras() {
         </div>
       </div>
 
+      {/* 3.1 Zone Filter Bar — Select Zone A, B, C, or D to view cameras assigned to that zone only */}
+      <div
+        style={{
+          display: "flex",
+          gap: 8,
+          alignItems: "center",
+          flexWrap: "wrap",
+          padding: "8px 12px",
+          background: "var(--cc-bg-secondary)",
+          borderRadius: "var(--cc-radius)",
+          border: "1px solid var(--cc-border)",
+        }}
+      >
+        <div style={{ fontSize: 11, fontWeight: 700, color: "var(--cc-text-muted)", display: "flex", alignItems: "center", gap: 5, marginRight: 4 }}>
+          <i className="bi bi-geo-alt-fill" style={{ color: "#58a6ff" }} />
+          ZONE FILTER:
+        </div>
+        <button
+          type="button"
+          className={`cc-btn${selectedZone === "ALL" ? " cc-btn-primary" : ""}`}
+          style={{ fontSize: 11, padding: "4px 12px", borderRadius: 20 }}
+          onClick={() => setSelectedZone("ALL")}
+        >
+          All Zones ({allUnfilteredCameras.length})
+        </button>
+        {ZONE_PRESETS.map((z) => {
+          const isSel = selectedZone === z.code;
+          const count = getZoneCamCount(z.code);
+          return (
+            <button
+              key={z.code}
+              type="button"
+              className="cc-btn"
+              style={{
+                fontSize: 11,
+                padding: "4px 12px",
+                borderRadius: 20,
+                border: isSel ? `2px solid ${z.color}` : `1px solid ${z.color}40`,
+                background: isSel ? `${z.color}25` : "transparent",
+                color: isSel ? "#fff" : z.color,
+                fontWeight: isSel ? 700 : 500,
+                display: "flex",
+                alignItems: "center",
+                gap: 6,
+                transition: "all 0.15s ease",
+              }}
+              onClick={() => setSelectedZone(z.code)}
+            >
+              <i className={`bi ${z.icon}`} style={{ color: z.color, fontSize: 11 }} />
+              <span>{z.name}</span>
+              <span
+                style={{
+                  fontSize: 9.5,
+                  padding: "1px 6px",
+                  borderRadius: 10,
+                  background: isSel ? z.color : `${z.color}22`,
+                  color: isSel ? "#000" : z.color,
+                  fontWeight: 800,
+                  marginLeft: 2,
+                }}
+              >
+                {count}
+              </span>
+            </button>
+          );
+        })}
+
+        {selectedZone !== "ALL" && (
+          <button
+            type="button"
+            className="cc-btn"
+            style={{
+              marginLeft: "auto",
+              fontSize: 10,
+              padding: "2px 8px",
+              color: "var(--cc-text-muted)",
+              display: "flex",
+              alignItems: "center",
+              gap: 4,
+            }}
+            onClick={() => setSelectedZone("ALL")}
+          >
+            <i className="bi bi-x-circle" /> Reset to All Zones
+          </button>
+        )}
+      </div>
+
       {loading ? (
         <LoadingState message="Loading live operational cameras..." />
       ) : allWorkingCameras.length === 0 ? (
-        <div
-          className="cc-card"
-          style={{
-            textAlign: "center",
-            padding: "60px 24px",
-            display: "flex",
-            flexDirection: "column",
-            alignItems: "center",
-            gap: 16,
-            background: "var(--cc-bg-secondary)",
-            border: "1px solid var(--cc-border)",
-            borderRadius: "var(--cc-radius)",
-          }}
-        >
+        selectedZone !== "ALL" && allUnfilteredCameras.length > 0 ? (
           <div
+            className="cc-card"
             style={{
-              width: 64,
-              height: 64,
-              borderRadius: "50%",
-              background: "rgba(88, 166, 255, 0.1)",
-              border: "1px solid rgba(88, 166, 255, 0.25)",
+              textAlign: "center",
+              padding: "48px 24px",
               display: "flex",
+              flexDirection: "column",
               alignItems: "center",
-              justifyContent: "center",
+              gap: 14,
+              background: "var(--cc-bg-secondary)",
+              border: "1px solid var(--cc-border)",
+              borderRadius: "var(--cc-radius)",
             }}
           >
-            <i className="bi bi-camera-video-off" style={{ fontSize: 30, color: "var(--cc-accent)" }} />
-          </div>
-          <div>
-            <div style={{ fontSize: 17, fontWeight: 700, color: "var(--cc-text-primary)", marginBottom: 6 }}>
-              No Active RTSP Cameras Connected
+            <div
+              style={{
+                width: 56,
+                height: 56,
+                borderRadius: "50%",
+                background: "rgba(88, 166, 255, 0.1)",
+                border: "1px solid rgba(88, 166, 255, 0.25)",
+                display: "flex",
+                alignItems: "center",
+                justifyContent: "center",
+              }}
+            >
+              <i className="bi bi-geo-alt-fill" style={{ fontSize: 26, color: "var(--cc-accent)" }} />
             </div>
-            <div style={{ fontSize: 13, color: "var(--cc-text-muted)", maxWidth: 480, lineHeight: 1.5 }}>
-              Placeholder and dummy screens have been removed. Connect your RTSP stream URL to immediately launch live streaming with Multi-Purpose Crowd AI (Entry/Exit, Zone Density, Queue).
+            <div>
+              <div style={{ fontSize: 16, fontWeight: 700, color: "var(--cc-text-primary)", marginBottom: 6 }}>
+                No Active Cameras in {ZONE_PRESETS.find((z) => z.code === selectedZone)?.name || selectedZone}
+              </div>
+              <div style={{ fontSize: 12, color: "var(--cc-text-muted)", maxWidth: 480, lineHeight: 1.5 }}>
+                No camera stream is currently assigned to this zone ({ZONE_PRESETS.find((z) => z.code === selectedZone)?.label || ""}). You can switch an existing camera's zone or add a new RTSP camera stream assigned to this zone.
+              </div>
+            </div>
+            <div style={{ display: "flex", gap: 10 }}>
+              <button
+                className="cc-btn cc-btn-primary"
+                onClick={() => setSelectedZone("ALL")}
+                style={{ padding: "8px 16px", fontSize: 12 }}
+              >
+                View All Zones ({allUnfilteredCameras.length} cameras)
+              </button>
+              <button
+                className="cc-btn cc-btn-secondary"
+                onClick={() => {
+                  setAddForm((f) => ({ ...f, camera_type: "CROWD", ai_purposes: ["ZONE"], zone_code: selectedZone }));
+                  setShowAddModal(true);
+                }}
+                style={{ padding: "8px 16px", fontSize: 12, display: "flex", alignItems: "center", gap: 6 }}
+              >
+                <i className="bi bi-plus-circle-fill" /> Add Stream to {ZONE_PRESETS.find((z) => z.code === selectedZone)?.name || "Zone"}
+              </button>
             </div>
           </div>
-          <button
-            className="cc-btn cc-btn-primary"
-            onClick={() => setShowAddModal(true)}
-            style={{ padding: "9px 20px", fontSize: 13, display: "flex", alignItems: "center", gap: 8, marginTop: 4 }}
+        ) : (
+          <div
+            className="cc-card"
+            style={{
+              textAlign: "center",
+              padding: "60px 24px",
+              display: "flex",
+              flexDirection: "column",
+              alignItems: "center",
+              gap: 16,
+              background: "var(--cc-bg-secondary)",
+              border: "1px solid var(--cc-border)",
+              borderRadius: "var(--cc-radius)",
+            }}
           >
-            <i className="bi bi-plus-circle-fill" /> Connect Live RTSP Stream
-          </button>
-        </div>
+            <div
+              style={{
+                width: 64,
+                height: 64,
+                borderRadius: "50%",
+                background: "rgba(88, 166, 255, 0.1)",
+                border: "1px solid rgba(88, 166, 255, 0.25)",
+                display: "flex",
+                alignItems: "center",
+                justifyContent: "center",
+              }}
+            >
+              <i className="bi bi-camera-video-off" style={{ fontSize: 30, color: "var(--cc-accent)" }} />
+            </div>
+            <div>
+              <div style={{ fontSize: 17, fontWeight: 700, color: "var(--cc-text-primary)", marginBottom: 6 }}>
+                No Active RTSP Cameras Connected
+              </div>
+              <div style={{ fontSize: 13, color: "var(--cc-text-muted)", maxWidth: 480, lineHeight: 1.5 }}>
+                Placeholder and dummy screens have been removed. Connect your RTSP stream URL to immediately launch live streaming with Multi-Purpose Crowd AI (Entry/Exit, Zone Density, Queue).
+              </div>
+            </div>
+            <button
+              className="cc-btn cc-btn-primary"
+              onClick={() => setShowAddModal(true)}
+              style={{ padding: "9px 20px", fontSize: 13, display: "flex", alignItems: "center", gap: 8, marginTop: 4 }}
+            >
+              <i className="bi bi-plus-circle-fill" /> Connect Live RTSP Stream
+            </button>
+          </div>
+        )
       ) : (
         <div style={{ display: "flex", flexDirection: "column", gap: 24 }}>
           {/* ============================================================ */}
@@ -831,6 +1024,7 @@ export default function Cameras() {
                       onSelect={(c) => setFullscreenCamera(c)}
                       onFullscreen={(c) => setFullscreenCamera(c)}
                       onToggleFrs={handleToggleFrs}
+                      onRequestZoneSwitch={handleOpenZoneSwitch}
                     />
                   ))}
                 </div>
@@ -902,6 +1096,7 @@ export default function Cameras() {
                         onToggleFrs={handleToggleFrs}
                         onToggleCrowdAI={handleToggleCrowdAI}
                         onRequestReassign={handleOpenReassign}
+                        onRequestZoneSwitch={handleOpenZoneSwitch}
                         onConfigureROI={(c) => setActiveROIEditor({
                           camera: c,
                           profile_id: meta.profile_id,
@@ -1090,8 +1285,8 @@ export default function Cameras() {
                 </div>
               )}
 
-              {/* Zone Assignment — only for CROWD cameras */}
-              {addForm.camera_type === "CROWD" && (
+              {/* Zone Assignment — ONLY displayed when Zone Density Monitoring (ZONE) is selected */}
+              {addForm.camera_type === "CROWD" && (addForm.ai_purposes || []).includes("ZONE") && (
                 <div style={{ background: "rgba(15,23,42,0.75)", padding: 12, borderRadius: 8, border: "1px solid var(--cc-border)" }}>
                   <div className="cc-label" style={{ marginBottom: 8, fontWeight: 700, fontSize: 11, display: "flex", alignItems: "center", gap: 6 }}>
                     <i className="bi bi-geo-alt-fill" style={{ color: "#58a6ff" }} /> Assign to Zone:
@@ -1739,6 +1934,40 @@ export default function Cameras() {
                 );
               })}
             </div>
+
+            {/* Zone Assignment — ONLY displayed when Zone Density Monitoring (ZONE) is selected */}
+            {(reassignSelectModal.selectedPurposes || []).includes("ZONE") && (
+              <div style={{ background: "rgba(15,23,42,0.75)", padding: 12, borderRadius: 8, border: "1px solid var(--cc-border)", marginBottom: 14 }}>
+                <div className="cc-label" style={{ marginBottom: 8, fontWeight: 700, fontSize: 11, display: "flex", alignItems: "center", gap: 6 }}>
+                  <i className="bi bi-geo-alt-fill" style={{ color: "#58a6ff" }} /> Assign to Zone:
+                </div>
+                <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 8 }}>
+                  {ZONE_PRESETS.map((z) => {
+                    const isSelected = (reassignSelectModal.selectedZone || reassignSelectModal.camera?.zone_code || "ZONE-A") === z.code;
+                    return (
+                      <div
+                        key={z.code}
+                        onClick={() => setReassignSelectModal((prev) => ({ ...prev, selectedZone: z.code }))}
+                        style={{
+                          padding: "8px 10px",
+                          borderRadius: 6,
+                          cursor: "pointer",
+                          border: isSelected ? `2px solid ${z.color}` : "1px solid var(--cc-border)",
+                          background: isSelected ? `${z.color}22` : "transparent",
+                          transition: "all 0.15s",
+                        }}
+                      >
+                        <div style={{ fontWeight: 700, fontSize: 11, color: isSelected ? z.color : "var(--cc-text-primary)", display: "flex", alignItems: "center", gap: 5 }}>
+                          <i className={`bi ${z.icon}`} style={{ color: z.color }} /> {z.name}
+                        </div>
+                        <div style={{ fontSize: 9.5, color: "var(--cc-text-muted)", marginTop: 2 }}>{z.label}</div>
+                        <div style={{ fontSize: 9, color: "var(--cc-text-muted)", fontFamily: "var(--cc-font-mono)" }}>Cap: {z.capacity.toLocaleString()}</div>
+                      </div>
+                    );
+                  })}
+                </div>
+              </div>
+            )}
 
             <div style={{ fontSize: 10, color: "var(--cc-text-muted)", marginBottom: 16, lineHeight: 1.5 }}>
               <i className="bi bi-info-circle" style={{ marginRight: 4 }} />
