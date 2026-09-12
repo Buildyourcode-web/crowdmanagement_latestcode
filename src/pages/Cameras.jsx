@@ -295,20 +295,22 @@ export default function Cameras() {
 
   // 2. Overlay live RTSP engine workers actively running
   for (const eng of engineCameras) {
-    const camId = eng.camera_id || eng.id;
-    const existing = activeStreamsMap.get(camId) || {};
+    const rawId = eng.camera_id || eng.id;
+    const cleanId = (rawId || "").replace("-CROWD", "").replace("-FRS", "");
+    const matchKey = activeStreamsMap.has(rawId) ? rawId : (activeStreamsMap.has(cleanId) ? cleanId : rawId);
+    const existing = activeStreamsMap.get(matchKey) || {};
     const isFrs = Boolean(eng.is_frs || eng.camera_type === "FRS");
-    activeStreamsMap.set(camId, {
+    activeStreamsMap.set(matchKey, {
       ...existing,
-      id: camId,
-      camera_code: camId,
-      name: eng.name || existing.name || camId,
-      label: eng.name || existing.label || camId,
+      id: matchKey,
+      camera_code: matchKey,
+      name: eng.name || existing.name || matchKey,
+      label: eng.name || existing.label || matchKey,
       status: eng.status || existing.status || "online",
       is_frs: isFrs,
       is_frs_camera: isFrs,
       camera_type: isFrs ? "FRS" : "CROWD",
-      stream_url: eng.stream_url || existing.stream_url || `/api/v1/frs-engine/cameras/${camId}/stream`,
+      stream_url: eng.stream_url || existing.stream_url || `/api/v1/frs-engine/cameras/${matchKey}/stream`,
       fps: 25,
       zone_code: eng.zone_code || existing.zone_code || "ZONE-A",
       detections_count: eng.detections_count || existing.detections_count || 0,
