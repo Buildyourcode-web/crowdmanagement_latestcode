@@ -1547,12 +1547,27 @@ class RTSPCameraWorker:
 
     def run(self):
         (FaceModel, IdentityMatcher, FaceQualityAssessor, FaceTracker, RTSPReader, db) = _load_frs_components()
-        if FaceModel is None:
+
+        # For CROWD-only cameras, RTSPReader is enough — FaceModel is not needed.
+        # Only abort if RTSPReader itself failed to load (truly unrecoverable).
+        if RTSPReader is None:
             self.state.status = "error"
+            logger.error(f"[FRS-Worker:{self.state.camera_id}] RTSPReader unavailable — cannot start worker.")
             return
 
-        try:
+        if FaceModel is None and not self.state.is_frs:
+            # CROWD camera: FRS/InsightFace not needed. Proceed with RTSP + YOLO only.
+            logger.info(f"[FRS-Worker:{self.state.camera_id}] CROWD mode — skipping FRS components (InsightFace not loaded).")
+            face_model, matcher, tracker = None, None, None
+        elif FaceModel is None:
+            self.state.status = "error"
+            logger.error(f"[FRS-Worker:{self.state.camera_id}] FRS mode requested but FaceModel unavailable.")
+            return
+        else:
             face_model, matcher = get_shared_engine()
+            tracker = FaceTracker(max_missed_frames=15, min_iou=0.10, max_center_distance=180.0) if FaceTracker else None
+
+        try:
             reader = RTSPReader(url=self.state.rtsp_url, resize=(1280, 720))
             self.state.reader = reader
             self.reader = reader
@@ -1560,19 +1575,17 @@ class RTSPCameraWorker:
             self.state.status = "online"
             logger.info(f"[FRS-Worker:{self.state.camera_id}] RTSP reader started: {self.state.rtsp_url}")
 
-            # Instantiate FaceTracker for persistent temporal tracking across motion & static poses
-            tracker = FaceTracker(max_missed_frames=15, min_iou=0.10, max_center_distance=180.0)
+            # Start decoupled background FRS AI thread (only if face model loaded)
+            if face_model is not None and tracker is not None:
+                ai_thread = threading.Thread(
+                    target=self._ai_detection_loop,
+                    args=(face_model, matcher, tracker),
+                    daemon=True,
+                    name=f"FRS-AI-{self.state.camera_id}"
+                )
+                ai_thread.start()
 
-            # Start decoupled background FRS AI thread
-            ai_thread = threading.Thread(
-                target=self._ai_detection_loop,
-                args=(face_model, matcher, tracker),
-                daemon=True,
-                name=f"FRS-AI-{self.state.camera_id}"
-            )
-            ai_thread.start()
-
-            # Start decoupled background YOLO11x Crowd AI thread
+            # Start decoupled background YOLO11x Crowd AI thread (always)
             crowd_thread = threading.Thread(
                 target=self._crowd_ai_detection_loop,
                 daemon=True,
@@ -2140,9 +2153,9 @@ def get_worker_for_camera(camera_code_or_id: str) -> Optional[CameraWorkerState]
         if len(_camera_workers) == 1:
             return next(iter(_camera_workers.values()))
 
-        # 4. Check worker streaming the physical camera IP (192.168.0.102)
+        # 4. Check worker streaming the physical camera IP (136.232.225.102 or 192.168.0.102)
         for state in _camera_workers.values():
-            if "192.168.0.102" in state.rtsp_url:
+            if "136.232.225.102" in state.rtsp_url or "192.168.0.102" in state.rtsp_url:
                 return state
 
         return None
