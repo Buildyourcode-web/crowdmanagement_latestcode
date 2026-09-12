@@ -3,14 +3,13 @@
 /**
  * Returns the backend API base URL.
  * 
- * - When running in production (e.g. EC2 IP 13.233.154.239 or custom domain):
+ * - In production (e.g. EC2 instance or custom domain):
  *   Returns "" (relative path) so all /api/... and /static/... calls route
  *   through Nginx on the current origin (port 80/443). This avoids CORS,
- *   browser loopback blocks, and port 8000 firewall timeouts.
- * - When running in local development (Vite dev server on localhost):
- *   Returns "" (relative path) so requests route through Vite's dev server proxy
- *   (which forwards /api and /static to http://localhost:8000).
- * - If VITE_API_BASE_URL is explicitly set to a non-localhost remote URL, uses that.
+ *   browser loopback blocks, and port firewall timeouts.
+ * - In local development (Vite dev server on localhost):
+ *   Returns "" (relative path) so requests route through Vite's dev server proxy.
+ * - If VITE_API_BASE_URL is explicitly set to a remote URL, uses that.
  */
 export function getBackendUrl() {
   const envUrl = (import.meta.env.VITE_API_BASE_URL || "").trim();
@@ -19,7 +18,7 @@ export function getBackendUrl() {
     const hostname = window.location.hostname;
     const isLocal = hostname === "localhost" || hostname === "127.0.0.1";
 
-    // If we're on a remote host (e.g. AWS EC2), ignore any accidental localhost config
+    // If on a remote host, ignore any accidental localhost config
     if (!isLocal && envUrl.includes("localhost")) {
       return "";
     }
@@ -46,8 +45,8 @@ export function getApiBaseUrl() {
  *   Connects to ws://13.233.154.239/ws/v1/events (via Nginx reverse proxy on port 80).
  * - On HTTPS server (e.g. https://domain.com):
  *   Connects to wss://domain.com/ws/v1/events (via Nginx reverse proxy on port 443).
- * - On local development (http://localhost:5173):
- *   Connects to ws://localhost:5173/ws/v1/events (via Vite proxy to localhost:8000).
+ * - On local development:
+ *   Connects to ws://localhost:5173/ws/v1/events (via Vite proxy).
  */
 export function getWsUrl() {
   const configuredWs = (import.meta.env.VITE_WS_URL || "").trim();
@@ -65,5 +64,5 @@ export function getWsUrl() {
     return `${protocol}//${window.location.host}/ws/v1/events`;
   }
 
-  return "ws://localhost:8000/ws/v1/events";
+  return "";
 }
