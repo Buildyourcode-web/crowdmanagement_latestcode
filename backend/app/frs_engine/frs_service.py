@@ -1525,18 +1525,20 @@ class RTSPCameraWorker:
                         {
                             "track_id": trk["track_id"],
                             "bbox": [int(round(v)) for v in trk["bbox"]],
+                            "velocity": trk.get("velocity", (0.0, 0.0)),
+                            "updated_at": curr_time,
                             "head": [int(round(trk["top_center"][0])), int(round(trk["bbox"][1] + max(4, (trk["bbox"][3] - trk["bbox"][1]) * 0.18)))],
                             "centroid": [int(round(trk["centroid"][0])), int(round(trk["centroid"][1]))],
                             "bottom_center": [int(round(trk["bottom_center"][0])), int(round(trk["bottom_center"][1]))],
-                            "label": f"HUMAN {round(trk.get('confidence', 0.85) * 100)}%",
+                            "label": f"PERSON #{trk['track_id']} {round(trk.get('confidence', 0.85) * 100)}%",
                             "confidence": trk.get("confidence", 0.85),
-                            "expiry": curr_time + 1.5,
+                            "expiry": curr_time + 1.8,
                             "in_queue": trk.get("in_queue", False),
                             "movement_state": trk.get("movement_state", "STOPPED"),
                             "misses": trk.get("misses", 0),
                         }
                         for trk in self._crowd_tracks.values()
-                        if trk.get("misses", 0) <= 2 and trk.get("hits", 0) >= 1
+                        if trk.get("misses", 0) <= 6 and trk.get("hits", 0) >= 1
                     ]
                 self.state.detections_count = len(self._crowd_boxes)
 
@@ -1649,22 +1651,39 @@ class RTSPCameraWorker:
 
                     purposes = self.state.ai_purposes or ["ENTRY_EXIT"]
 
+                    # Helper to calculate continuous interpolated box position at 25 FPS
+                    def _get_continuous_box(cb):
+                        extrap_dt = min(0.35, max(0.0, now - cb.get("updated_at", now)))
+                        vx, vy = cb.get("velocity", (0.0, 0.0))
+                        misses = cb.get("misses", 0)
+                        if misses > 0:
+                            decay = max(0.25, 1.0 - misses * 0.12)
+                            vx *= decay
+                            vy *= decay
+                        dx = int(vx * extrap_dt)
+                        dy = int(vy * extrap_dt)
+                        bx1 = max(0, min(w - 4, cb["bbox"][0] + dx))
+                        by1 = max(0, min(h - 4, cb["bbox"][1] + dy))
+                        bx2 = max(bx1 + 4, min(w, cb["bbox"][2] + dx))
+                        by2 = max(by1 + 4, min(h, cb["bbox"][3] + dy))
+                        return bx1, by1, bx2, by2
+
                     # -------------------------------------------------------
                     # A. ENTRY / EXIT COUNTING OVERLAY
                     # -------------------------------------------------------
                     is_entry = "ENTRY" in purposes and "EXIT" not in purposes
                     is_exit = "EXIT" in purposes and "ENTRY" not in purposes
                     if is_entry or is_exit or "ENTRY_EXIT" in purposes:
-                        # Draw person boxes
+                        # Draw continuous person boxes
                         box_col = (46, 204, 113) if is_entry else ((0, 80, 245) if is_exit else (46, 204, 113))
                         for cb in cboxes:
-                            x1, y1, x2, y2 = cb["bbox"]
+                            x1, y1, x2, y2 = _get_continuous_box(cb)
                             cv2.rectangle(bgr_crowd, (x1, y1), (x2, y2), box_col, 2)
                             clbl = cb["label"]
-                            (lw, lh), _ = cv2.getTextSize(clbl, cv2.FONT_HERSHEY_SIMPLEX, 0.45, 1)
+                            (lw, lh), _ = cv2.getTextSize(clbl, cv2.FONT_HERSHEY_SIMPLEX, 0.42, 1)
                             top_y = max(lh + 6, y1)
                             cv2.rectangle(bgr_crowd, (x1, top_y - lh - 6), (x1 + lw + 6, top_y + 2), box_col, -1)
-                            cv2.putText(bgr_crowd, clbl, (x1 + 3, top_y - 3), cv2.FONT_HERSHEY_SIMPLEX, 0.45, (0, 0, 0), 1, cv2.LINE_AA)
+                            cv2.putText(bgr_crowd, clbl, (x1 + 3, top_y - 3), cv2.FONT_HERSHEY_SIMPLEX, 0.42, (0, 0, 0), 1, cv2.LINE_AA)
 
                         # Draw configured counting lines
                         for line in self._cached_roi_lines:
@@ -1691,7 +1710,7 @@ class RTSPCameraWorker:
                         # End of Entry/Exit lines and boxes
 
                     # -------------------------------------------------------
-                    # B. ZONE DENSITY MANAGEMENT OVERLAY (Polygons + Head Dots)
+                    # B. ZONE DENSITY MANAGEMENT OVERLAY (Polygons + Head Dots + Continuous Boxes)
                     # -------------------------------------------------------
                     if "ZONE" in purposes:
                         worst_status = "NORMAL"
@@ -1732,12 +1751,26 @@ class RTSPCameraWorker:
                         if self._zone_stats:
                             cv2.addWeighted(overlay, 0.25, bgr_crowd, 0.75, 0, bgr_crowd)
 
-                        # 2. Draw Head Count Dots (glowing cyan / amber dots at head location)
+                        # 2. Draw continuous person bounding boxes in Zone mode (if not already drawn by Entry/Exit)
+                        if not (is_entry or is_exit or "ENTRY_EXIT" in purposes):
+                            z_box_col = (46, 204, 113) if worst_status == "NORMAL" else ((0, 140, 255) if worst_status == "WARNING" else (0, 0, 235))
+                            for cb in cboxes:
+                                x1, y1, x2, y2 = _get_continuous_box(cb)
+                                cv2.rectangle(bgr_crowd, (x1, y1), (x2, y2), z_box_col, 2)
+                                clbl = cb["label"]
+                                (lw, lh), _ = cv2.getTextSize(clbl, cv2.FONT_HERSHEY_SIMPLEX, 0.42, 1)
+                                top_y = max(lh + 6, y1)
+                                cv2.rectangle(bgr_crowd, (x1, top_y - lh - 6), (x1 + lw + 6, top_y + 2), z_box_col, -1)
+                                cv2.putText(bgr_crowd, clbl, (x1 + 3, top_y - 3), cv2.FONT_HERSHEY_SIMPLEX, 0.42, (0, 0, 0), 1, cv2.LINE_AA)
+
+                        # 3. Draw Head Count Dots (glowing cyan / amber dots at head location)
                         for cb in cboxes:
-                            hx, hy = cb.get("head", ((cb["bbox"][0] + cb["bbox"][2]) // 2, cb["bbox"][1] + 10))
+                            x1, y1, x2, y2 = _get_continuous_box(cb)
+                            hx = (x1 + x2) // 2
+                            hy = y1 + max(4, int((y2 - y1) * 0.12))
                             # Outer ring
-                            cv2.circle(bgr_crowd, (hx, hy), 7, (255, 255, 0), -1, cv2.LINE_AA)
-                            cv2.circle(bgr_crowd, (hx, hy), 9, (0, 255, 255), 2, cv2.LINE_AA)
+                            cv2.circle(bgr_crowd, (hx, hy), 6, (255, 255, 0), -1, cv2.LINE_AA)
+                            cv2.circle(bgr_crowd, (hx, hy), 8, (0, 255, 255), 2, cv2.LINE_AA)
                             # Center dot
                             cv2.circle(bgr_crowd, (hx, hy), 2, (0, 0, 0), -1, cv2.LINE_AA)
 
@@ -1771,24 +1804,24 @@ class RTSPCameraWorker:
                             cv2.circle(bgr_crowd, l1, 4, (34, 153, 210), -1)
                             cv2.circle(bgr_crowd, l2, 4, (34, 153, 210), -1)
 
-                        # Draw person boxes & status indicators
+                        # Draw continuous person boxes & status indicators
                         for cb in cboxes:
-                            x1, y1, x2, y2 = cb["bbox"]
+                            x1, y1, x2, y2 = _get_continuous_box(cb)
                             in_q = cb.get("in_queue", False)
                             p_state = cb.get("movement_state", "STOPPED")
 
                             if not in_q:
                                 box_color = (160, 160, 160)
-                                tag = "HUMAN"
+                                tag = cb.get("label", "HUMAN")
                             elif p_state == "MOVING":
                                 box_color = (46, 204, 113)  # Bright Green
-                                tag = "WALKING"
+                                tag = f"ID #{cb.get('track_id', '')} WALKING"
                             elif p_state == "SLOW":
                                 box_color = (34, 153, 210)  # Amber
-                                tag = "SLOW WALK"
+                                tag = f"ID #{cb.get('track_id', '')} SLOW WALK"
                             else:
                                 box_color = (0, 0, 235)  # Distinct Red
-                                tag = "STANDING"
+                                tag = f"ID #{cb.get('track_id', '')} STANDING"
 
                             cv2.rectangle(bgr_crowd, (x1, y1), (x2, y2), box_color, 2)
                             (tw, th), _ = cv2.getTextSize(tag, cv2.FONT_HERSHEY_SIMPLEX, 0.42, 1)
