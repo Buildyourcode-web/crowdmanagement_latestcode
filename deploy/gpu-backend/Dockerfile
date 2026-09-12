@@ -13,6 +13,7 @@ ENV PYTHONDONTWRITEBYTECODE=1
 # NVIDIA Runtime Capabilities
 ENV NVIDIA_VISIBLE_DEVICES=all
 ENV NVIDIA_DRIVER_CAPABILITIES=compute,utility,video
+ENV LD_LIBRARY_PATH=/usr/local/cuda/lib64:/usr/local/cuda-12.4/lib64:/usr/local/cuda-12.4/targets/x86_64-linux/lib:${LD_LIBRARY_PATH}
 
 WORKDIR /app
 
@@ -38,9 +39,17 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 # 2. Upgrade pip and setuptools
 RUN pip install --no-cache-dir --upgrade pip setuptools wheel
 
-# 3. Copy and install Python dependencies
+# 3. Install PyTorch with native CUDA 12.4 support
+RUN pip install --no-cache-dir torch torchvision --index-url https://download.pytorch.org/whl/cu124
+
+# 4. Copy and install Python dependencies
 COPY deploy/gpu-backend/requirements.txt /app/requirements.txt
 RUN pip install --no-cache-dir -r /app/requirements.txt
+
+# 5. CRITICAL FIX: insightface pulls 'onnxruntime' (CPU) which overwrites 'onnxruntime-gpu'.
+# We must uninstall the CPU package and force-reinstall onnxruntime-gpu so CUDAExecutionProvider is registered.
+RUN pip uninstall -y onnxruntime && \
+    pip install --no-cache-dir --force-reinstall --no-deps onnxruntime-gpu
 
 # 4. Create persistent volume mount points for data, models, and InsightFace cache
 RUN mkdir -p /app/media /app/models /app/data /root/.insightface/models
