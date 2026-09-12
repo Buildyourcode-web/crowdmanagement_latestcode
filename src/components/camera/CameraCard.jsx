@@ -68,7 +68,7 @@ function CameraPlaceholder({ status, id, isFrs }) {
   );
 }
 
-export default function CameraCard({ camera, onSelect, onToggleFrs, onFullscreen, onToggleCrowdAI, onConfigureROI, onRequestReassign, onRequestZoneSwitch }) {
+export default function CameraCard({ camera, onSelect, onToggleFrs, onFullscreen, onToggleCrowdAI, onConfigureROI, onRequestReassign, onRequestZoneSwitch, onDelete }) {
   const [streamError, setStreamError] = useState(false);
   const [retryCount, setRetryCount] = useState(0);
 
@@ -137,6 +137,29 @@ export default function CameraCard({ camera, onSelect, onToggleFrs, onFullscreen
             >
               <i className="bi bi-arrows-fullscreen" />
             </button>
+            {onDelete && (
+              <button
+                className="cc-btn"
+                title="Remove Camera"
+                style={{
+                  padding: "2px 6px",
+                  fontSize: 10,
+                  background: "rgba(220, 38, 38, 0.8)",
+                  border: "1px solid rgba(248, 81, 73, 0.5)",
+                  color: "#fff",
+                  cursor: "pointer",
+                  borderRadius: 2,
+                }}
+                onClick={(e) => {
+                  e.stopPropagation();
+                  if (window.confirm(`Are you sure you want to remove camera "${camera.name || camera.label || camera.id}"?`)) {
+                    onDelete(camera);
+                  }
+                }}
+              >
+                <i className="bi bi-trash3-fill" />
+              </button>
+            )}
           </div>
           <div
             style={{
@@ -373,6 +396,30 @@ export default function CameraCard({ camera, onSelect, onToggleFrs, onFullscreen
               <i className="bi bi-geo-alt-fill" style={{ color: "#58a6ff" }} />
               {camera.zone_code || camera.zone || "Zone A"}
             </button>
+            {onDelete && (
+              <button
+                className="cc-btn"
+                style={{
+                  fontSize: 9,
+                  padding: "2px 7px",
+                  display: "flex",
+                  alignItems: "center",
+                  gap: 4,
+                  color: "var(--cc-red)",
+                  borderColor: "rgba(248, 81, 73, 0.35)",
+                  background: "rgba(248, 81, 73, 0.08)",
+                }}
+                onClick={(e) => {
+                  e.stopPropagation();
+                  if (window.confirm(`Remove camera "${camera.name || camera.label || camera.id}"? This will stop the live feed and delete the camera.`)) {
+                    onDelete(camera);
+                  }
+                }}
+                title="Remove this camera"
+              >
+                <i className="bi bi-trash3-fill" /> Remove
+              </button>
+            )}
           </div>
         </div>
       </div>

@@ -222,6 +222,20 @@ async def update_camera(
     return success_response(camera)
 
 
+@router.delete("/{id}", response_model=StandardResponse[dict])
+async def delete_camera(
+    id: str,
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(require_permission(Permissions.CAMERA_MANAGE)),
+):
+    """
+    Deletes a camera from database and halts all active streaming and AI workers.
+    """
+    service = CameraService(db)
+    result = await service.delete_camera(id)
+    return success_response(result)
+
+
 @router.patch("/{id}/toggle-status", response_model=StandardResponse[CameraRead])
 async def toggle_camera_status(
     id: str,

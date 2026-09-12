@@ -2,7 +2,7 @@
 import { useState, useEffect, useCallback, useRef } from "react";
 import { useNavigate } from "react-router-dom";
 import CameraCard from "../components/camera/CameraCard.jsx";
-import { getCameras, getCameraStats, toggleCameraFRS } from "../services/cameraService.js";
+import { getCameras, getCameraStats, toggleCameraFRS, deleteCamera } from "../services/cameraService.js";
 import { switchCameraAIMode } from "../services/aiService.js";
 import { realtimeService } from "../services/realtimeService.js";
 import { LoadingState } from "../components/common/States.jsx";
@@ -95,8 +95,8 @@ export default function Cameras() {
   const [showAddModal, setShowAddModal] = useState(false);
   const [isAddModalFullscreen, setIsAddModalFullscreen] = useState(false);
   const [addForm, setAddForm] = useState({
-    name: "Entry Gate 1 Camera",
-    rtsp_url: DEFAULT_RTSP,
+    name: "",
+    rtsp_url: "",
     camera_type: "CROWD",
     is_frs: false,
     ai_purposes: ["ENTRY"],
@@ -417,8 +417,8 @@ export default function Cameras() {
           });
         }
         setAddForm({
-          name: "Entry Gate 1 Camera",
-          rtsp_url: DEFAULT_RTSP,
+          name: "",
+          rtsp_url: "",
           camera_type: "CROWD",
           is_frs: false,
           ai_purposes: ["ENTRY"],
@@ -429,6 +429,22 @@ export default function Cameras() {
       setAddError("Backend connection error — check backend is running");
     } finally {
       setAddLoading(false);
+    }
+  };
+
+  const handleDeleteCamera = async (camera) => {
+    const camId = camera.id || camera.camera_code;
+    if (!camId) return;
+    try {
+      await deleteCamera(camId);
+      // Immediately update local state
+      setEngineCameras((prev) => prev.filter((c) => c.id !== camId && c.camera_code !== camId));
+      setDbCameras((prev) => prev.filter((c) => c.id !== camId && c.camera_code !== camId));
+      // Re-fetch in background to update counts & stats
+      Promise.all([loadDbCameras(), loadEngineCameras()]).catch(() => {});
+    } catch (err) {
+      console.error("Failed to delete camera:", err);
+      alert("Failed to remove camera: " + (err.response?.data?.detail?.message || err.message));
     }
   };
 
@@ -1053,6 +1069,7 @@ export default function Cameras() {
                       onFullscreen={(c) => setFullscreenCamera(c)}
                       onToggleFrs={handleToggleFrs}
                       onRequestZoneSwitch={handleOpenZoneSwitch}
+                      onDelete={handleDeleteCamera}
                     />
                   ))}
                 </div>
@@ -1125,6 +1142,7 @@ export default function Cameras() {
                         onToggleCrowdAI={handleToggleCrowdAI}
                         onRequestReassign={handleOpenReassign}
                         onRequestZoneSwitch={handleOpenZoneSwitch}
+                        onDelete={handleDeleteCamera}
                         onConfigureROI={(c) => setActiveROIEditor({
                           camera: c,
                           profile_id: meta.profile_id,
@@ -1463,15 +1481,7 @@ export default function Cameras() {
                   type="button"
                   className="cc-btn"
                   style={{ fontSize: 10, padding: "3px 8px" }}
-                  onClick={() => setAddForm((f) => ({ ...f, rtsp_url: DEFAULT_RTSP }))}
-                >
-                  <i className="bi bi-lightning-fill" style={{ color: "var(--cc-accent)" }} /> Default Camera RTSP
-                </button>
-                <button
-                  type="button"
-                  className="cc-btn"
-                  style={{ fontSize: 10, padding: "3px 8px" }}
-                  onClick={() => setAddForm((f) => ({ ...f, rtsp_url: "0", name: "Local USB Webcam" }))}
+                  onClick={() => setAddForm((f) => ({ ...f, rtsp_url: "0", name: f.name || "Local USB Webcam" }))}
                 >
                   <i className="bi bi-webcam-fill" /> USB Webcam (0)
                 </button>

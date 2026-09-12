@@ -37,3 +37,33 @@ async def test_camera_stats(client: AsyncClient, superadmin_token: str):
     data = response.json()
     assert data["success"] is True
     assert "online" in data["data"]
+
+
+@pytest.mark.asyncio
+async def test_delete_camera(client: AsyncClient, db_session: AsyncSession, superadmin_token: str):
+    cam = Camera(
+        camera_code="CAM-KHB-DEL-01",
+        name="Test Delete Camera",
+        label="Delete Cam Test",
+        camera_type="CROWD",
+        zone_code="ZONE-A",
+        coordinates=[78.4635, 17.4175],
+        status="online",
+        ai_status="online",
+        is_frs_camera=False,
+        is_ptz=False,
+    )
+    db_session.add(cam)
+    await db_session.commit()
+
+    headers = {"Authorization": f"Bearer {superadmin_token}"}
+    del_res = await client.delete(f"/api/v1/cameras/{cam.camera_code}", headers=headers)
+    assert del_res.status_code == 200
+    data = del_res.json()
+    assert data["success"] is True
+    assert data["data"]["deleted"] is True
+    assert data["data"]["in_database"] is True
+
+    # Confirm it's gone
+    get_res = await client.get(f"/api/v1/cameras/{cam.camera_code}", headers=headers)
+    assert get_res.status_code == 404

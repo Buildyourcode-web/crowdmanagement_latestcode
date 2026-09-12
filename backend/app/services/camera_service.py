@@ -508,6 +508,73 @@ class CameraService:
         )
         return safe_read
 
+    async def delete_camera(self, camera_code: str) -> Dict[str, Any]:
+        """
+        Permanently deletes camera, cleans up relations, unlinks events/metrics,
+        and halts all streaming threads and AI inference pipelines.
+        """
+        global _stats_cache
+        cam = await self.camera_repo.get_by_code(camera_code)
+
+        target_code = cam.camera_code if cam else camera_code
+
+        # 1. Stop background AI pipelines
+        try:
+            await CrowdPipelineRegistry.stop_pipeline(target_code)
+        except Exception:
+            pass
+        try:
+            await QueuePipelineRegistry.stop_pipeline(target_code)
+        except Exception:
+            pass
+        try:
+            await FRSPipelineRegistry.stop_pipeline(target_code)
+        except Exception:
+            pass
+
+        # 2. Stop in-memory FRS / RTSP worker
+        try:
+            from app.frs_engine.frs_service import remove_frs_camera
+            await remove_frs_camera(target_code, sync_db=False)
+        except Exception:
+            pass
+
+        # 3. If in database, nullify foreign key references and delete
+        in_db = False
+        if cam:
+            in_db = True
+            try:
+                from app.models.alert import Alert
+                from app.models.crowd import CrowdMetric
+                from app.models.queue import QueueMetric
+                from app.models.frs import FRSDetection
+                from app.models.camera_roi import CameraROIConfiguration
+                from app.models.camera_ai_assignment import CameraAIProfileAssignment
+                from sqlalchemy import update, delete
+
+                await self.db.execute(update(Alert).where(Alert.camera_id == cam.id).values(camera_id=None))
+                await self.db.execute(update(CrowdMetric).where(CrowdMetric.camera_id == cam.id).values(camera_id=None))
+                await self.db.execute(update(QueueMetric).where(QueueMetric.camera_id == cam.id).values(camera_id=None))
+                await self.db.execute(update(FRSDetection).where(FRSDetection.camera_id == cam.id).values(camera_id=None))
+
+                await self.db.execute(delete(CameraROIConfiguration).where(CameraROIConfiguration.camera_id == cam.id))
+                await self.db.execute(delete(CameraAIProfileAssignment).where(CameraAIProfileAssignment.camera_id == cam.id))
+            except Exception as e:
+                logger.warning(f"Error unlinking references for camera {cam.camera_code}: {e}")
+
+            await self.db.delete(cam)
+            await self.db.commit()
+
+            await event_bus.publish(
+                channel="cameras",
+                event_type="CAMERA_DELETED",
+                payload={"camera_id": cam.camera_code},
+            )
+
+        _stats_cache = None
+        logger.info(f"[CameraService] Camera {target_code} deleted (in_database={in_db})")
+        return {"deleted": True, "camera_code": target_code, "in_database": in_db}
+
     async def test_camera_stream(self, camera_code: str, timeout_sec: float = 6.0) -> RTSPTestResponse:
         """
         Tests stream connectivity for an existing saved camera.

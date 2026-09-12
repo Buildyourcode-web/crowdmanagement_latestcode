@@ -21,6 +21,16 @@ export async function updateCamera(id, payload) {
   return res.data;
 }
 
+export async function deleteCamera(id) {
+  try {
+    const res = await apiClient.delete(`/api/v1/cameras/${id}`);
+    return res.data;
+  } catch (e) {
+    const fallbackRes = await apiClient.delete(`/api/v1/frs-engine/cameras/${id}`);
+    return fallbackRes.data;
+  }
+}
+
 export async function toggleCameraStatus(id, enabled = null) {
   const params = enabled !== null ? { enabled } : {};
   const res = await apiClient.patch(`/api/v1/cameras/${id}/toggle-status`, null, { params });

@@ -2057,20 +2057,47 @@ async def list_frs_engine_cameras():
 # ── DELETE /cameras/{id} ─────────────────────────────────────────────────────
 
 
-@router.delete("/cameras/{camera_id}", status_code=204)
-async def remove_frs_camera(camera_id: str):
-    """Stop and remove an FRS camera worker."""
+@router.delete("/cameras/{camera_id}", status_code=200)
+async def remove_frs_camera(camera_id: str, sync_db: bool = True):
+    """Stop and remove an FRS camera worker and delete/disable from DB."""
     with _workers_lock:
         state = _camera_workers.pop(camera_id, None)
+        if state is None:
+            target_key = None
+            target_clean = camera_id.replace("-FRS", "").replace("-CROWD", "").strip().lower()
+            for cid, s in _camera_workers.items():
+                cid_clean = cid.replace("-FRS", "").replace("-CROWD", "").strip().lower()
+                if cid_clean == target_clean or cid.lower() == camera_id.lower():
+                    target_key = cid
+                    break
+            if target_key:
+                state = _camera_workers.pop(target_key, None)
 
-    if state is None:
+    if state is not None:
+        state.running = False
+        if state.thread:
+            state.thread.join(timeout=3.0)
+        logger.info(f"[FRS-Engine] Camera removed: {camera_id}")
+
+    if sync_db:
+        try:
+            from app.db.session import AsyncSessionLocal
+            from app.services.camera_service import CameraService
+            async def _sync_del():
+                async with AsyncSessionLocal() as pg_db:
+                    srv = CameraService(pg_db)
+                    await srv.delete_camera(camera_id)
+            if _main_loop and _main_loop.is_running():
+                asyncio.run_coroutine_threadsafe(_sync_del(), _main_loop)
+            else:
+                asyncio.create_task(_sync_del())
+        except Exception as ex:
+            logger.warning(f"Error syncing camera deletion to DB: {ex}")
+
+    if state is None and not sync_db:
         raise HTTPException(status_code=404, detail=f"Camera {camera_id} not found")
 
-    state.running = False
-    if state.thread:
-        state.thread.join(timeout=3.0)
-
-    logger.info(f"[FRS-Engine] Camera removed: {camera_id}")
+    return {"status": "ok", "removed": camera_id}
 
 
 def get_worker_for_camera(camera_code_or_id: str) -> Optional[CameraWorkerState]:

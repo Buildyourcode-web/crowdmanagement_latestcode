@@ -2,7 +2,7 @@
 import { useEffect, useState, useCallback, useRef } from "react";
 import { useParams, useNavigate } from "react-router-dom";
 import StatusBadge from "../components/common/StatusBadge.jsx";
-import { getCameraById, updateCamera, getZones } from "../services/cameraService.js";
+import { getCameraById, updateCamera, getZones, deleteCamera } from "../services/cameraService.js";
 import { getCameraROIConfig } from "../services/aiService.js";
 import ROIEditor from "../components/ai/ROIEditor.jsx";
 import { LoadingState, ErrorState } from "../components/common/States.jsx";
@@ -341,6 +341,33 @@ export default function CameraDetail() {
         <div style={{ display: "flex", gap: 8, alignItems: "center" }}>
           <PurposeBadge camera={camera} liveData={liveData} />
           <StatusBadge status={camera.status} />
+          <button
+            className="cc-btn"
+            style={{
+              padding: "5px 12px",
+              fontSize: 11,
+              display: "flex",
+              alignItems: "center",
+              gap: 5,
+              color: "var(--cc-red)",
+              borderColor: "rgba(248, 81, 73, 0.4)",
+              background: "rgba(248, 81, 73, 0.1)",
+              cursor: "pointer",
+            }}
+            onClick={async () => {
+              if (window.confirm(`Are you sure you want to remove camera "${camera.name || camera.camera_code || camera.id}"? This will stop the live stream and delete the camera.`)) {
+                try {
+                  await deleteCamera(camera.camera_code || camera.id);
+                  navigate("/cameras");
+                } catch (err) {
+                  alert("Failed to delete camera: " + (err.response?.data?.detail?.message || err.message));
+                }
+              }
+            }}
+            title="Delete this camera"
+          >
+            <i className="bi bi-trash3-fill" /> Delete Camera
+          </button>
         </div>
       </div>
 
