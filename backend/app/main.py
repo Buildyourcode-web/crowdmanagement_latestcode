@@ -60,6 +60,33 @@ async def lifespan(app: FastAPI):
             from app.services.camera_service import CameraService
             from app.services.dashboard_service import DashboardService
             async with AsyncSessionLocal() as session:
+                # Ensure default admin user exists
+                try:
+                    from app.models.user import User
+                    from app.models.role import Role
+                    from app.security.password import get_password_hash
+                    from sqlalchemy import select
+                    admin_user = (await session.execute(select(User).where(User.username == "admin"))).scalar_one_or_none()
+                    if not admin_user:
+                        role = (await session.execute(select(Role).where(Role.code == "SUPER_ADMIN"))).scalar_one_or_none()
+                        if not role:
+                            role = Role(code="SUPER_ADMIN", name="Super Admin", description="Super Admin role")
+                            session.add(role)
+                            await session.flush()
+                        admin_user = User(
+                            username="admin",
+                            email="admin@byc.gov.in",
+                            password_hash=get_password_hash("admin123"),
+                            full_name="Administrator",
+                            role_id=role.id,
+                            is_active=True,
+                        )
+                        session.add(admin_user)
+                        await session.commit()
+                        logger.info("[Auth] Initialized default admin user: admin / admin123")
+                except Exception as ex:
+                    logger.warning(f"[Auth] Admin user auto-creation skipped: {ex}")
+
                 await CrowdService(session).get_summary()
                 await ZoneService(session).list_zones()
                 await CameraService(session).get_camera_stats()
