@@ -324,6 +324,7 @@ export default function CameraDetail() {
 
   const allPurposes = getAllPurposes(camera, liveData);
   const primaryPurpose = allPurposes[0] || "ENTRY_EXIT";
+  const purpose = primaryPurpose;
   const pMeta = PURPOSE_META[primaryPurpose] || PURPOSE_META.ENTRY_EXIT;
   const isOnline = camera.status === "online" || camera.stream_status === "ONLINE";
 
@@ -485,31 +486,19 @@ export default function CameraDetail() {
                 <span style={{ color: "#8b949e" }}>Active Purpose</span>
                 <span style={{ fontWeight: 700, color: pMeta.color }}>{pMeta.label}</span>
               </div>
-              {purpose === "ENTRY" && (
+              {(allPurposes.includes("ENTRY") || allPurposes.includes("ENTRY_EXIT")) && (
                 <div style={{ display: "flex", justifyContent: "space-between", fontSize: 12 }}>
                   <span style={{ color: "#8b949e" }}>Total IN</span>
                   <span style={{ fontWeight: 700, color: "#3fb950" }}>{liveData?.in_count ?? 0}</span>
                 </div>
               )}
-              {purpose === "EXIT" && (
+              {(allPurposes.includes("EXIT") || allPurposes.includes("ENTRY_EXIT")) && (
                 <div style={{ display: "flex", justifyContent: "space-between", fontSize: 12 }}>
                   <span style={{ color: "#8b949e" }}>Total OUT</span>
                   <span style={{ fontWeight: 700, color: "#f85149" }}>{liveData?.out_count ?? 0}</span>
                 </div>
               )}
-              {purpose === "ENTRY_EXIT" && (
-                <>
-                  <div style={{ display: "flex", justifyContent: "space-between", fontSize: 12 }}>
-                    <span style={{ color: "#8b949e" }}>Total IN</span>
-                    <span style={{ fontWeight: 700, color: "#3fb950" }}>{liveData?.in_count ?? 0}</span>
-                  </div>
-                  <div style={{ display: "flex", justifyContent: "space-between", fontSize: 12 }}>
-                    <span style={{ color: "#8b949e" }}>Total OUT</span>
-                    <span style={{ fontWeight: 700, color: "#f85149" }}>{liveData?.out_count ?? 0}</span>
-                  </div>
-                </>
-              )}
-              {purpose === "QUEUE" && (
+              {allPurposes.includes("QUEUE") && (
                 <>
                   <div style={{ display: "flex", justifyContent: "space-between", fontSize: 12 }}>
                     <span style={{ color: "#8b949e" }}>People in Queue</span>
@@ -523,7 +512,7 @@ export default function CameraDetail() {
                   </div>
                 </>
               )}
-              {purpose === "ZONE" && (
+              {allPurposes.includes("ZONE") && (
                 <div style={{ display: "flex", justifyContent: "space-between", fontSize: 12 }}>
                   <span style={{ color: "#8b949e" }}>People in Zone</span>
                   <span style={{ fontWeight: 700, color: "#3fb950" }}>{liveData?.occupancy_count ?? 0}</span>
