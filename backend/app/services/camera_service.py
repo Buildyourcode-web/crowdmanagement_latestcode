@@ -545,17 +545,17 @@ class CameraService:
             in_db = True
             from sqlalchemy import text
             try:
-                # Execute all unlinking and camera deletion in one fast atomic operation
-                await self.db.execute(text("""
-                    UPDATE crowd_snapshots SET camera_id = NULL WHERE camera_id = :cid;
-                    UPDATE queue_snapshots SET camera_id = NULL WHERE camera_id = :cid;
-                    UPDATE frs_candidates SET camera_id = NULL WHERE camera_id = :cid;
-                    UPDATE alerts SET camera_id = NULL WHERE camera_id = :cid;
-                    DELETE FROM camera_roi_configurations WHERE camera_id = :cid;
-                    DELETE FROM camera_ai_profile_assignments WHERE camera_id = :cid;
-                    DELETE FROM ai_pipeline_deployments WHERE camera_id = :cid;
-                    DELETE FROM cameras WHERE id = :cid;
-                """), {"cid": cam.id})
+                # asyncpg does NOT support multiple statements in one text() call.
+                # Each statement must be executed individually.
+                cid = cam.id
+                await self.db.execute(text("UPDATE crowd_snapshots SET camera_id = NULL WHERE camera_id = :cid"), {"cid": cid})
+                await self.db.execute(text("UPDATE queue_snapshots SET camera_id = NULL WHERE camera_id = :cid"), {"cid": cid})
+                await self.db.execute(text("UPDATE frs_candidates SET camera_id = NULL WHERE camera_id = :cid"), {"cid": cid})
+                await self.db.execute(text("UPDATE alerts SET camera_id = NULL WHERE camera_id = :cid"), {"cid": cid})
+                await self.db.execute(text("DELETE FROM camera_roi_configurations WHERE camera_id = :cid"), {"cid": cid})
+                await self.db.execute(text("DELETE FROM camera_ai_profile_assignments WHERE camera_id = :cid"), {"cid": cid})
+                await self.db.execute(text("DELETE FROM ai_pipeline_deployments WHERE camera_id = :cid"), {"cid": cid})
+                await self.db.execute(text("DELETE FROM cameras WHERE id = :cid"), {"cid": cid})
                 await self.db.commit()
             except Exception as e:
                 logger.warning(f"Error unlinking and deleting camera {cam.camera_code}: {e}")
