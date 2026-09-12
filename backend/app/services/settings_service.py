@@ -324,7 +324,7 @@ async def toggle_maintenance_mode(
     session: AsyncSession, user: User, enabled: bool, message: Optional[str], ip: Optional[str] = None
 ):
     current = await repo.get_system_config(session)
-    if not user.role or user.role.code not in ("SUPER_ADMIN", "COMMANDER"):
+    if user.role_code not in ("SUPER_ADMIN", "COMMANDER"):
         raise PermissionError("Only SUPER_ADMIN or COMMANDER can toggle maintenance mode")
     updated = await repo.set_maintenance_mode(session, enabled, message, user.username)
     action = "MAINTENANCE_MODE_ENABLED" if enabled else "MAINTENANCE_MODE_DISABLED"

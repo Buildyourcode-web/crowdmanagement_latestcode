@@ -1,4 +1,4 @@
-﻿import uuid
+import uuid
 from typing import List, Optional
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -20,7 +20,7 @@ class EventService:
 
     async def list_accessible_events(self, user: User) -> List[EventRead]:
         """Lists events the user has explicit or superadmin access to."""
-        is_super = bool(user.role and user.role.code == "SUPER_ADMIN")
+        is_super = user.is_super_admin
 
         if is_super:
             stmt = select(Event).order_by(Event.is_active.desc(), Event.start_date.desc())
@@ -113,7 +113,7 @@ class EventService:
         if not e:
             raise HTTPException(status_code=404, detail="Event not found")
 
-        is_super = bool(user.role and user.role.code == "SUPER_ADMIN")
+        is_super = user.is_super_admin
         user_role = "SUPER_ADMIN"
         if not is_super:
             access_stmt = select(UserEventAccess).where(

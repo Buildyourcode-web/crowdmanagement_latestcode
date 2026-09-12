@@ -93,10 +93,10 @@ class CameraAIService:
             return False, f"FRS profiles cannot be assigned to cameras with purpose '{purpose}'. Camera purpose must be 'FRS' or 'MULTI_PURPOSE'."
 
         # Super admin override
-        if user.role and user.role.code == "SUPER_ADMIN":
+        if user.is_super_admin:
             return True, None
 
-        user_perms = [p.code for p in user.role.permissions] if user.role and user.role.permissions else []
+        user_perms = user.permissions_list
         has_frs_perm = (
             Permissions.FRS_MANAGE in user_perms
             or Permissions.FRS_REVIEW in user_perms

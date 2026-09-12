@@ -1,6 +1,7 @@
 from typing import List
 from fastapi import APIRouter, Depends, status
 from sqlalchemy import select
+from sqlalchemy.orm import selectinload
 from sqlalchemy.ext.asyncio import AsyncSession
 from app.dependencies import get_current_user, get_db, require_permission
 from app.models.role import Permission, Role
@@ -19,7 +20,7 @@ async def list_users(
     current_user: User = Depends(require_permission(Permissions.SYSTEM_READ)),
 ):
     """List system users and their assigned operational roles."""
-    stmt = select(User).order_by(User.created_at.asc())
+    stmt = select(User).options(selectinload(User.role)).order_by(User.created_at.asc())
     result = await db.execute(stmt)
     users = list(result.scalars().all())
 
@@ -30,8 +31,8 @@ async def list_users(
             email=u.email,
             full_name=u.full_name,
             role_id=u.role_id,
-            role_code=u.role.code if u.role else "VIEWER",
-            role_name=u.role.name if u.role else "Viewer",
+            role_code=u.role_code or "VIEWER",
+            role_name=u.role_name or "Viewer",
             is_active=u.is_active,
             created_at=u.created_at,
             last_login=u.last_login,

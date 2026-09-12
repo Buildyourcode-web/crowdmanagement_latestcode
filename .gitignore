@@ -25,6 +25,8 @@ build/
 # Uploads / media
 media/
 uploads/
+**/data/crops/
+data/
 
 # Database
 *.db

@@ -4,11 +4,13 @@ from fastapi import Depends, HTTPException, Header, Security, status
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 from redis.asyncio import Redis
 from sqlalchemy import select
+from sqlalchemy.orm import selectinload
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.config import settings
 from app.db.session import AsyncSessionLocal
 from app.models.user import User
+from app.models.role import Role
 from app.security.jwt import decode_token
 
 security = HTTPBearer(auto_error=False)
@@ -53,13 +55,16 @@ async def get_current_user(
     global _cached_dev_user, _cached_users
     if not auth or not auth.credentials:
         if settings.APP_ENV == "development":
-            if _cached_dev_user is not None:
-                return _cached_dev_user
-            stmt = select(User).where(User.is_active == True)
+            stmt = (
+                select(User)
+                .options(selectinload(User.role).selectinload(Role.permissions))
+                .where(User.is_active == True)
+            )
             res = await db.execute(stmt)
             dev_user = res.scalars().first()
             if dev_user:
-                _cached_dev_user = dev_user
+                dev_user._jwt_role = dev_user.role.code if dev_user.role else "SUPER_ADMIN"
+                dev_user._jwt_permissions = [p.code for p in dev_user.role.permissions] if dev_user.role else []
                 return dev_user
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
@@ -90,13 +95,27 @@ async def get_current_user(
             detail={"code": "INVALID_TOKEN", "message": "Invalid user ID in token"},
         )
 
+    jwt_role = payload.get("role")
+    jwt_perms = payload.get("permissions") or []
+
     now_ts = time.time()
     if user_id in _cached_users:
         cached_u, exp = _cached_users[user_id]
         if now_ts < exp:
-            return cached_u
+            try:
+                user = await db.merge(cached_u, load=False)
+            except Exception:
+                user = cached_u
+            user._jwt_role = jwt_role
+            user._jwt_permissions = jwt_perms
+            return user
 
-    result = await db.execute(select(User).where(User.id == uid))
+    stmt = (
+        select(User)
+        .options(selectinload(User.role).selectinload(Role.permissions))
+        .where(User.id == uid)
+    )
+    result = await db.execute(stmt)
     user = result.scalars().first()
 
     if not user:
@@ -112,19 +131,18 @@ async def get_current_user(
         )
 
     _cached_users[user_id] = (user, now_ts + 60.0)
+    user._jwt_role = jwt_role
+    user._jwt_permissions = jwt_perms
     return user
 
 
 def require_permission(required_permission: str) -> Callable:
     """Dependency factory checking if user has specific permission."""
     async def permission_checker(current_user: User = Depends(get_current_user)) -> User:
-        user_permissions = [p.code for p in current_user.role.permissions] if current_user.role else []
-        
-        # Super admin override
-        if current_user.role and current_user.role.code == "SUPER_ADMIN":
+        if current_user.is_super_admin:
             return current_user
 
-        if required_permission not in user_permissions:
+        if required_permission not in current_user.permissions_list:
             raise HTTPException(
                 status_code=status.HTTP_403_FORBIDDEN,
                 detail={
@@ -185,8 +203,8 @@ async def get_event_context(
         - If user has exactly one accessible event, defaults to that event.
         - If user has multiple events, raises 400 Bad Request requiring explicit selection.
     """
-    is_super = bool(current_user.role and current_user.role.code == "SUPER_ADMIN")
-    user_perms = [p.code for p in current_user.role.permissions] if current_user.role else []
+    is_super = current_user.is_super_admin
+    user_perms = current_user.permissions_list
     has_frs = is_super or any(
         p in user_perms for p in [Permissions.FRS_READ, Permissions.FRS_REVIEW, Permissions.FRS_MANAGE]
     )
@@ -197,6 +215,10 @@ async def get_event_context(
             now_ts = time.time()
             if x_event_id in _cached_events_by_id and now_ts < _cached_events_by_id[x_event_id][1]:
                 target_event = _cached_events_by_id[x_event_id][0]
+                try:
+                    target_event = await db.merge(target_event, load=False)
+                except Exception:
+                    pass
             else:
                 try:
                     target_uuid = uuid.UUID(x_event_id)
@@ -216,6 +238,10 @@ async def get_event_context(
             now_ts = time.time()
             if _cached_default_event is not None and now_ts < _cached_default_event_exp:
                 target_event = _cached_default_event
+                try:
+                    target_event = await db.merge(target_event, load=False)
+                except Exception:
+                    pass
             else:
                 # Default to primary Khairatabad Ganesh event first, then fallback to active/latest
                 stmt = select(Event).where((Event.code == "KHB-2026") | (Event.name.ilike("%Khairatabad%"))).limit(1)
@@ -232,6 +258,7 @@ async def get_event_context(
                 if target_event:
                     _cached_default_event = target_event
                     _cached_default_event_exp = now_ts + 120.0
+
 
         if not target_event:
             raise HTTPException(

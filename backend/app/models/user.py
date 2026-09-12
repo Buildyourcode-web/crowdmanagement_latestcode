@@ -23,3 +23,34 @@ class User(Base, UUIDMixin, TimestampMixin):
     event_accesses: Mapped[List["UserEventAccess"]] = relationship("UserEventAccess", back_populates="user", lazy="noload")
     site_accesses: Mapped[List["UserSiteAccess"]] = relationship("UserSiteAccess", back_populates="user", lazy="noload")
 
+    @property
+    def role_code(self) -> Optional[str]:
+        rc = getattr(self, "_jwt_role", None)
+        if rc:
+            return rc
+        try:
+            return self.role.code if self.role else None
+        except Exception:
+            return None
+
+    @property
+    def role_name(self) -> Optional[str]:
+        try:
+            return self.role.name if self.role else None
+        except Exception:
+            return None
+
+    @property
+    def permissions_list(self) -> List[str]:
+        perms = getattr(self, "_jwt_permissions", None)
+        if perms is not None:
+            return perms
+        try:
+            return [p.code for p in self.role.permissions] if self.role and self.role.permissions else []
+        except Exception:
+            return []
+
+    @property
+    def is_super_admin(self) -> bool:
+        return self.role_code == "SUPER_ADMIN"
+
