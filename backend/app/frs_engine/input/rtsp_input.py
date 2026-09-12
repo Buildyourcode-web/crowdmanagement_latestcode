@@ -180,25 +180,11 @@ class RTSPReader:
                 cap = self._open_capture()
 
                 if not cap.isOpened():
-
                     now = time.monotonic()
-
-                    if (
-                        now
-                        - self._last_error_time
-                        > 2.0
-                    ):
-
-                        print(
-                            "[RTSPReader] "
-                            "Could not open RTSP. "
-                            "Retrying..."
-                        )
-
+                    if (now - self._last_error_time > 5.0):
+                        print("[RTSPReader] Could not open RTSP. Retrying in 5s...")
                         self._last_error_time = now
-
-                    time.sleep(1.0)
-
+                    time.sleep(5.0)
                     continue
 
             # ----------------------------------------------------
