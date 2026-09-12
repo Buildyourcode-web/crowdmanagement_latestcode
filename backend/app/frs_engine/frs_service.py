@@ -2188,8 +2188,6 @@ async def remove_frs_camera(camera_id: str, sync_db: bool = True):
 def get_worker_for_camera(camera_code_or_id: str) -> Optional[CameraWorkerState]:
     """Resolves a CameraWorkerState for the requested camera code or ID with flexible mapping."""
     with _workers_lock:
-        if not _camera_workers:
-            return None
         # 1. Exact match
         if camera_code_or_id in _camera_workers:
             return _camera_workers[camera_code_or_id]
@@ -2205,8 +2203,52 @@ def get_worker_for_camera(camera_code_or_id: str) -> Optional[CameraWorkerState]
         if len(_camera_workers) == 1:
             return next(iter(_camera_workers.values()))
 
+    # 4. Check PostgreSQL DB if camera exists and auto-start worker on-demand
+    try:
+        from app.db.session import SyncSessionLocal
+        from app.models.camera import Camera
+        from app.security.encryption import decrypt_credential
+        from sqlalchemy import select as sa_select
 
-        return None
+        if SyncSessionLocal is not None:
+            with SyncSessionLocal() as pg_db:
+                clean_id = camera_code_or_id.replace("-FRS", "").replace("-CROWD", "").strip()
+                stmt = sa_select(Camera).where(
+                    Camera.camera_code.in_([camera_code_or_id, clean_id]),
+                    Camera.enabled.is_(True)
+                )
+                cam_rec = pg_db.execute(stmt).scalars().first()
+                if cam_rec and cam_rec.rtsp_url_encrypted:
+                    rtsp_url = decrypt_credential(cam_rec.rtsp_url_encrypted)
+                    if rtsp_url:
+                        is_frs = bool(cam_rec.is_frs_camera or cam_rec.camera_type == "FRS" or "-FRS" in camera_code_or_id)
+                        c_type = "FRS" if is_frs else (cam_rec.camera_type or "CROWD")
+                        c_state = CameraWorkerState(
+                            camera_id=camera_code_or_id,
+                            rtsp_url=rtsp_url,
+                            name=cam_rec.name or cam_rec.label or f"Camera {camera_code_or_id}",
+                            is_frs=is_frs,
+                            camera_type=c_type,
+                            ai_purposes=["FRS"] if is_frs else ["ENTRY", "ZONE"],
+                            zone_code=cam_rec.zone_code or "ZONE-A",
+                        )
+                        c_worker = RTSPCameraWorker(c_state)
+                        c_state.running = True
+                        t = threading.Thread(
+                            target=c_worker.run,
+                            daemon=True,
+                            name=f"Camera-Worker-{camera_code_or_id}"
+                        )
+                        c_state.thread = t
+                        with _workers_lock:
+                            _camera_workers[camera_code_or_id] = c_state
+                        t.start()
+                        logger.info(f"[FRS-Engine] Auto-revived worker on-demand from DB: {camera_code_or_id}")
+                        return c_state
+    except Exception as ex:
+        logger.debug(f"[FRS-Engine] On-demand worker revival check exception: {ex}")
+
+    return None
 
 
 def stop_frs_camera_worker(camera_code_or_id: str) -> bool:
@@ -2915,8 +2957,73 @@ async def frs_stream_websocket(websocket: WebSocket):
             mgr.disconnect(websocket)
 
 
-# ── Startup: auto-register the main camera ───────────────────────────────────
+# ── Startup: auto-register / restore cameras from database ────────────────────
 
 def auto_start_main_camera():
     """No-op: Cameras are now onboarded and started dynamically via the UI/API."""
     pass
+
+
+async def restore_active_cameras_from_db():
+    """
+    On backend startup, automatically load all enabled cameras from PostgreSQL
+    and launch their worker threads so cameras persist across restarts/reloads.
+    """
+    try:
+        from app.db.session import AsyncSessionLocal
+        from app.models.camera import Camera
+        from app.security.encryption import decrypt_credential
+        from sqlalchemy import select
+
+        if AsyncSessionLocal is None:
+            return
+
+        async with AsyncSessionLocal() as pg_db:
+            stmt = select(Camera).where(Camera.enabled.is_(True))
+            res = await pg_db.execute(stmt)
+            cams = res.scalars().all()
+
+            if not cams:
+                logger.info("[FRS-Engine] No saved cameras found in database on startup.")
+                return
+
+            logger.info(f"[FRS-Engine] Restoring {len(cams)} saved camera(s) from database...")
+            for c in cams:
+                cam_id = c.camera_code
+                with _workers_lock:
+                    if cam_id in _camera_workers or f"{cam_id}-CROWD" in _camera_workers or f"{cam_id}-FRS" in _camera_workers:
+                        continue
+
+                rtsp_url = decrypt_credential(c.rtsp_url_encrypted)
+                if not rtsp_url:
+                    continue
+
+                is_frs = bool(c.is_frs_camera or c.camera_type == "FRS")
+                cam_type = "FRS" if is_frs else (c.camera_type or "CROWD")
+                ai_purp = ["FRS"] if is_frs else ["ENTRY", "ZONE"]
+
+                state = CameraWorkerState(
+                    camera_id=cam_id,
+                    rtsp_url=rtsp_url,
+                    name=c.name or c.label or f"Camera {cam_id}",
+                    is_frs=is_frs,
+                    camera_type=cam_type,
+                    ai_purposes=ai_purp,
+                    zone_code=c.zone_code or "ZONE-A",
+                )
+                worker = RTSPCameraWorker(state)
+                state.running = True
+
+                t = threading.Thread(
+                    target=worker.run,
+                    daemon=True,
+                    name=f"Camera-Worker-{cam_id}",
+                )
+                state.thread = t
+                with _workers_lock:
+                    _camera_workers[cam_id] = state
+                t.start()
+                logger.info(f"[FRS-Engine] Auto-restored camera worker: {cam_id} ({cam_type}) in {state.zone_code}")
+
+    except Exception as e:
+        logger.warning(f"[FRS-Engine] Failed to restore cameras from DB: {e}")

@@ -101,6 +101,13 @@ async def lifespan(app: FastAPI):
         except Exception as e:
             logger.warning(f"DB cache pre-warm skipped (non-fatal): {e}")
 
+        # Auto-restore all active cameras from database
+        try:
+            from app.frs_engine.frs_service import restore_active_cameras_from_db
+            await restore_active_cameras_from_db()
+        except Exception as e:
+            logger.warning(f"[Lifespan] Camera auto-restore skipped: {e}")
+
     asyncio.create_task(_warm_db_and_cache())
 
     yield

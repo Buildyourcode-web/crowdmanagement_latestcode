@@ -181,9 +181,8 @@ export default function Cameras() {
       if (!isMountedRef.current) return;
       const camsVal = camsRes.status === "fulfilled" ? camsRes.value : [];
       const statsVal = statsRes.status === "fulfilled" ? statsRes.value : null;
-      const list = Array.isArray(camsVal) ? camsVal : (camsVal?.data || []);
-      // Filter out any disabled cameras
-      setDbCameras(list.filter((c) => (c.status === "online" || c.status === "degraded") && c.enabled !== false));
+      // Keep all enabled cameras from DB (persist across reloads/relogins)
+      setDbCameras(list.filter((c) => c.enabled !== false));
       if (statsVal) setStats(statsVal);
     } catch (e) {
       console.warn(e);
@@ -268,45 +267,54 @@ export default function Cameras() {
     };
   }, [loadDbCameras, loadEngineCameras]);
 
-  // Build list of active working streams ONLY (no dummy screens, no offline placeholders)
+  // Build list of active working streams (persisting all DB cameras, overlaying live engine telemetry)
   const activeStreamsMap = new Map();
 
-  // 1. Live RTSP engine workers actively running
-  for (const eng of engineCameras) {
-    if (eng.status === "online" || eng.stream_url) {
-      const isFrs = Boolean(eng.is_frs || eng.camera_type === "FRS");
-      const camId = eng.camera_id || eng.id;
-      activeStreamsMap.set(camId, {
-        id: camId,
-        camera_code: camId,
-        name: eng.name || camId,
-        label: eng.name || camId,
-        status: "online",
-        is_frs: isFrs,
-        is_frs_camera: isFrs,
-        camera_type: isFrs ? "FRS" : "CROWD",
-        stream_url: eng.stream_url,
-        fps: 25,
-        zone_code: eng.zone_code || "ZONE-A",
-        detections_count: eng.detections_count || 0,
-        ai_purposes: (eng.ai_purposes || (isFrs ? [] : ["ENTRY", "ZONE"])).filter((p) => p !== "ENTRY_EXIT"),
-        is_running: true,
-      });
-    }
+  // 1. Persistent cameras from database (never flush on logout/reopen)
+  for (const cam of dbCameras) {
+    if (cam.enabled === false) continue;
+    const camKey = cam.camera_code || cam.id;
+    const isFrs = Boolean(cam.is_frs_camera || cam.isFRS || cam.camera_type === "FRS");
+    activeStreamsMap.set(camKey, {
+      id: camKey,
+      camera_code: camKey,
+      name: cam.name || cam.label || camKey,
+      label: cam.label || cam.name || camKey,
+      status: cam.status || "online",
+      is_frs: isFrs,
+      is_frs_camera: isFrs,
+      camera_type: isFrs ? "FRS" : (cam.camera_type || "CROWD"),
+      stream_url: `/api/v1/frs-engine/cameras/${camKey}/stream`,
+      fps: 25,
+      zone_code: cam.zone_code || cam.zone || "ZONE-A",
+      detections_count: cam.people_count || 0,
+      ai_purposes: (cam.ai_purposes || (isFrs ? [] : ["ENTRY", "ZONE"])).filter((p) => p !== "ENTRY_EXIT"),
+      is_running: true,
+    });
   }
 
-  // 2. Synchronize with database cameras if matching active stream
-  for (const cam of dbCameras) {
-    const camKey = cam.camera_code || cam.id;
-    if (activeStreamsMap.has(camKey)) {
-      const existing = activeStreamsMap.get(camKey);
-      activeStreamsMap.set(camKey, {
-        ...existing,
-        name: cam.name || existing.name,
-        label: cam.label || existing.label,
-        zone: cam.zone || existing.zone_code,
-      });
-    }
+  // 2. Overlay live RTSP engine workers actively running
+  for (const eng of engineCameras) {
+    const camId = eng.camera_id || eng.id;
+    const existing = activeStreamsMap.get(camId) || {};
+    const isFrs = Boolean(eng.is_frs || eng.camera_type === "FRS");
+    activeStreamsMap.set(camId, {
+      ...existing,
+      id: camId,
+      camera_code: camId,
+      name: eng.name || existing.name || camId,
+      label: eng.name || existing.label || camId,
+      status: eng.status || existing.status || "online",
+      is_frs: isFrs,
+      is_frs_camera: isFrs,
+      camera_type: isFrs ? "FRS" : "CROWD",
+      stream_url: eng.stream_url || existing.stream_url || `/api/v1/frs-engine/cameras/${camId}/stream`,
+      fps: 25,
+      zone_code: eng.zone_code || existing.zone_code || "ZONE-A",
+      detections_count: eng.detections_count || existing.detections_count || 0,
+      ai_purposes: (eng.ai_purposes || existing.ai_purposes || (isFrs ? [] : ["ENTRY", "ZONE"])).filter((p) => p !== "ENTRY_EXIT"),
+      is_running: true,
+    });
   }
 
   // Apply search filter
