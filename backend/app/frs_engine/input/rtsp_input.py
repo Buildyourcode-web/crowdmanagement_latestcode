@@ -30,6 +30,8 @@ except ImportError:
     except ImportError:
         RTSP_URL = ""
 
+_rtsp_open_lock = threading.Lock()
+
 
 class RTSPReader:
     """
@@ -68,6 +70,7 @@ class RTSPReader:
 
         self._last_error_time = 0.0
         self._cap: cv2.VideoCapture | None = None
+        self._cap_lock = threading.Lock()
 
     # ============================================================
     # START
@@ -102,20 +105,20 @@ class RTSPReader:
 
         self._running = False
 
-        if self._cap is not None:
-            try:
-                self._cap.release()
-            except Exception:
-                pass
-            self._cap = None
-
+        # First wait for the capture thread to exit cleanly on its own.
+        # Calling cap.release() while cap.read() is executing in C++ FFmpeg
+        # causes a fatal "double free or corruption (out)" crash!
         if self._thread is not None:
-
-            self._thread.join(
-                timeout=1.5
-            )
-
+            self._thread.join(timeout=2.0)
             self._thread = None
+
+        with self._cap_lock:
+            if self._cap is not None:
+                try:
+                    self._cap.release()
+                except Exception:
+                    pass
+                self._cap = None
 
         print(
             "[RTSPReader] Stopped."
@@ -166,11 +169,13 @@ class RTSPReader:
             ):
 
                 if cap is not None:
-
-                    try:
-                        cap.release()
-                    except Exception:
-                        pass
+                    with self._cap_lock:
+                        try:
+                            cap.release()
+                        except Exception:
+                            pass
+                        cap = None
+                        self._cap = None
 
                 cap = self._open_capture()
 
@@ -223,12 +228,14 @@ class RTSPReader:
 
                     self._last_error_time = now
 
-                try:
-                    cap.release()
-                except Exception:
-                    pass
-
-                cap = None
+                with self._cap_lock:
+                    if cap is not None:
+                        try:
+                            cap.release()
+                        except Exception:
+                            pass
+                    cap = None
+                    self._cap = None
 
                 time.sleep(0.5)
 
@@ -293,12 +300,14 @@ class RTSPReader:
         # Cleanup when stopping
         # --------------------------------------------------------
 
-        if cap is not None:
-
-            try:
-                cap.release()
-            except Exception:
-                pass
+        with self._cap_lock:
+            if cap is not None:
+                try:
+                    cap.release()
+                except Exception:
+                    pass
+                cap = None
+                self._cap = None
 
     # ============================================================
     # OPEN RTSP
@@ -309,20 +318,23 @@ class RTSPReader:
     ) -> cv2.VideoCapture:
         """
         Open RTSP using FFmpeg with bounded 5-second timeout and TCP/UDP fallback.
+        Serialized across worker threads to avoid environment variable race condition.
         """
         import re
         safe_url = re.sub(r"://(.*)@", "://***:***@", self._url) if "@" in self._url else self._url
 
-        # 1. Try FFmpeg / TCP first with 5-second connection timeout
-        os.environ["OPENCV_FFMPEG_CAPTURE_OPTIONS"] = (
-            "rtsp_transport;tcp|"
-            "stimeout;5000000|"
-            "fflags;nobuffer|"
-            "flags;low_delay"
-        )
-
-        print(f"[RTSPReader] Opening RTSP via FFmpeg/TCP (5s timeout): {safe_url}")
-        cap = cv2.VideoCapture(self._url, cv2.CAP_FFMPEG)
+        global _rtsp_open_lock
+        # 1. Try FFmpeg / TCP first with 5-second connection timeout & low-delay flags
+        with _rtsp_open_lock:
+            os.environ["OPENCV_FFMPEG_CAPTURE_OPTIONS"] = (
+                "rtsp_transport;tcp|"
+                "stimeout;5000000|"
+                "max_delay;500000|"
+                "fflags;nobuffer|"
+                "flags;low_delay"
+            )
+            print(f"[RTSPReader] Opening RTSP via FFmpeg/TCP (5s timeout): {safe_url}")
+            cap = cv2.VideoCapture(self._url, cv2.CAP_FFMPEG)
 
         if cap.isOpened():
             try:
@@ -330,24 +342,27 @@ class RTSPReader:
             except Exception:
                 pass
             print(f"[RTSPReader] RTSP capture opened successfully via TCP.")
-            self._cap = cap
+            with self._cap_lock:
+                self._cap = cap
             return cap
 
-        try:
-            cap.release()
-        except Exception:
-            pass
+        with self._cap_lock:
+            try:
+                cap.release()
+            except Exception:
+                pass
 
         # 2. Try FFmpeg / UDP fallback
-        os.environ["OPENCV_FFMPEG_CAPTURE_OPTIONS"] = (
-            "rtsp_transport;udp|"
-            "stimeout;5000000|"
-            "fflags;nobuffer|"
-            "flags;low_delay"
-        )
-
-        print(f"[RTSPReader] TCP failed, retrying via FFmpeg/UDP (5s timeout)...")
-        cap = cv2.VideoCapture(self._url, cv2.CAP_FFMPEG)
+        with _rtsp_open_lock:
+            os.environ["OPENCV_FFMPEG_CAPTURE_OPTIONS"] = (
+                "rtsp_transport;udp|"
+                "stimeout;5000000|"
+                "max_delay;500000|"
+                "fflags;nobuffer|"
+                "flags;low_delay"
+            )
+            print(f"[RTSPReader] TCP failed, retrying via FFmpeg/UDP (5s timeout)...")
+            cap = cv2.VideoCapture(self._url, cv2.CAP_FFMPEG)
 
         if cap.isOpened():
             try:
@@ -355,11 +370,11 @@ class RTSPReader:
             except Exception:
                 pass
             print(f"[RTSPReader] RTSP capture opened successfully via UDP.")
-            self._cap = cap
+            with self._cap_lock:
+                self._cap = cap
             return cap
 
         print(f"[RTSPReader] ERROR: Could not open RTSP stream (TCP and UDP timed out or rejected).")
-        self._cap = cap
-        return cap
-
+        with self._cap_lock:
+            self._cap = None
         return cap
