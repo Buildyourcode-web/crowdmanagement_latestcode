@@ -74,6 +74,14 @@ def _bbox_center_dist(a, b) -> float:
     return float(np.linalg.norm(ca - cb))
 
 
+_STREAM_HEADERS = {
+    "Cache-Control": "no-cache, no-store, must-revalidate",
+    "Pragma": "no-cache",
+    "Expires": "0",
+    "X-Accel-Buffering": "no",
+    "Connection": "close",
+}
+
 # ---------------------------------------------------------------------------
 # Lazy-import FRS engine components (so backend still starts even without GPU)
 # ---------------------------------------------------------------------------
@@ -1609,11 +1617,17 @@ class RTSPCameraWorker:
                 bgr = cv2.cvtColor(rgb, cv2.COLOR_RGB2BGR)
                 h, w = bgr.shape[:2]
 
-                # 1. Clean frame without ANY annotations/overlays (always pure camera video)
-                ok_clean, clean_buf = cv2.imencode(".jpg", bgr, [cv2.IMWRITE_JPEG_QUALITY, 72])
-                if ok_clean:
-                    with self.state.frame_lock:
-                        self.state.latest_clean_frame = clean_buf.tobytes()
+                # 1. Clean frame without ANY annotations/overlays (on-demand when raw-stream requested or AI disabled)
+                now_ts = time.time()
+                is_ai_active = self.state.is_frs or getattr(self.state, "crowd_ai_active", False)
+                need_clean = (not is_ai_active) or (now_ts < getattr(self.state, "raw_stream_wanted_until", 0.0))
+                ok_clean = False
+                clean_buf = None
+                if need_clean:
+                    ok_clean, clean_buf = cv2.imencode(".jpg", bgr, [cv2.IMWRITE_JPEG_QUALITY, 70])
+                    if ok_clean:
+                        with self.state.frame_lock:
+                            self.state.latest_clean_frame = clean_buf.tobytes()
 
                 # 2. FRS Mode Overlays
                 if self.state.is_frs:
@@ -1869,6 +1883,11 @@ class RTSPCameraWorker:
                             self.state.latest_frame = crowd_buf.tobytes()
                 else:
                     # Neither AI mode active: use clean frames
+                    if not ok_clean:
+                        ok_clean, clean_buf = cv2.imencode(".jpg", bgr, [cv2.IMWRITE_JPEG_QUALITY, 70])
+                        if ok_clean:
+                            with self.state.frame_lock:
+                                self.state.latest_clean_frame = clean_buf.tobytes()
                     if ok_clean:
                         with self.state.frame_lock:
                             self.state.latest_frame = clean_buf.tobytes()
@@ -2325,6 +2344,7 @@ async def stream_camera(camera_id: str):
     return StreamingResponse(
         generate(),
         media_type="multipart/x-mixed-replace; boundary=frame",
+        headers=_STREAM_HEADERS,
     )
 
 
@@ -2506,6 +2526,7 @@ async def stream_camera_raw(camera_id: str):
         boundary = b"--frame\r\nContent-Type: image/jpeg\r\n\r\n"
         placeholder_timer = 0.0
         while state.running:
+            state.raw_stream_wanted_until = time.time() + 8.0
             with state.frame_lock:
                 frame = getattr(state, "latest_clean_frame", None) or state.latest_frame
 
@@ -2527,6 +2548,7 @@ async def stream_camera_raw(camera_id: str):
     return StreamingResponse(
         generate_clean(),
         media_type="multipart/x-mixed-replace; boundary=frame",
+        headers=_STREAM_HEADERS,
     )
 
 

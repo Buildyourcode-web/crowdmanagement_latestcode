@@ -47,6 +47,7 @@ router = APIRouter(prefix="/cameras", tags=["Cameras"])
 
 
 @router.get("", response_model=StandardResponse[List[CameraRead]])
+@router.get("/", response_model=StandardResponse[List[CameraRead]], include_in_schema=False)
 async def list_cameras(
     zone: Optional[str] = Query(None, description="Filter by zone code e.g. ZONE-A"),
     status: Optional[str] = Query(None, description="Filter by status: online, degraded, offline, not_tested"),
