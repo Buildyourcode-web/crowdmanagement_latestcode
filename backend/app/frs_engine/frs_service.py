@@ -2094,10 +2094,7 @@ async def remove_frs_camera(camera_id: str, sync_db: bool = True):
         except Exception as ex:
             logger.warning(f"Error syncing camera deletion to DB: {ex}")
 
-    if state is None and not sync_db:
-        raise HTTPException(status_code=404, detail=f"Camera {camera_id} not found")
-
-    return {"status": "ok", "removed": camera_id}
+    return {"status": "ok", "removed": camera_id, "had_active_worker": state is not None}
 
 
 def get_worker_for_camera(camera_code_or_id: str) -> Optional[CameraWorkerState]:

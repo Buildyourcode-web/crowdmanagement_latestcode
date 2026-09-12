@@ -575,14 +575,32 @@ class CameraService:
             except Exception as e:
                 logger.warning(f"Error unlinking references for camera {cam.camera_code}: {e}")
 
-            await self.db.delete(cam)
-            await self.db.commit()
+            try:
+                await self.db.delete(cam)
+                await self.db.commit()
+            except Exception as db_err:
+                logger.warning(f"ORM delete failed ({db_err}), executing raw delete on camera {cam.id}")
+                await self.db.rollback()
+                await self.db.execute(text("UPDATE crowd_snapshots SET camera_id = NULL WHERE camera_id = :cid"), {"cid": cam.id})
+                await self.db.execute(text("UPDATE queue_snapshots SET camera_id = NULL WHERE camera_id = :cid"), {"cid": cam.id})
+                await self.db.execute(text("UPDATE frs_candidates SET camera_id = NULL WHERE camera_id = :cid"), {"cid": cam.id})
+                await self.db.execute(text("UPDATE alerts SET camera_id = NULL WHERE camera_id = :cid"), {"cid": cam.id})
+                await self.db.execute(text("DELETE FROM camera_roi_configurations WHERE camera_id = :cid"), {"cid": cam.id})
+                await self.db.execute(text("DELETE FROM camera_ai_profile_assignments WHERE camera_id = :cid"), {"cid": cam.id})
+                await self.db.execute(text("DELETE FROM ai_pipeline_deployments WHERE camera_id = :cid"), {"cid": cam.id})
+                await self.db.execute(text("DELETE FROM cameras WHERE id = :cid"), {"cid": cam.id})
+                await self.db.commit()
 
-            await event_bus.publish(
-                channel="cameras",
-                event_type="CAMERA_DELETED",
-                payload={"camera_id": cam.camera_code},
-            )
+            try:
+                asyncio.create_task(
+                    event_bus.publish(
+                        channel="cameras",
+                        event_type="CAMERA_DELETED",
+                        payload={"camera_id": cam.camera_code},
+                    )
+                )
+            except Exception:
+                pass
 
         _stats_cache = None
         logger.info(f"[CameraService] Camera {target_code} deleted (in_database={in_db})")

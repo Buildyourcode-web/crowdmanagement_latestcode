@@ -1,3 +1,4 @@
+import asyncio
 import json
 import uuid
 from datetime import datetime, timezone
@@ -20,16 +21,19 @@ class EventBus:
             "payload": payload,
         }
 
-        redis = await get_redis_connection()
-        if redis:
-            try:
-                await redis.publish(channel, json.dumps(event_message))
-            except Exception as e:
-                logger.error(f"Failed to publish event to Redis channel {channel}: {e}")
-        
+        try:
+            redis = await asyncio.wait_for(get_redis_connection(), timeout=0.8)
+            if redis:
+                await asyncio.wait_for(redis.publish(channel, json.dumps(event_message)), timeout=0.8)
+        except Exception as e:
+            logger.debug(f"EventBus Redis publish bypassed or timed out: {e}")
+
         # Also notify local WebSocket connection manager
-        from app.websocket.manager import ws_manager
-        await ws_manager.broadcast_event(event_type, payload)
+        try:
+            from app.websocket.manager import ws_manager
+            await ws_manager.broadcast_event(event_type, payload)
+        except Exception as ws_err:
+            logger.debug(f"EventBus WebSocket broadcast bypassed: {ws_err}")
 
         return event_id
 

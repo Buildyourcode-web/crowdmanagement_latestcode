@@ -435,15 +435,17 @@ export default function Cameras() {
   const handleDeleteCamera = async (camera) => {
     const camId = camera.id || camera.camera_code;
     if (!camId) return;
+    // Optimistically remove from UI instantly
+    setEngineCameras((prev) => prev.filter((c) => c.id !== camId && c.camera_code !== camId));
+    setDbCameras((prev) => prev.filter((c) => c.id !== camId && c.camera_code !== camId));
     try {
       await deleteCamera(camId);
-      // Immediately update local state
-      setEngineCameras((prev) => prev.filter((c) => c.id !== camId && c.camera_code !== camId));
-      setDbCameras((prev) => prev.filter((c) => c.id !== camId && c.camera_code !== camId));
-      // Re-fetch in background to update counts & stats
+      // Background re-fetch to keep counts in sync
       Promise.all([loadDbCameras(), loadEngineCameras()]).catch(() => {});
     } catch (err) {
       console.error("Failed to delete camera:", err);
+      // Re-fetch to restore state if deletion failed
+      await Promise.all([loadDbCameras(), loadEngineCameras()]).catch(() => {});
       alert("Failed to remove camera: " + (err.response?.data?.detail?.message || err.message));
     }
   };
