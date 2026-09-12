@@ -1999,11 +1999,27 @@ async def add_frs_camera(req: AddCameraRequest):
                 stmt = select(Camera).where(Camera.camera_code.in_([cam_id, clean_id]))
                 res = await pg_db.execute(stmt)
                 cams = res.scalars().all()
-                for c in cams:
-                    c.zone_code = zone_cd
-                    c.rtsp_url_encrypted = encrypt_credential(req.rtsp_url)
-                    c.status = "online"
-                    c.stream_status = "ONLINE"
+                if not cams:
+                    import uuid
+                    new_c = Camera(
+                        id=uuid.uuid4(),
+                        camera_code=clean_id,
+                        name=req.name or f"Camera {clean_id}",
+                        label=req.name or f"Camera {clean_id}",
+                        camera_type=req.camera_type or "CROWD",
+                        zone_code=zone_cd,
+                        rtsp_url_encrypted=encrypt_credential(req.rtsp_url),
+                        status="online",
+                        stream_status="ONLINE",
+                        enabled=True,
+                    )
+                    pg_db.add(new_c)
+                else:
+                    for c in cams:
+                        c.zone_code = zone_cd
+                        c.rtsp_url_encrypted = encrypt_credential(req.rtsp_url)
+                        c.status = "online"
+                        c.stream_status = "ONLINE"
                 await pg_db.commit()
         if _main_loop and _main_loop.is_running():
             asyncio.run_coroutine_threadsafe(_sync_new_cam_db(), _main_loop)
@@ -2886,3 +2902,42 @@ def auto_start_main_camera():
         t.start()
 
     logger.info(f"[FRS-Engine] Auto-started main camera: {cam_id} ({cam_type}) -> {rtsp_url[:40]}...")
+
+    # Ensure camera record exists in database
+    try:
+        from app.db.session import AsyncSessionLocal
+        from app.models.camera import Camera
+        from app.security.encryption import encrypt_credential
+        from sqlalchemy import select
+        import uuid
+
+        async def _ensure_main_cam_db():
+            async with AsyncSessionLocal() as pg_db:
+                clean_id = cam_id.replace("-FRS", "").replace("-CROWD", "")
+                stmt = select(Camera).where(Camera.camera_code.in_([cam_id, clean_id]))
+                res = await pg_db.execute(stmt)
+                c = res.scalars().first()
+                if not c:
+                    new_c = Camera(
+                        id=uuid.uuid4(),
+                        camera_code=clean_id,
+                        name="Khairatabad Central Gate",
+                        label="Khairatabad Central Gate",
+                        camera_type=cam_type,
+                        zone_code="ZONE-B",
+                        rtsp_url_encrypted=encrypt_credential(rtsp_url),
+                        status="online",
+                        stream_status="ONLINE",
+                        enabled=True,
+                    )
+                    pg_db.add(new_c)
+                else:
+                    c.rtsp_url_encrypted = encrypt_credential(rtsp_url)
+                    c.status = "online"
+                    c.stream_status = "ONLINE"
+                await pg_db.commit()
+
+        if _main_loop and _main_loop.is_running():
+            asyncio.run_coroutine_threadsafe(_ensure_main_cam_db(), _main_loop)
+    except Exception as e:
+        logger.warning(f"[FRS-Engine] DB sync error for main camera {cam_id}: {e}")

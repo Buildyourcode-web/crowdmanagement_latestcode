@@ -289,6 +289,41 @@ class CameraROIService:
             camera = await self.camera_repo.get_by_camera_code(clean_code)
 
         if not camera:
+            # Fallback: check if camera exists in active FRS engine workers
+            try:
+                from app.frs_engine.frs_service import _camera_workers, _workers_lock
+                from app.security.encryption import encrypt_credential
+                worker_state = None
+                clean_code = camera_id_or_code.replace("-CROWD", "").replace("-FRS", "")
+                with _workers_lock:
+                    worker_state = (
+                        _camera_workers.get(camera_id_or_code)
+                        or _camera_workers.get(clean_code)
+                        or _camera_workers.get(f"{clean_code}-CROWD")
+                        or _camera_workers.get(f"{clean_code}-FRS")
+                    )
+                if worker_state:
+                    # Auto-provision camera in database so configurations can be saved
+                    new_cam = Camera(
+                        id=uuid.uuid4(),
+                        camera_code=clean_code,
+                        name=worker_state.name or f"Camera {clean_code}",
+                        label=worker_state.name or f"Camera {clean_code}",
+                        camera_type=getattr(worker_state, "camera_type", "CROWD") or "CROWD",
+                        zone_code=getattr(worker_state, "zone_code", "ZONE-B") or "ZONE-B",
+                        rtsp_url_encrypted=encrypt_credential(worker_state.rtsp_url or "rtsp://configured-endpoint"),
+                        stream_status="ONLINE",
+                        status="online",
+                        enabled=True,
+                    )
+                    self.db.add(new_cam)
+                    await self.db.commit()
+                    await self.db.refresh(new_cam)
+                    camera = new_cam
+            except Exception as e:
+                logger.warning(f"Could not auto-provision in-memory camera {camera_id_or_code}: {e}")
+
+        if not camera:
             raise HTTPException(
                 status_code=status.HTTP_404_NOT_FOUND,
                 detail={"code": "CAMERA_NOT_FOUND", "message": f"Camera '{camera_id_or_code}' not found"},
