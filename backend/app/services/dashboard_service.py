@@ -246,7 +246,8 @@ class DashboardService:
                         if getattr(w, "running", False):
                             if getattr(w, "is_frs", False):
                                 frs_running_count += 1
-                            if getattr(w, "crowd_ai_active", False):
+                            is_crowd = getattr(w, "crowd_ai_active", False) or getattr(w, "camera_type", "") == "CROWD" or not getattr(w, "is_frs", False)
+                            if is_crowd:
                                 live_in_count += getattr(w, "in_count", 0)
                                 live_out_count += getattr(w, "out_count", 0)
                                 live_occupancy_count += getattr(w, "occupancy_count", 0)

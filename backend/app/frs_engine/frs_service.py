@@ -124,7 +124,7 @@ class CameraWorkerState:
         self.detections_count = 0
         self.status = "starting"
         # Crowd AI & Counting Line state
-        self.crowd_ai_active: bool = False
+        self.crowd_ai_active: bool = (not is_frs) or (camera_type == "CROWD")
         self.in_count: int = 0
         self.out_count: int = 0
         self.occupancy_count: int = 0
@@ -235,6 +235,19 @@ def _fetch_rois_sync(state) -> tuple:
                 if len(merged) >= 2:
                     break
             state.ai_purposes = merged or derived_purposes[:2]
+
+        # Fallback default virtual counting line across middle of frame if none configured
+        if not lines and (getattr(state, "camera_type", "") == "CROWD" or not getattr(state, "is_frs", False)):
+            purps = getattr(state, "ai_purposes", None) or ["ENTRY"]
+            line_type = "ENTRY_LINE" if "ENTRY" in purps and "EXIT" not in purps else ("EXIT_LINE" if "EXIT" in purps and "ENTRY" not in purps else "COUNTING_LINE")
+            lines.append({
+                "id": f"default-line-{state.camera_id}",
+                "name": "Gate Counting Line",
+                "type": line_type,
+                "start": {"x": 0.05, "y": 0.55},
+                "end": {"x": 0.95, "y": 0.55},
+                "direction": "BOTH" if line_type == "COUNTING_LINE" else ("IN" if line_type == "ENTRY_LINE" else "OUT"),
+            })
 
         return lines, polygons
 
@@ -1107,6 +1120,7 @@ class RTSPCameraWorker:
 
                     new_tid = self._next_track_id
                     self._next_track_id += 1
+                    self.state.detections_count += 1
                     new_crossed = set()
                     for old_trk in self._crowd_tracks.values():
                         if old_trk.get("crossed_lines"):

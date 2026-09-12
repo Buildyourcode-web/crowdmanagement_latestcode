@@ -51,8 +51,10 @@ class AnalyticsService:
             if acquired:
                 try:
                     for w in list(_camera_workers.values()):
-                        if getattr(w, "running", False) and getattr(w, "crowd_ai_active", False):
-                            live_in += getattr(w, "in_count", 0)
+                        if getattr(w, "running", False):
+                            is_crowd = getattr(w, "crowd_ai_active", False) or getattr(w, "camera_type", "") == "CROWD" or not getattr(w, "is_frs", False)
+                            if is_crowd:
+                                live_in += getattr(w, "in_count", 0)
                 finally:
                     _workers_lock.release()
         except Exception:
@@ -186,10 +188,21 @@ class AnalyticsService:
         online_cams = sum(1 for c in cams if c.enabled and (c.status or "").lower() == "online")
         uptime_pct = round((online_cams / total_cams * 100), 1) if total_cams > 0 else 99.4
 
-        # Total detections from crowd_snapshots count
+        # Total detections from crowd_snapshots count + active live workers
         stmt_det = select(func.count(CrowdSnapshot.id))
         res_det = await self.db.execute(stmt_det)
         total_detections = int(res_det.scalar() or 0)
+        try:
+            from app.frs_engine.frs_service import _camera_workers, _workers_lock
+            acquired = _workers_lock.acquire(timeout=0.5)
+            if acquired:
+                try:
+                    for w in list(_camera_workers.values()):
+                        total_detections += getattr(w, "detections_count", 0)
+                finally:
+                    _workers_lock.release()
+        except Exception:
+            pass
 
         return CameraAnalyticsResponse(
             uptime=f"{uptime_pct}%",
@@ -242,7 +255,8 @@ class AnalyticsService:
                     for cid, w in list(_camera_workers.items()):
                         if getattr(w, "running", False):
                             active_worker_cameras.append(cid)
-                            if getattr(w, "crowd_ai_active", False):
+                            is_crowd = getattr(w, "crowd_ai_active", False) or getattr(w, "camera_type", "") == "CROWD" or not getattr(w, "is_frs", False)
+                            if is_crowd:
                                 live_in += getattr(w, "in_count", 0)
                                 live_out += getattr(w, "out_count", 0)
                                 live_occ += getattr(w, "occupancy_count", 0)
@@ -543,9 +557,11 @@ class AnalyticsService:
             if acquired:
                 try:
                     for w in list(_camera_workers.values()):
-                        if getattr(w, "running", False) and getattr(w, "crowd_ai_active", False):
-                            live_in += getattr(w, "in_count", 0)
-                            live_out += getattr(w, "out_count", 0)
+                        if getattr(w, "running", False):
+                            is_crowd = getattr(w, "crowd_ai_active", False) or getattr(w, "camera_type", "") == "CROWD" or not getattr(w, "is_frs", False)
+                            if is_crowd:
+                                live_in += getattr(w, "in_count", 0)
+                                live_out += getattr(w, "out_count", 0)
                 finally:
                     _workers_lock.release()
         except Exception:

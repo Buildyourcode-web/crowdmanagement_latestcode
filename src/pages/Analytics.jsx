@@ -1,5 +1,5 @@
 // Analytics page
-import { useEffect, useState } from "react";
+import { useEffect, useState, useRef, useCallback } from "react";
 import ReactECharts from "echarts-for-react";
 import {
   getAttendanceAnalytics,
@@ -9,6 +9,7 @@ import {
   getIncidentAnalytics,
   getOperationalFlowAnalytics,
 } from "../services/analyticsService.js";
+import { realtimeService } from "../services/realtimeService.js";
 import { LoadingState } from "../components/common/States.jsx";
 import FlowDirectivesCard from "../components/analytics/FlowDirectivesCard.jsx";
 import ZoneFlowMatrix from "../components/analytics/ZoneFlowMatrix.jsx";
@@ -29,23 +30,84 @@ export default function Analytics() {
   const [downloading, setDownloading] = useState(false);
   const [loading, setLoading] = useState(true);
 
-  useEffect(() => {
-    Promise.allSettled([
-      getAttendanceAnalytics(),
-      getCameraAnalytics(),
-      getIncidentAnalytics(),
-      getOperationalFlowAnalytics(),
-      getFestival10DaysAnalytics(),
-    ])
-      .then(([a, c, i, f, fest]) => {
-        if (a.status === "fulfilled" && a.value) setAttendance(a.value);
-        if (c.status === "fulfilled" && c.value) setCamera(c.value);
-        if (i.status === "fulfilled" && i.value) setIncident(i.value);
-        if (f.status === "fulfilled" && f.value) setFlowData(f.value);
-        if (fest.status === "fulfilled" && fest.value) setFest10Data(fest.value?.data || fest.value);
-      })
-      .finally(() => setLoading(false));
+  const isMountedRef = useRef(true);
+  const inFlightRef = useRef(false);
+  const timerRef = useRef(null);
+
+  const loadAllAnalytics = useCallback(async (silent = false) => {
+    if (inFlightRef.current) return;
+    inFlightRef.current = true;
+    if (!silent) setLoading(true);
+
+    try {
+      const [a, c, i, f, fest] = await Promise.allSettled([
+        getAttendanceAnalytics(),
+        getCameraAnalytics(),
+        getIncidentAnalytics(),
+        getOperationalFlowAnalytics(),
+        getFestival10DaysAnalytics(),
+      ]);
+      if (!isMountedRef.current) return;
+      if (a.status === "fulfilled" && a.value) setAttendance(a.value?.data || a.value);
+      if (c.status === "fulfilled" && c.value) setCamera(c.value?.data || c.value);
+      if (i.status === "fulfilled" && i.value) setIncident(i.value?.data || i.value);
+      if (f.status === "fulfilled" && f.value) setFlowData(f.value?.data || f.value);
+      if (fest.status === "fulfilled" && fest.value) setFest10Data(fest.value?.data || fest.value);
+    } catch (e) {
+      console.warn("[Analytics] Fetch error:", e);
+    } finally {
+      if (isMountedRef.current) setLoading(false);
+      inFlightRef.current = false;
+    }
   }, []);
+
+  useEffect(() => {
+    isMountedRef.current = true;
+    loadAllAnalytics();
+
+    const scheduleNext = () => {
+      clearTimeout(timerRef.current);
+      if (typeof document !== "undefined" && document.visibilityState === "hidden") return;
+      timerRef.current = setTimeout(async () => {
+        if (isMountedRef.current && document.visibilityState === "visible") {
+          await loadAllAnalytics(true);
+          scheduleNext();
+        }
+      }, 5000);
+    };
+
+    scheduleNext();
+
+    const handleVis = () => {
+      if (document.visibilityState === "visible") {
+        loadAllAnalytics(true);
+        scheduleNext();
+      } else {
+        clearTimeout(timerRef.current);
+      }
+    };
+    document.addEventListener("visibilitychange", handleVis);
+
+    const unsub = realtimeService.subscribe((msg, eventType, payload) => {
+      const norm = String(eventType || msg?.type || "").toLowerCase();
+      if (
+        norm === "crowd_telemetry" ||
+        norm === "crowd_update" ||
+        norm === "zone_update" ||
+        norm === "line_crossing" ||
+        norm === "queue_update"
+      ) {
+        loadAllAnalytics(true);
+      }
+    });
+
+    return () => {
+      isMountedRef.current = false;
+      clearTimeout(timerRef.current);
+      document.removeEventListener("visibilitychange", handleVis);
+      unsub();
+    };
+  }, [loadAllAnalytics]);
 
   if (loading) return <LoadingState />;
 
@@ -174,12 +236,12 @@ export default function Analytics() {
         {[
           {
             label: "Total Footfall (Entry + Exit)",
-            value: (fest10Data?.grand_total_footfall ?? safeAttendance.total_today ?? safeAttendance.totalVisitorsToday ?? 0).toLocaleString(),
+            value: (fest10Data?.grand_total_footfall ?? safeAttendance.total_visitors_today ?? safeAttendance.total_today ?? safeAttendance.totalVisitorsToday ?? 0).toLocaleString(),
             color: "var(--cc-accent)",
           },
           {
             label: "Total Entries (4 Gates)",
-            value: (fest10Data?.total_entries_10days ?? 0).toLocaleString(),
+            value: (fest10Data?.total_entries_10days ?? safeAttendance.total_visitors_today ?? safeAttendance.total_today ?? safeAttendance.totalVisitorsToday ?? 0).toLocaleString(),
             color: "#3fb950",
           },
           {
