@@ -543,53 +543,28 @@ class CameraService:
         in_db = False
         if cam:
             in_db = True
+            from sqlalchemy import text
             try:
-                from app.models.alert import Alert
-                from app.models.crowd import CrowdSnapshot
-                from app.models.queue import QueueSnapshot
-                from app.models.frs import FRSCandidate
-                from app.models.camera_roi import CameraROIConfiguration
-                from app.models.camera_ai_assignment import CameraAIProfileAssignment
-                from app.models.ai_deployment import AIPipelineDeployment
-                from sqlalchemy import update, delete, text
-
-                # 1. Nullify references in metric / snapshot / alert tables
-                await self.db.execute(update(CrowdSnapshot).where(CrowdSnapshot.camera_id == cam.id).values(camera_id=None))
-                await self.db.execute(update(QueueSnapshot).where(QueueSnapshot.camera_id == cam.id).values(camera_id=None))
-                await self.db.execute(update(FRSCandidate).where(FRSCandidate.camera_id == cam.id).values(camera_id=None))
-                await self.db.execute(update(Alert).where(Alert.camera_id == cam.id).values(camera_id=None))
-
-                # 2. Delete configuration rows bound specifically to this camera
-                await self.db.execute(delete(CameraROIConfiguration).where(CameraROIConfiguration.camera_id == cam.id))
-                await self.db.execute(delete(CameraAIProfileAssignment).where(CameraAIProfileAssignment.camera_id == cam.id))
-                await self.db.execute(delete(AIPipelineDeployment).where(AIPipelineDeployment.camera_id == cam.id))
-
-                # 3. Direct SQL safety pass for any other raw database references
-                await self.db.execute(text("UPDATE crowd_snapshots SET camera_id = NULL WHERE camera_id = :cid"), {"cid": cam.id})
-                await self.db.execute(text("UPDATE queue_snapshots SET camera_id = NULL WHERE camera_id = :cid"), {"cid": cam.id})
-                await self.db.execute(text("UPDATE frs_candidates SET camera_id = NULL WHERE camera_id = :cid"), {"cid": cam.id})
-                await self.db.execute(text("UPDATE alerts SET camera_id = NULL WHERE camera_id = :cid"), {"cid": cam.id})
-                await self.db.execute(text("DELETE FROM camera_roi_configurations WHERE camera_id = :cid"), {"cid": cam.id})
-                await self.db.execute(text("DELETE FROM camera_ai_profile_assignments WHERE camera_id = :cid"), {"cid": cam.id})
-                await self.db.execute(text("DELETE FROM ai_pipeline_deployments WHERE camera_id = :cid"), {"cid": cam.id})
+                # Execute all unlinking and camera deletion in one fast atomic operation
+                await self.db.execute(text("""
+                    UPDATE crowd_snapshots SET camera_id = NULL WHERE camera_id = :cid;
+                    UPDATE queue_snapshots SET camera_id = NULL WHERE camera_id = :cid;
+                    UPDATE frs_candidates SET camera_id = NULL WHERE camera_id = :cid;
+                    UPDATE alerts SET camera_id = NULL WHERE camera_id = :cid;
+                    DELETE FROM camera_roi_configurations WHERE camera_id = :cid;
+                    DELETE FROM camera_ai_profile_assignments WHERE camera_id = :cid;
+                    DELETE FROM ai_pipeline_deployments WHERE camera_id = :cid;
+                    DELETE FROM cameras WHERE id = :cid;
+                """), {"cid": cam.id})
+                await self.db.commit()
             except Exception as e:
-                logger.warning(f"Error unlinking references for camera {cam.camera_code}: {e}")
-
-            try:
-                await self.db.delete(cam)
-                await self.db.commit()
-            except Exception as db_err:
-                logger.warning(f"ORM delete failed ({db_err}), executing raw delete on camera {cam.id}")
+                logger.warning(f"Error unlinking and deleting camera {cam.camera_code}: {e}")
                 await self.db.rollback()
-                await self.db.execute(text("UPDATE crowd_snapshots SET camera_id = NULL WHERE camera_id = :cid"), {"cid": cam.id})
-                await self.db.execute(text("UPDATE queue_snapshots SET camera_id = NULL WHERE camera_id = :cid"), {"cid": cam.id})
-                await self.db.execute(text("UPDATE frs_candidates SET camera_id = NULL WHERE camera_id = :cid"), {"cid": cam.id})
-                await self.db.execute(text("UPDATE alerts SET camera_id = NULL WHERE camera_id = :cid"), {"cid": cam.id})
-                await self.db.execute(text("DELETE FROM camera_roi_configurations WHERE camera_id = :cid"), {"cid": cam.id})
-                await self.db.execute(text("DELETE FROM camera_ai_profile_assignments WHERE camera_id = :cid"), {"cid": cam.id})
-                await self.db.execute(text("DELETE FROM ai_pipeline_deployments WHERE camera_id = :cid"), {"cid": cam.id})
-                await self.db.execute(text("DELETE FROM cameras WHERE id = :cid"), {"cid": cam.id})
-                await self.db.commit()
+                try:
+                    await self.db.delete(cam)
+                    await self.db.commit()
+                except Exception:
+                    pass
 
             try:
                 asyncio.create_task(

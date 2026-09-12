@@ -1945,10 +1945,9 @@ async def add_frs_camera(req: AddCameraRequest):
                                 c.status = "online"
                                 c.stream_status = "ONLINE"
                             await pg_db.commit()
-                    if _main_loop and _main_loop.is_running():
-                        asyncio.run_coroutine_threadsafe(_sync_cam_db(), _main_loop)
-                except Exception:
-                    pass
+                    await _sync_cam_db()
+                except Exception as e:
+                    logger.warning(f"Error updating camera in DB: {e}")
 
                 return CameraInfo(
                     camera_id=cam_id,
@@ -2027,10 +2026,9 @@ async def add_frs_camera(req: AddCameraRequest):
                         c.status = "online"
                         c.stream_status = "ONLINE"
                 await pg_db.commit()
-        if _main_loop and _main_loop.is_running():
-            asyncio.run_coroutine_threadsafe(_sync_new_cam_db(), _main_loop)
-    except Exception:
-        pass
+        await _sync_new_cam_db()
+    except Exception as e:
+        logger.warning(f"Error persisting new camera to DB: {e}")
 
     return CameraInfo(
         camera_id=cam_id,
@@ -2097,8 +2095,11 @@ async def remove_frs_camera(camera_id: str, sync_db: bool = True):
 
     if state is not None:
         state.running = False
-        if state.thread:
-            state.thread.join(timeout=3.0)
+        if hasattr(state, "reader") and state.reader:
+            try:
+                state.reader.stop()
+            except Exception:
+                pass
         logger.info(f"[FRS-Engine] Camera removed: {camera_id}")
 
     if sync_db:

@@ -331,23 +331,11 @@ class CameraROIService:
         return camera
 
     def _verify_camera_readiness_for_editing(self, camera: Camera) -> None:
-        """Verifies camera is enabled, online, and tested before editing ROIs."""
+        """Verifies camera is enabled before editing ROIs."""
         if not camera.enabled:
             raise HTTPException(
                 status_code=status.HTTP_400_BAD_REQUEST,
-                detail={"code": "CAMERA_OFFLINE", "message": "Camera Offline — ROI editor unavailable"},
-            )
-
-        status_norm = (camera.stream_status or "").upper()
-        if status_norm == "NOT_TESTED":
-            raise HTTPException(
-                status_code=status.HTTP_400_BAD_REQUEST,
-                detail={"code": "CAMERA_STREAM_NOT_VERIFIED", "message": "Camera stream not verified"},
-            )
-        if status_norm == "OFFLINE":
-            raise HTTPException(
-                status_code=status.HTTP_400_BAD_REQUEST,
-                detail={"code": "CAMERA_OFFLINE", "message": "Camera Offline — ROI editor unavailable"},
+                detail={"code": "CAMERA_OFFLINE", "message": "Camera Disabled — ROI editor unavailable"},
             )
 
     async def get_camera_roi_config(
