@@ -182,8 +182,8 @@ export default function Cameras() {
       const camsVal = camsRes.status === "fulfilled" ? camsRes.value : [];
       const statsVal = statsRes.status === "fulfilled" ? statsRes.value : null;
       const list = Array.isArray(camsVal) ? camsVal : (camsVal?.data || []);
-      // Filter out any non-working, disabled, or legacy duplicate cameras
-      setDbCameras(list.filter((c) => (c.status === "online" || c.status === "degraded") && c.enabled !== false && c.camera_code !== "CAM-KHB-001" && c.id !== "CAM-KHB-001"));
+      // Filter out any disabled cameras
+      setDbCameras(list.filter((c) => (c.status === "online" || c.status === "degraded") && c.enabled !== false));
       if (statsVal) setStats(statsVal);
     } catch (e) {
       console.warn(e);
@@ -305,21 +305,6 @@ export default function Cameras() {
         name: cam.name || existing.name,
         label: cam.label || existing.label,
         zone: cam.zone || existing.zone_code,
-      });
-    } else if (cam.stream_status === "ONLINE" && cam.rtsp_url) {
-      const isFrs = Boolean(cam.is_frs_camera || cam.camera_type === "FRS");
-      activeStreamsMap.set(camKey, {
-        ...cam,
-        id: camKey,
-        camera_code: camKey,
-        is_frs: isFrs,
-        is_frs_camera: isFrs,
-        camera_type: isFrs ? "FRS" : "CROWD",
-        status: "online",
-        is_running: true,
-        stream_url: `/api/v1/frs-engine/cameras/${camKey}/stream`,
-        fps: cam.fps || 25,
-        ai_purposes: (cam.ai_purposes || (isFrs ? [] : ["ENTRY", "ZONE"])).filter((p) => p !== "ENTRY_EXIT"),
       });
     }
   }

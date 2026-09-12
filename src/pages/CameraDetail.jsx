@@ -192,7 +192,7 @@ function CameraFeed({ camera }) {
   const camCode = camera?.camera_code || camera?.id;
   const streamSrc = camera?.stream_url
     ? (camera.stream_url.startsWith("http") ? camera.stream_url : `${BACKEND}${camera.stream_url}`)
-    : `${BACKEND}/api/v1/frs-engine/cameras/${camCode || "CAM-KHB-001"}/stream`;
+    : (camCode ? `${BACKEND}/api/v1/frs-engine/cameras/${camCode}/stream` : "");
 
   if (camera?.status === "offline" || camera?.enabled === false) {
     return (

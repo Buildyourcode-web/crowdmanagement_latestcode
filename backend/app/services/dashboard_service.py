@@ -520,7 +520,7 @@ class DashboardService:
 
         if not queue_items:
             # Provide active Queue Status derived from live occupancy & cameras
-            primary_code = all_cameras[0].camera_code if all_cameras else "CAM-KHB-345"
+            primary_code = all_cameras[0].camera_code if all_cameras else ""
             live_q = live_occupancy_count if live_occupancy_count > 0 else (total_zone_people if total_zone_people > 0 else 8)
             wait_m = max(1, round(live_q * 0.6))
             queue_items.append(

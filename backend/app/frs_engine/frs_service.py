@@ -1898,7 +1898,7 @@ async def add_frs_camera(req: AddCameraRequest):
             existing_ids = set(_camera_workers.keys())
         idx = 1
         candidate = f"CAM-KHB-{idx:03d}"
-        while candidate in existing_ids or candidate == "CAM-KHB-345":
+        while candidate in existing_ids:
             idx += 1
             candidate = f"CAM-KHB-{idx:03d}"
         cam_id = candidate
@@ -2499,11 +2499,9 @@ async def stream_camera_raw(camera_id: str):
 
 @router.get("/stream")
 async def stream_default_camera():
-    """Default camera live MJPEG stream (CAM-KHB-345-FRS or first active)."""
+    """Default camera live MJPEG stream (first active worker)."""
     with _workers_lock:
-        state = _camera_workers.get("CAM-KHB-345-FRS") or _camera_workers.get("CAM-KHB-345")
-        if state is None and _camera_workers:
-            state = next(iter(_camera_workers.values()))
+        state = next(iter(_camera_workers.values())) if _camera_workers else None
     if state is None:
         raise HTTPException(status_code=404, detail="No active camera stream available")
     return await stream_camera(state.camera_id)
@@ -2865,95 +2863,5 @@ async def frs_stream_websocket(websocket: WebSocket):
 # ── Startup: auto-register the main camera ───────────────────────────────────
 
 def auto_start_main_camera():
-    """
-    Auto-start the main camera on backend startup.
-    Reads camera type from CAMERA_TYPE env var (default: CROWD).
-    CROWD cameras start with is_frs=False + crowd_ai_active=True so
-    the YOLO11x line-crossing detection loop activates immediately.
-    """
-    import os
-    rtsp_url = os.getenv("RTSP_URL", "")
-    if not rtsp_url:
-        logger.warning("[FRS-Engine] RTSP_URL not set — main camera not auto-started.")
-        return
-
-    cam_id = os.getenv("PHYSICAL_CAMERA_ID", "CAM-KHB-345")
-    # Read camera type from env; default to CROWD for Khairatabad deployment
-    cam_type = os.getenv("CAMERA_TYPE", "CROWD").upper()
-    is_frs = cam_type == "FRS"
-
-    with _workers_lock:
-        if cam_id in _camera_workers:
-            return  # Already running
-
-        state = CameraWorkerState(
-            camera_id=cam_id,
-            rtsp_url=rtsp_url,
-            name="Khairatabad Central Gate",
-            is_frs=is_frs,
-            camera_type=cam_type,
-        )
-        # Set ai_purposes from env (default: ENTRY_EXIT for the gate camera)
-        cam_purpose = os.getenv("CAMERA_PURPOSE", "ENTRY_EXIT").upper()
-        state.ai_purposes = [cam_purpose]
-        # For CROWD cameras, activate crowd AI immediately so detection loop runs
-        if not is_frs:
-            state.crowd_ai_active = True
-            state.is_frs = False
-            state.camera_type = "CROWD"
-            logger.info(f"[FRS-Engine] Camera {cam_id} starting in CROWD AI mode (line-crossing enabled)")
-        else:
-            logger.info(f"[FRS-Engine] Camera {cam_id} starting in FRS mode")
-
-        worker = RTSPCameraWorker(state)
-        state.running = True
-
-        t = threading.Thread(
-            target=worker.run,
-            daemon=True,
-            name=f"FRS-Worker-{cam_id}",
-        )
-        state.thread = t
-        _camera_workers[cam_id] = state
-        t.start()
-
-    logger.info(f"[FRS-Engine] Auto-started main camera: {cam_id} ({cam_type}) -> {rtsp_url[:40]}...")
-
-    # Ensure camera record exists in database
-    try:
-        from app.db.session import AsyncSessionLocal
-        from app.models.camera import Camera
-        from app.security.encryption import encrypt_credential
-        from sqlalchemy import select
-        import uuid
-
-        async def _ensure_main_cam_db():
-            async with AsyncSessionLocal() as pg_db:
-                clean_id = cam_id.replace("-FRS", "").replace("-CROWD", "")
-                stmt = select(Camera).where(Camera.camera_code.in_([cam_id, clean_id]))
-                res = await pg_db.execute(stmt)
-                c = res.scalars().first()
-                if not c:
-                    new_c = Camera(
-                        id=uuid.uuid4(),
-                        camera_code=clean_id,
-                        name="Khairatabad Central Gate",
-                        label="Khairatabad Central Gate",
-                        camera_type=cam_type,
-                        zone_code="ZONE-B",
-                        rtsp_url_encrypted=encrypt_credential(rtsp_url),
-                        status="online",
-                        stream_status="ONLINE",
-                        enabled=True,
-                    )
-                    pg_db.add(new_c)
-                else:
-                    c.rtsp_url_encrypted = encrypt_credential(rtsp_url)
-                    c.status = "online"
-                    c.stream_status = "ONLINE"
-                await pg_db.commit()
-
-        if _main_loop and _main_loop.is_running():
-            asyncio.run_coroutine_threadsafe(_ensure_main_cam_db(), _main_loop)
-    except Exception as e:
-        logger.warning(f"[FRS-Engine] DB sync error for main camera {cam_id}: {e}")
+    """No-op: Cameras are now onboarded and started dynamically via the UI/API."""
+    pass

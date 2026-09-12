@@ -181,25 +181,69 @@ export default function CameraCard({ camera, onSelect, onToggleFrs, onFullscreen
         </div>
       ) : isRunning && streamError ? (
         <div className="cc-camera-placeholder" style={{ position: "relative", overflow: "hidden", background: "#080c14", height: 180, display: "flex", flexDirection: "column", alignItems: "center", justifyContent: "center", gap: 6 }}>
+          <div style={{ position: "absolute", top: 6, left: 8, fontFamily: "var(--cc-font-mono)", fontSize: 8, color: isFrs ? "rgba(56,189,248,0.95)" : "rgba(63,185,80,0.95)", background: "rgba(0,0,0,0.65)", padding: "2px 6px", borderRadius: 2 }}>
+            {camera.id}
+          </div>
+          <div style={{ position: "absolute", top: 6, right: 8, display: "flex", gap: 4, alignItems: "center", zIndex: 3 }}>
+            {onDelete && (
+              <button
+                className="cc-btn"
+                title="Remove Camera"
+                style={{
+                  padding: "2px 6px",
+                  fontSize: 10,
+                  background: "rgba(220, 38, 38, 0.8)",
+                  border: "1px solid rgba(248, 81, 73, 0.5)",
+                  color: "#fff",
+                  cursor: "pointer",
+                  borderRadius: 2,
+                }}
+                onClick={(e) => {
+                  e.stopPropagation();
+                  if (window.confirm(`Are you sure you want to remove camera "${camera.name || camera.label || camera.id}"?`)) {
+                    onDelete(camera);
+                  }
+                }}
+              >
+                <i className="bi bi-trash3-fill" />
+              </button>
+            )}
+          </div>
           <div className="cc-camera-static" />
           <i className="bi bi-camera-video-fill" style={{ fontSize: 26, color: isFrs ? "var(--cc-accent)" : "var(--cc-green)", zIndex: 1, opacity: 0.8 }} />
           <span style={{ fontSize: 11, color: "var(--cc-text-primary)", fontWeight: 700, zIndex: 1 }}>
             RTSP Live Stream
           </span>
           <span style={{ fontSize: 9, color: "var(--cc-text-muted)", zIndex: 1, textAlign: "center", padding: "0 12px" }}>
-            Connecting / awaiting camera frames...
+            Stream unavailable or offline
           </span>
-          <button
-            className="cc-btn cc-btn-primary"
-            style={{ fontSize: 10, padding: "3px 10px", marginTop: 4, zIndex: 2 }}
-            onClick={(e) => {
-              e.stopPropagation();
-              setStreamError(false);
-              setRetryCount((c) => c + 1);
-            }}
-          >
-            <i className="bi bi-arrow-clockwise" /> Reconnect
-          </button>
+          <div style={{ display: "flex", gap: 8, marginTop: 4, zIndex: 2 }}>
+            <button
+              className="cc-btn cc-btn-primary"
+              style={{ fontSize: 10, padding: "3px 10px" }}
+              onClick={(e) => {
+                e.stopPropagation();
+                setStreamError(false);
+                setRetryCount((c) => c + 1);
+              }}
+            >
+              <i className="bi bi-arrow-clockwise" /> Reconnect
+            </button>
+            {onDelete && (
+              <button
+                className="cc-btn"
+                style={{ fontSize: 10, padding: "3px 10px", background: "rgba(220,38,38,0.2)", border: "1px solid rgba(248,81,73,0.4)", color: "var(--cc-red)" }}
+                onClick={(e) => {
+                  e.stopPropagation();
+                  if (window.confirm(`Remove camera "${camera.name || camera.label || camera.id}"?`)) {
+                    onDelete(camera);
+                  }
+                }}
+              >
+                <i className="bi bi-trash3" /> Remove
+              </button>
+            )}
+          </div>
         </div>
       ) : (
         <CameraPlaceholder status={camera.status || "stopped"} id={camera.id} isFrs={isFrs} />

@@ -4,7 +4,7 @@ import { getApiBaseUrl } from "../../utils/urlConfig.js";
 
 const API_BASE = getApiBaseUrl();
 
-export default function FRSEnrollmentModal({ isOpen, onClose, onEnrolled }) {
+export default function FRSEnrollmentModal({ isOpen, onClose, onEnrolled, cameraId = null }) {
   const [enrollMode, setEnrollMode] = useState("file"); // "file" | "camera"
   const [name, setName] = useState("");
   const [category, setCategory] = useState("Authorized Watchlist");
@@ -94,7 +94,7 @@ export default function FRSEnrollmentModal({ isOpen, onClose, onEnrolled }) {
         {
           name: name.trim(),
           category,
-          camera_id: "CAM-KHB-001",
+          camera_id: cameraId || "",
         },
         { headers }
       );
@@ -348,26 +348,35 @@ export default function FRSEnrollmentModal({ isOpen, onClose, onEnrolled }) {
                   border: "1px solid var(--cc-border)",
                 }}
               >
-                <img
-                  src={`${API_BASE}/api/v1/frs-engine/cameras/CAM-KHB-001/stream`}
-                  alt="Live RTSP Camera Stream"
-                  style={{ width: "100%", height: "100%", objectFit: "cover" }}
-                />
-                <div
-                  style={{
-                    position: "absolute",
-                    bottom: 6,
-                    left: 8,
-                    background: "rgba(0,0,0,0.7)",
-                    padding: "2px 6px",
-                    borderRadius: 3,
-                    fontSize: 10,
-                    color: "#22c55e",
-                    fontFamily: "var(--cc-font-mono)",
-                  }}
-                >
-                  ● CAM-KHB-001 LIVE STREAM
-                </div>
+                {cameraId ? (
+                  <>
+                    <img
+                      src={`${API_BASE}/api/v1/frs-engine/cameras/${cameraId}/stream`}
+                      alt="Live RTSP Camera Stream"
+                      style={{ width: "100%", height: "100%", objectFit: "cover" }}
+                    />
+                    <div
+                      style={{
+                        position: "absolute",
+                        bottom: 6,
+                        left: 8,
+                        background: "rgba(0,0,0,0.7)",
+                        padding: "2px 6px",
+                        borderRadius: 3,
+                        fontSize: 10,
+                        color: "#22c55e",
+                        fontFamily: "var(--cc-font-mono)",
+                      }}
+                    >
+                      ● {cameraId} LIVE STREAM
+                    </div>
+                  </>
+                ) : (
+                  <div style={{ display: "flex", height: "100%", alignItems: "center", justifyContent: "center", flexDirection: "column", gap: 8, color: "var(--cc-text-muted)" }}>
+                    <i className="bi bi-camera-video-off" style={{ fontSize: 28 }} />
+                    <span style={{ fontSize: 11 }}>No active FRS camera selected. Please switch to file upload or select an active FRS camera.</span>
+                  </div>
+                )}
               </div>
               <div style={{ fontSize: 11, color: "var(--cc-text-muted)", marginTop: 6, textAlign: "center" }}>
                 Face the camera straight on with good lighting. The system crops a clean portrait automatically.

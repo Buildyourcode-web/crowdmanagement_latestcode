@@ -77,7 +77,7 @@ export default function ROIEditor({
     streamUrl ||
     (camera?.stream_url
       ? (camera.stream_url.startsWith("http") ? camera.stream_url : `${BACKEND}${camera.stream_url}`)
-      : `${BACKEND}/api/v1/frs-engine/cameras/${camCode || "CAM-KHB-001"}/stream`);
+      : (camCode ? `${BACKEND}/api/v1/frs-engine/cameras/${camCode}/stream` : ""));
 
   const [streamLoading, setStreamLoading] = useState(true);
   const [streamError, setStreamError] = useState(false);
