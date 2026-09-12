@@ -41,23 +41,19 @@ from app.schemas.camera_roi import (
 CROWD_ROIS = {
     ROIType.CROWD_ROI,
     ROIType.ZONE_BOUNDARY,
-    ROIType.QUEUE_ROI,
     ROIType.EXCLUSION_ZONE,
     ROIType.COUNTING_LINE,
     ROIType.ENTRY_LINE,
     ROIType.EXIT_LINE,
-    ROIType.DIRECTION_LINE,
 }
 
 QUEUE_ROIS = {
     ROIType.QUEUE_ROI,
-    ROIType.CROWD_ROI,
-    ROIType.ZONE_BOUNDARY,
-    ROIType.EXCLUSION_ZONE,
-    ROIType.COUNTING_LINE,
+    ROIType.DIRECTION_LINE,
     ROIType.ENTRY_LINE,
     ROIType.EXIT_LINE,
-    ROIType.DIRECTION_LINE,
+    ROIType.COUNTING_LINE,
+    ROIType.EXCLUSION_ZONE,
 }
 
 PROFILE_ALLOWED_ROIS = {
@@ -149,6 +145,12 @@ class CameraROIService:
         elif roi_type in line_types:
             if "start" not in geometry_json or "end" not in geometry_json:
                 return False, "COUNTING_LINE_INVALID", "Line geometry must contain both 'start' and 'end' points."
+            st = geometry_json["start"]
+            en = geometry_json["end"]
+            if not isinstance(st, dict) or not isinstance(en, dict):
+                return False, "COUNTING_LINE_INVALID", "Line geometry 'start' and 'end' must be point dictionaries."
+            if st.get("x") == en.get("x") and st.get("y") == en.get("y"):
+                return False, "COUNTING_LINE_INVALID", "Line geometry start and end points cannot be identical."
             direction = (geometry_json.get("direction") or "BOTH").upper()
             if direction not in ("IN", "OUT", "BOTH"):
                 direction = "BOTH"
@@ -476,24 +478,6 @@ class CameraROIService:
             )
         )
 
-        # Clean up any conflicting ROIs from other purposes so old geometries don't linger
-        from sqlalchemy import delete as sa_delete
-        if target_group == "ENTRY":
-            incompatible_types = ["EXIT_LINE", "COUNTING_LINE", "QUEUE_ROI", "DIRECTION_LINE", "CROWD_ROI", "ZONE_BOUNDARY"]
-        elif target_group == "EXIT":
-            incompatible_types = ["ENTRY_LINE", "COUNTING_LINE", "QUEUE_ROI", "DIRECTION_LINE", "CROWD_ROI", "ZONE_BOUNDARY"]
-        elif target_group == "QUEUE":
-            incompatible_types = ["ENTRY_LINE", "EXIT_LINE", "COUNTING_LINE", "CROWD_ROI", "ZONE_BOUNDARY"]
-        elif target_group == "ZONE":
-            incompatible_types = ["ENTRY_LINE", "EXIT_LINE", "COUNTING_LINE", "QUEUE_ROI", "DIRECTION_LINE"]
-        else:
-            incompatible_types = ["QUEUE_ROI", "DIRECTION_LINE", "CROWD_ROI", "ZONE_BOUNDARY"]
-
-        del_stmt = sa_delete(CameraROIConfiguration).where(
-            CameraROIConfiguration.camera_id == camera.id,
-            CameraROIConfiguration.roi_type.in_(incompatible_types)
-        )
-        await self.db.execute(del_stmt)
 
         roi = CameraROIConfiguration(
             camera_id=camera.id,

@@ -36,8 +36,9 @@ services:
       - REDIS_URL=redis://redis:6379/0
 
       # Security & Auth
-      - JWT_SECRET_KEY=${JWT_SECRET_KEY:-byc_super_secret_jwt_key_khairatabad_2026_production_change_me}
-      - AI_SERVICE_API_KEY=${AI_SERVICE_API_KEY:-byc_ai_internal_service_token_2026}
+      - JWT_SECRET_KEY=${JWT_SECRET_KEY}
+      - AI_SERVICE_API_KEY=${AI_SERVICE_API_KEY}
+      - ADMIN_PASSWORD=${ADMIN_PASSWORD:-}
 
       # CORS — Put your Frontend CPU instance IP / domain here
       - CORS_ORIGINS=${CORS_ORIGINS:-http://localhost,http://localhost:5173,http://localhost:80}
@@ -52,7 +53,7 @@ services:
 
       # Physical RTSP Camera Source
       - RTSP_ENABLED=${RTSP_ENABLED:-true}
-      - RTSP_URL=${RTSP_URL:-rtsp://admin:Veeru%40555@192.168.0.102:554/Streaming/Channels/101}
+      - RTSP_URL=${RTSP_URL:-}
 
     # Pass NVIDIA GPU into container
     deploy:

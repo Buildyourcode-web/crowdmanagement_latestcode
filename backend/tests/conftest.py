@@ -76,6 +76,23 @@ async def client(db_session: AsyncSession) -> AsyncGenerator[AsyncClient, None]:
 
 @pytest_asyncio.fixture
 async def superadmin_token(db_session: AsyncSession) -> str:
+    from app.models.event import Event
+    from datetime import datetime, timezone
+    stmt_ev = select(Event).where(Event.code == "KHB-2026")
+    ev = (await db_session.execute(stmt_ev)).scalars().first()
+    if not ev:
+        ev = Event(
+            code="KHB-2026",
+            name="Khairatabad Ganesh Utsav 2026",
+            year=2026,
+            status="ACTIVE",
+            is_active=True,
+            start_date=datetime.now(timezone.utc),
+            end_date=datetime.now(timezone.utc),
+        )
+        db_session.add(ev)
+        await db_session.flush()
+
     # Check if role exists
     stmt_role = select(Role).where(Role.code == "SUPER_ADMIN")
     role = (await db_session.execute(stmt_role)).scalars().first()

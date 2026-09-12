@@ -1,4 +1,4 @@
-﻿import time
+import time
 import asyncio
 from typing import Any, Optional, Callable
 from functools import wraps

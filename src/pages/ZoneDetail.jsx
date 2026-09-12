@@ -24,7 +24,9 @@ export default function ZoneDetail() {
   if (loading) return <LoadingState />;
   if (!zone) return <ErrorState message="Zone not found" onRetry={() => navigate("/zones")} />;
 
-  const occupancyPct = ((zone.people / zone.capacity) * 100).toFixed(1);
+  const currentPeople = zone.people ?? zone.current_people ?? 0;
+  const capacity = zone.capacity > 0 ? zone.capacity : 1;
+  const occupancyPct = ((currentPeople / capacity) * 100).toFixed(1);
 
   const gaugeOption = {
     backgroundColor: "transparent",
@@ -46,10 +48,12 @@ export default function ZoneDetail() {
         fontSize: 22, fontWeight: 700, color: zone.color, fontFamily: "JetBrains Mono, monospace",
         offsetCenter: [0, "20%"],
       },
-      data: [{ value: parseFloat(occupancyPct), name: "Occupancy" }],
+      data: [{ value: parseFloat(occupancyPct) || 0, name: "Occupancy" }],
     }],
   };
 
+  const currentInflow = zone.inflow || 0;
+  const currentOutflow = zone.outflow || 0;
   const flowOption = {
     backgroundColor: "transparent",
     textStyle: ct.textStyle,
@@ -69,8 +73,8 @@ export default function ZoneDetail() {
     },
     yAxis: { axisLine: ct.axisLine, splitLine: ct.splitLine, axisLabel: { color: ct.axisLabelColor } },
     series: [
-      { name: "Inflow", type: "bar", data: [zone.inflow - 10, zone.inflow + 5, zone.inflow, zone.inflow + 15, zone.inflow - 5, zone.inflow], itemStyle: { color: ct.successColor }, barMaxWidth: 30 },
-      { name: "Outflow", type: "bar", data: [zone.outflow + 5, zone.outflow, zone.outflow - 5, zone.outflow, zone.outflow + 10, zone.outflow], itemStyle: { color: ct.primaryColor }, barMaxWidth: 30 },
+      { name: "Inflow", type: "bar", data: zone.flow_history?.inflow || [0, 0, 0, 0, 0, currentInflow], itemStyle: { color: ct.successColor }, barMaxWidth: 30 },
+      { name: "Outflow", type: "bar", data: zone.flow_history?.outflow || [0, 0, 0, 0, 0, currentOutflow], itemStyle: { color: ct.primaryColor }, barMaxWidth: 30 },
     ],
   };
 

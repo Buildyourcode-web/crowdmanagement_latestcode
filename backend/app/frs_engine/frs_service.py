@@ -258,15 +258,30 @@ async def _emit_frs_event(event_type: str, payload: dict):
 # RTSP Camera Worker thread
 # ---------------------------------------------------------------------------
 
-RTSP_URL_DEFAULT = "rtsp://admin:Veeru%40555@192.168.0.102:554/Streaming/Channels/101"
 MATCH_THRESHOLD = 0.60
 DET_SIZE = (640, 640)
 
-# Shared singleton components
+# Shared singleton FRS (InsightFace) components — these are model-level singletons
+# because InsightFace buffalo_l is pinned to one GPU per process.
+# For multi-GPU FRS, deploy separate container per GPU.
 _shared_face_model = None
 _shared_matcher = None
 _shared_engine_lock = threading.Lock()
-_onnx_inference_lock = threading.Lock()
+
+# ---------------------------------------------------------------------------
+# Per-GPU YOLO pool for crowd/queue AI — replaces the old single-lock approach.
+# Each camera thread obtains its own GPU session via gpu_pool.acquire().
+# ---------------------------------------------------------------------------
+def _get_yolo_pool_onnx_path() -> Optional[str]:
+    """Finds the YOLO11x ONNX model path."""
+    candidates = [
+        "models/yolo11x.onnx",
+        "models/yolo11x_crowd.onnx",
+        os.path.join(os.getcwd(), "backend", "models", "yolo11x.onnx"),
+        os.path.join(os.getcwd(), "models", "yolo11x.onnx"),
+    ]
+    return next((p for p in candidates if os.path.exists(p)), None)
+
 
 def get_shared_engine():
     global _shared_face_model, _shared_matcher
@@ -300,35 +315,33 @@ def reload_shared_gallery():
             except Exception as e:
                 logger.warning(f"[FRS-Engine] Gallery reload warning: {e}")
 
-_shared_yolo_model = None
-_shared_yolo_lock = threading.Lock()
 
 def get_shared_yolo_engine():
-    global _shared_yolo_model
-    with _shared_yolo_lock:
-        if _shared_yolo_model is None:
-            try:
-                import onnxruntime as ort
-                candidates = [
-                    "models/yolo11x.onnx",
-                    "models/yolo11x_crowd.onnx",
-                    os.path.join(os.getcwd(), "backend", "models", "yolo11x.onnx"),
-                    os.path.join(os.getcwd(), "models", "yolo11x.onnx"),
-                ]
-                valid_path = next((p for p in candidates if os.path.exists(p)), None)
-                if valid_path:
-                    avail = ort.get_available_providers()
-                    provs = []
-                    if "CUDAExecutionProvider" in avail:
-                        provs.append("CUDAExecutionProvider")
-                    if "DmlExecutionProvider" in avail:
-                        provs.append("DmlExecutionProvider")
-                    provs.append("CPUExecutionProvider")
-                    _shared_yolo_model = ort.InferenceSession(valid_path, providers=provs)
-                    logger.info(f"[YOLO11x-Crowd] Loaded ONNX session from {valid_path} with providers {provs}")
-            except Exception as e:
-                logger.warning(f"[YOLO11x-Crowd] Failed to load YOLO11x ONNX model: {e}")
-        return _shared_yolo_model
+    """
+    Returns the gpu_pool-managed ONNX session for the *calling thread's camera*.
+    
+    DEPRECATED SIGNATURE preserved for compatibility — new code should call
+    gpu_pool.acquire(camera_code) directly.  This function is retained for the
+    _crowd_ai_detection_loop which calls it without a camera code; it returns
+    the first available session (GPU-0 by default) when no camera context is
+    available.
+    """
+    try:
+        from app.ai.gpu_allocator import gpu_pool, initialize_gpu_pool
+        model_path = _get_yolo_pool_onnx_path()
+        if model_path is None:
+            logger.warning("[YOLO11x-Crowd] No ONNX model file found in models/")
+            return None
+        if not gpu_pool.is_ready:
+            success = initialize_gpu_pool(model_path)
+            if not success:
+                return None
+        # Return first pool entry's session (caller must use per-GPU lock separately)
+        if gpu_pool._pool:
+            return gpu_pool._pool[0].session
+    except Exception as e:
+        logger.warning(f"[YOLO11x-Crowd] Failed to get GPU pool session: {e}")
+    return None
 
 
 def _check_ccw(a, b, c):
@@ -606,7 +619,7 @@ class RTSPCameraWorker:
             try:
                 frame_counter += 1
                 try:
-                    with _onnx_inference_lock:
+                    with _shared_engine_lock:
                         faces = face_model.detect_faces(frame_to_process)
                 except Exception as e:
                     time.sleep(0.05)
@@ -886,7 +899,21 @@ class RTSPCameraWorker:
                 time.sleep(0.04)
                 continue
 
-            yolo_sess = get_shared_yolo_engine()
+            yolo_sess = None
+            yolo_lock = None
+            try:
+                from app.ai.gpu_allocator import gpu_pool, initialize_gpu_pool
+                model_path = _get_yolo_pool_onnx_path()
+                if model_path:
+                    if not gpu_pool.is_ready:
+                        initialize_gpu_pool(model_path)
+                    cam_key = self.state.camera_id
+                    yolo_sess, yolo_lock, _gpu_id = gpu_pool.acquire(cam_key)
+            except Exception as _pool_err:
+                logger.debug(f"[Crowd-AI-Worker:{self.state.camera_id}] GPU pool error: {_pool_err}")
+                # Fallback: use the legacy compatibility helper
+                yolo_sess = get_shared_yolo_engine()
+
             if yolo_sess is None:
                 time.sleep(0.2)
                 continue
@@ -898,8 +925,14 @@ class RTSPCameraWorker:
                 inp_name = yolo_sess.get_inputs()[0].name
                 out_name = yolo_sess.get_outputs()[0].name
 
-                with _onnx_inference_lock:
+                # Per-GPU lock: only cameras sharing the same GPU serialize here.
+                # Cameras on different GPUs (e.g. GPU-0 vs GPU-3) run in parallel.
+                if yolo_lock is not None:
+                    with yolo_lock:
+                        outputs = yolo_sess.run([out_name], {inp_name: inp})
+                else:
                     outputs = yolo_sess.run([out_name], {inp_name: inp})
+
 
                 preds = np.squeeze(outputs[0]).T  # (8400, 84)
                 person_scores = preds[:, 4]
@@ -1214,15 +1247,23 @@ class RTSPCameraWorker:
                                 f"{crossing_label} | IN={self.state.in_count} OUT={self.state.out_count} OCCUPANCY={self.state.occupancy_count}"
                             )
 
-                            _emit_frs_event_threadsafe("crowd_telemetry", {
+                            telemetry_payload = {
                                 "camera_id": self.state.camera_id,
                                 "camera_code": self.state.camera_id,
                                 "in_count": self.state.in_count,
                                 "out_count": self.state.out_count,
                                 "occupancy": self.state.occupancy_count,
+                                "current_occupancy": self.state.occupancy_count,
                                 "headcount": len(self._crowd_tracks),
+                                "crossing": crossing_label,
+                                "inflow_delta": inflow_d,
+                                "outflow_delta": outflow_d,
+                                "line_name": line.get("name"),
+                                "zone_code": getattr(self.state, "zone_code", "ZONE-A"),
                                 "timestamp": datetime.now(timezone.utc).isoformat(),
-                            })
+                            }
+                            _emit_frs_event_threadsafe("crowd_telemetry", telemetry_payload)
+                            _emit_frs_event_threadsafe("crowd_update", telemetry_payload)
 
                             _persist_crowd_snapshot_threadsafe(
                                 camera_code=self.state.camera_id,
@@ -2479,7 +2520,7 @@ async def enroll_person_api(
         raise HTTPException(status_code=400, detail="Could not read uploaded image")
 
     face_model, _ = get_shared_engine()
-    with _onnx_inference_lock:
+    with _shared_engine_lock:
         faces = face_model.detect_faces(rgb)
     if not faces:
         os.remove(dest_path)
@@ -2614,7 +2655,7 @@ async def enroll_from_camera_api(req: CameraEnrollRequest):
     if face_model is None:
         raise HTTPException(status_code=500, detail="Face recognition model not loaded")
 
-    with _onnx_inference_lock:
+    with _shared_engine_lock:
         faces = face_model.detect_faces(rgb)
     if not faces:
         raise HTTPException(status_code=400, detail="No face detected in live camera frame. Please look directly into the camera.")
@@ -2775,7 +2816,7 @@ def auto_start_main_camera():
     the YOLO11x line-crossing detection loop activates immediately.
     """
     import os
-    rtsp_url = os.getenv("RTSP_URL", RTSP_URL_DEFAULT)
+    rtsp_url = os.getenv("RTSP_URL", "")
     if not rtsp_url:
         logger.warning("[FRS-Engine] RTSP_URL not set — main camera not auto-started.")
         return

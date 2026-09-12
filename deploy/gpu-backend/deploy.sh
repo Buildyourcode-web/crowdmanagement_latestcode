@@ -56,13 +56,12 @@ fi
 # 4. Check or create .env file
 if [ ! -f .env ]; then
     echo -e "${YELLOW}[!] .env not found. Creating from .env.example...${NC}"
-    cp .env.example .env
-    echo -e "${YELLOW}Please enter the IP or domain of your CPU Frontend Instance (for CORS):${NC}"
-    read -r user_frontend_ip
-    if [ -n "$user_frontend_ip" ]; then
-        sed -i "s|CORS_ORIGINS=.*|CORS_ORIGINS=http://${user_frontend_ip},http://${user_frontend_ip}:80,http://localhost:5173,http://localhost|g" .env
-        echo -e "${GREEN}[✓] Updated CORS_ORIGINS in .env${NC}"
-    fi
+    # Auto-generate unique cryptographically secure secrets
+    RAND_JWT=$(openssl rand -hex 32 2>/dev/null || python3 -c 'import secrets; print(secrets.token_hex(32))' 2>/dev/null || date +%s | sha256sum | head -c 64)
+    RAND_AI=$(openssl rand -hex 32 2>/dev/null || python3 -c 'import secrets; print(secrets.token_hex(32))' 2>/dev/null || date +%s | sha256sum | head -c 64)
+    sed -i "s|JWT_SECRET_KEY=.*|JWT_SECRET_KEY=${RAND_JWT}|g" .env
+    sed -i "s|AI_SERVICE_API_KEY=.*|AI_SERVICE_API_KEY=${RAND_AI}|g" .env
+    echo -e "${GREEN}[✓] Generated unique cryptographically secure JWT and API secrets${NC}"
 fi
 
 # 5. Build and launch Backend + DB + Redis

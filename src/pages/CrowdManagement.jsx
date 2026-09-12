@@ -125,14 +125,18 @@ export default function CrowdManagement() {
     });
 
     const unsubEvents = realtimeService.subscribe((msg, eventType) => {
-      const type = eventType || msg?.type;
+      const type = String(eventType || msg?.type || "").toLowerCase();
       if (
+        type === "crowd_telemetry" ||
         type === "crowd_update" ||
+        type === "crowd_metrics" ||
+        type === "crowd_metrics_updated" ||
+        type === "line_crossing" ||
         type === "zone_update" ||
         type === "queue_update" ||
         type === "new_alert" ||
-        type === "PIPELINE_STARTED" ||
-        type === "PIPELINE_STOPPED" ||
+        type === "pipeline_started" ||
+        type === "pipeline_stopped" ||
         type === "pipeline_state_changed"
       ) {
         loadSummary(true);

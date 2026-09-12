@@ -1,6 +1,6 @@
 import uuid
 from typing import List, Optional
-from fastapi import APIRouter, Depends, Query, Request, Response, status
+from fastapi import APIRouter, Depends, HTTPException, Query, Request, Response, status
 from sqlalchemy.ext.asyncio import AsyncSession
 from loguru import logger
 
@@ -254,7 +254,7 @@ async def toggle_camera_frs(
             from app.frs_engine.frs_service import add_frs_camera, remove_frs_camera, AddCameraRequest
             if new_state:
                 import os
-                rtsp_url = os.getenv("RTSP_URL", "rtsp://admin:Veeru%40555@192.168.0.102:554/Streaming/Channels/101")
+                rtsp_url = getattr(updated, "rtsp_url", None) or os.getenv("RTSP_URL", "")
                 await add_frs_camera(AddCameraRequest(
                     camera_id=updated.camera_code,
                     name=updated.name,

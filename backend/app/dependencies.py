@@ -1,3 +1,4 @@
+import os
 import uuid
 from typing import Any, AsyncGenerator, Callable, List, Optional
 from fastapi import Depends, HTTPException, Header, Security, status
@@ -54,7 +55,7 @@ async def get_current_user(
 ) -> User:
     global _cached_dev_user, _cached_users
     if not auth or not auth.credentials:
-        if settings.APP_ENV == "development":
+        if settings.APP_ENV == "development" and os.getenv("ENABLE_DEV_AUTH_BYPASS", "").lower() in ("true", "1"):
             stmt = (
                 select(User)
                 .options(selectinload(User.role).selectinload(Role.permissions))
@@ -236,7 +237,7 @@ async def get_event_context(
         else:
             global _cached_default_event, _cached_default_event_exp
             now_ts = time.time()
-            if _cached_default_event is not None and now_ts < _cached_default_event_exp:
+            if settings.APP_ENV != "testing" and _cached_default_event is not None and now_ts < _cached_default_event_exp:
                 target_event = _cached_default_event
                 try:
                     target_event = await db.merge(target_event, load=False)

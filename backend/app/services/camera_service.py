@@ -37,6 +37,7 @@ from app.ai.pipelines.crowd.registry import CrowdPipelineRegistry
 from app.ai.pipelines.queue.registry import QueuePipelineRegistry
 from app.ai.pipelines.frs.registry import FRSPipelineRegistry
 from app.frs_engine.frs_service import is_frs_worker_running
+from app.services.rtsp_test_service import RTSPTestService
 
 _stats_cache: Optional[CameraStatsResponse] = None
 _stats_cache_time: float = 0.0

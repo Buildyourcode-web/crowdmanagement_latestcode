@@ -18,6 +18,7 @@ from pydantic import BaseModel, Field
 
 from app.ai.pipelines.crowd.models_registry import ModelRegistryService, PersonDetectionModel
 from app.ai.runtime.detector import RuntimeDetector
+from app.ai.gpu_allocator import gpu_pool, initialize_gpu_pool
 
 
 class DetectedPerson(BaseModel):
@@ -232,7 +233,8 @@ class YOLO11xPersonDetector(BasePersonDetector):
         super().__init__(actual_model, conf_thresh)
 
         self.iou_threshold = iou_threshold if iou_threshold is not None else actual_model.iou_threshold
-        self.device = device or os.getenv("YOLO_DEVICE", "cuda:0")
+        # device is kept for introspection; actual dispatch goes through gpu_pool
+        self.device = device or os.getenv("YOLO_DEVICE", "auto")
         self.camera_code = camera_code
         self.allow_cpu_fallback = allow_cpu_fallback
         self.synthetic_injector_mode = synthetic_injector_mode
@@ -240,7 +242,11 @@ class YOLO11xPersonDetector(BasePersonDetector):
         # Runtime Session State
         self.backend = "UNINITIALIZED"
         self.status = "CREATED"
+        # _onnx_session and _onnx_lock are assigned from gpu_pool, NOT created here.
+        # This ensures each camera uses its own GPU with its own per-GPU lock.
         self._onnx_session = None
+        self._onnx_lock = None      # threading.Lock from gpu_pool — per-GPU
+        self._assigned_gpu_id: int = -1
         self._trt_engine = None
         self._torch_model = None
         self._queued_detections: List[Dict[str, Any]] = []
@@ -253,8 +259,13 @@ class YOLO11xPersonDetector(BasePersonDetector):
     async def initialize(self) -> bool:
         """
         Initializes the model backend.
-        Checks for TensorRT, ONNX Runtime (DirectML / CPU), and PyTorch.
-        If synthetic_injector_mode is True, initializes injector for testing.
+
+        Priority:
+        1. Test injector mode (synthetic detections — no GPU needed)
+        2. TensorRT engine  (.engine file exists + tensorrt installed)
+        3. GPU Pool ONNX    (gpu_pool allocates a pinned per-GPU CUDA session)
+        4. PyTorch / Ultralytics fallback
+        5. Graceful unavailability report
         """
         if self.synthetic_injector_mode:
             self.backend = "TEST_INJECTOR"
@@ -276,39 +287,81 @@ class YOLO11xPersonDetector(BasePersonDetector):
             except Exception as e:
                 logger.warning(f"[YOLO11xDetector] TensorRT loader failed: {e}")
 
-        # 2. Attempt ONNX Runtime initialization
-        onnx_candidate_paths = [
-            (engine_path.replace(".engine", ".onnx") if engine_path else None),
-            (self.model.weights_path.replace(".pt", ".onnx") if self.model.weights_path else None),
-            "models/yolo11x.onnx",
-            "models/yolo11x_crowd.onnx",
-        ]
+        # 2. ONNX Runtime via GPU Pool (one session per GPU, per-GPU lock)
+        onnx_candidate_paths = []
+        if engine_path:
+            onnx_candidate_paths.append(engine_path.replace(".engine", ".onnx"))
+        if self.model.weights_path:
+            onnx_candidate_paths.append(self.model.weights_path.replace(".pt", ".onnx"))
+        if not self.model.weights_path or self.model.weights_path in ("models/yolo11x.pt", "models/yolo11x_crowd.pt"):
+            onnx_candidate_paths.extend(["models/yolo11x.onnx", "models/yolo11x_crowd.onnx"])
         valid_onnx_path = next((p for p in onnx_candidate_paths if p and os.path.exists(p)), None)
 
         if valid_onnx_path:
             try:
                 import onnxruntime as ort
                 available_providers = ort.get_available_providers()
-                providers = []
-                if "DmlExecutionProvider" in available_providers and "cpu" not in self.device.lower():
-                    providers.append("DmlExecutionProvider")
-                    self.backend = "ONNX_DIRECTML"
-                elif "CUDAExecutionProvider" in available_providers and "cpu" not in self.device.lower():
-                    providers.append("CUDAExecutionProvider")
-                    self.backend = "ONNX_CUDA"
-                elif self.allow_cpu_fallback:
-                    providers.append("CPUExecutionProvider")
-                    self.backend = "ONNX_CPU"
-                else:
-                    self.status = "GPU_INFERENCE_UNAVAILABLE"
-                    return False
 
-                providers.append("CPUExecutionProvider")
-                self._onnx_session = ort.InferenceSession(valid_onnx_path, providers=providers)
-                self.status = "READY"
-                self.is_initialized = True
-                logger.info(f"[YOLO11xDetector] Initialized ONNX Runtime session ({self.backend}) from {valid_onnx_path}")
-                return True
+                if "CUDAExecutionProvider" in available_providers and "cpu" not in self.device.lower():
+                    # ── GPU Pool path ──────────────────────────────────────────
+                    # Initialize pool on first call (idempotent thereafter)
+                    initialize_gpu_pool(valid_onnx_path)
+
+                    if gpu_pool.is_ready:
+                        cam_key = self.camera_code or f"detector_{id(self)}"
+                        session, lock, gpu_id = gpu_pool.acquire(cam_key)
+                        if session is not None:
+                            self._onnx_session = session
+                            self._onnx_lock = lock
+                            self._assigned_gpu_id = gpu_id
+                            self.backend = f"ONNX_CUDA_GPU{gpu_id}"
+                            self.device = f"cuda:{gpu_id}"
+                            self.status = "READY"
+                            self.is_initialized = True
+                            logger.info(
+                                f"[YOLO11xDetector:{self.camera_code}] "
+                                f"Assigned to GPU-{gpu_id} via gpu_pool "
+                                f"(backend={self.backend})"
+                            )
+                            return True
+
+                if "DmlExecutionProvider" in available_providers and "cpu" not in self.device.lower():
+                    # DirectML (Windows — no pool needed, single device)
+                    import threading
+                    sess_opts = ort.SessionOptions()
+                    sess_opts.graph_optimization_level = ort.GraphOptimizationLevel.ORT_ENABLE_ALL
+                    self._onnx_session = ort.InferenceSession(
+                        valid_onnx_path,
+                        sess_options=sess_opts,
+                        providers=["DmlExecutionProvider", "CPUExecutionProvider"]
+                    )
+                    self._onnx_lock = threading.Lock()
+                    self.backend = "ONNX_DIRECTML"
+                    self.status = "READY"
+                    self.is_initialized = True
+                    logger.info(f"[YOLO11xDetector] Initialized ONNX DirectML session from {valid_onnx_path}")
+                    return True
+
+                if self.allow_cpu_fallback:
+                    import threading
+                    sess_opts = ort.SessionOptions()
+                    sess_opts.intra_op_num_threads = 4
+                    sess_opts.graph_optimization_level = ort.GraphOptimizationLevel.ORT_ENABLE_ALL
+                    self._onnx_session = ort.InferenceSession(
+                        valid_onnx_path,
+                        sess_options=sess_opts,
+                        providers=["CPUExecutionProvider"]
+                    )
+                    self._onnx_lock = threading.Lock()
+                    self.backend = "ONNX_CPU"
+                    self.status = "READY"
+                    self.is_initialized = True
+                    logger.info(f"[YOLO11xDetector] Initialized ONNX CPU session from {valid_onnx_path}")
+                    return True
+
+                self.status = "GPU_INFERENCE_UNAVAILABLE"
+                return False
+
             except Exception as e:
                 logger.warning(f"[YOLO11xDetector] ONNX session creation failed: {e}")
 
@@ -409,7 +462,12 @@ class YOLO11xPersonDetector(BasePersonDetector):
         return person_detections
 
     def _infer_onnx(self, frame_data: Any) -> List[Dict[str, Any]]:
-        """Inference helper for ONNX Runtime session."""
+        """
+        Inference helper for ONNX Runtime session.
+        Uses self._onnx_lock (per-GPU lock from gpu_pool) so cameras on
+        different GPUs never block each other — only cameras sharing the
+        same GPU serialize their inference calls.
+        """
         try:
             import cv2
             import numpy as np
@@ -426,7 +484,15 @@ class YOLO11xPersonDetector(BasePersonDetector):
             input_tensor = np.expand_dims(input_tensor, axis=0)
 
             input_name = self._onnx_session.get_inputs()[0].name
-            outputs = self._onnx_session.run(None, {input_name: input_tensor})
+
+            # Acquire per-GPU lock — cameras on the same GPU serialize here,
+            # but cameras on different GPUs proceed in parallel.
+            lock = self._onnx_lock
+            if lock is not None:
+                with lock:
+                    outputs = self._onnx_session.run(None, {input_name: input_tensor})
+            else:
+                outputs = self._onnx_session.run(None, {input_name: input_tensor})
 
             raw_dets = []
             if outputs and len(outputs) > 0:
@@ -435,23 +501,58 @@ class YOLO11xPersonDetector(BasePersonDetector):
                     out = np.transpose(out, (0, 2, 1))  # [1, 8400, 84]
 
                 pred = out[0]
-                for row in pred:
-                    cx, cy, w, h = row[:4]
-                    classes_scores = row[4:]
-                    class_id = int(np.argmax(classes_scores))
-                    conf = float(classes_scores[class_id])
+                # Determine person confidence score based on YOLO output layout
+                if pred.shape[1] >= 85:
+                    # YOLOv5 format: cx, cy, w, h, obj_conf, cls0...cls79
+                    person_scores = pred[:, 4] * pred[:, 5]
+                else:
+                    # YOLOv8 / YOLO11 format: cx, cy, w, h, cls0...cls79
+                    person_scores = pred[:, 4]
 
-                    if class_id == 0 and conf >= self.confidence_threshold:
-                        # Convert center to corners and normalize [0..1]
-                        x1 = (cx - w / 2.0) / float(target_w)
-                        y1 = (cy - h / 2.0) / float(target_h)
-                        x2 = (cx + w / 2.0) / float(target_w)
-                        y2 = (cy + h / 2.0) / float(target_h)
-                        raw_dets.append({
-                            "class_id": 0,
-                            "confidence": conf,
-                            "bbox": (x1, y1, x2, y2),
-                        })
+                # Fast vectorized pre-filter by confidence threshold
+                valid_mask = person_scores >= self.confidence_threshold
+                filtered_pred = pred[valid_mask]
+                filtered_scores = person_scores[valid_mask]
+
+                if len(filtered_pred) == 0:
+                    return []
+
+                # Convert cx, cy, w, h to pixel top-left x, y, w, h for OpenCV NMS
+                boxes_xywh = []
+                confs = []
+                for row, score in zip(filtered_pred, filtered_scores):
+                    cx, cy, bw, bh = row[:4]
+                    x = int(cx - bw / 2.0)
+                    y = int(cy - bh / 2.0)
+                    w = int(bw)
+                    h = int(bh)
+                    boxes_xywh.append([x, y, w, h])
+                    confs.append(float(score))
+
+                # Apply Non-Maximum Suppression (NMS) to eliminate duplicate boxes
+                # Essential for dense scenes (60-70 people per frame)
+                nms_indices = cv2.dnn.NMSBoxes(
+                    boxes_xywh,
+                    confs,
+                    score_threshold=float(self.confidence_threshold),
+                    nms_threshold=float(self.iou_threshold),
+                )
+
+                if len(nms_indices) > 0:
+                    for idx in nms_indices.flatten():
+                        bx, by, bw, bh = boxes_xywh[idx]
+                        conf = confs[idx]
+                        # Convert to normalized coordinates [0.0..1.0]
+                        x1 = max(0.0, min(1.0, bx / float(target_w)))
+                        y1 = max(0.0, min(1.0, by / float(target_h)))
+                        x2 = max(0.0, min(1.0, (bx + bw) / float(target_w)))
+                        y2 = max(0.0, min(1.0, (by + bh) / float(target_h)))
+                        if x2 > x1 and y2 > y1:
+                            raw_dets.append({
+                                "class_id": 0,
+                                "confidence": conf,
+                                "bbox": (x1, y1, x2, y2),
+                            })
             return raw_dets
         except Exception as e:
             logger.debug(f"[YOLO11xDetector] ONNX infer error: {e}")
@@ -499,6 +600,7 @@ class YOLO11xPersonDetector(BasePersonDetector):
             "format": self.model.format,
             "backend": self.backend,
             "device": self.device,
+            "assigned_gpu_id": self._assigned_gpu_id,
             "status": self.status,
             "engine_path": self.model.engine_path,
             "weights_path": self.model.weights_path,
@@ -516,9 +618,15 @@ class YOLO11xPersonDetector(BasePersonDetector):
         }
 
     async def close(self) -> None:
+        # Release GPU pool slot so it can be reassigned to another camera
+        if self.camera_code and gpu_pool.is_ready:
+            gpu_pool.release(self.camera_code)
         self.is_initialized = False
         self._queued_detections.clear()
+        # Do NOT destroy the ONNX session — it belongs to gpu_pool and is shared.
+        # Setting to None just removes our reference; the pool owns the session.
         self._onnx_session = None
+        self._onnx_lock = None
         self._torch_model = None
         self.status = "STOPPED"
 

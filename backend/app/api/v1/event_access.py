@@ -1,4 +1,4 @@
-﻿import uuid
+import uuid
 from typing import List
 from fastapi import APIRouter, Depends, status
 from pydantic import BaseModel

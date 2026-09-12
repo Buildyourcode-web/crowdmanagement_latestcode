@@ -1,7 +1,7 @@
 from functools import lru_cache
 from typing import List
 from pydantic_settings import BaseSettings, SettingsConfigDict
-from pydantic import Field, field_validator
+from pydantic import Field, field_validator, model_validator
 
 
 class Settings(BaseSettings):
@@ -51,6 +51,18 @@ class Settings(BaseSettings):
         extra="ignore",
         case_sensitive=True,
     )
+
+    @model_validator(mode="after")
+    def validate_production_security(self) -> "Settings":
+        if self.APP_ENV == "production" and "change_me" in self.JWT_SECRET_KEY:
+            import secrets, logging
+            self.JWT_SECRET_KEY = secrets.token_hex(32)
+            logging.getLogger("uvicorn").critical(
+                "[SECURITY] Default JWT_SECRET_KEY was detected in production! "
+                "Generated a secure random key to prevent token forgery. "
+                "Ensure JWT_SECRET_KEY is explicitly defined in your production .env"
+            )
+        return self
 
     @property
     def cors_origins_list(self) -> List[str]:

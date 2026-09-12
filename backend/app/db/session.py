@@ -15,7 +15,7 @@ async_engine = create_async_engine(
     max_overflow=10,
     pool_timeout=30,
     pool_recycle=300,
-    pool_pre_ping=False,
+    pool_pre_ping=True,   # validates connections before use — prevents stale-connection errors on AWS/Supabase
     connect_args={"statement_cache_size": 0, "prepared_statement_cache_size": 0},
 )
 
@@ -54,6 +54,7 @@ try:
         max_overflow=3,
         pool_timeout=10,
         pool_recycle=300,
+        pool_pre_ping=True,   # prevents stale-connection errors on AWS for background threads
     )
     SyncSessionLocal = sessionmaker(
         bind=sync_engine,

@@ -10,7 +10,6 @@ import ROIEditor from "../components/ai/ROIEditor.jsx";
 import { getBackendUrl } from "../utils/urlConfig.js";
 
 const BACKEND = getBackendUrl();
-const DEFAULT_RTSP = "rtsp://admin:Veeru%40555@192.168.0.102:554/Streaming/Channels/101";
 
 const GRID_SIZES = [
   { label: "4×", cols: 4 },
@@ -221,15 +220,40 @@ export default function Cameras() {
     };
     document.addEventListener("visibilitychange", handleVis);
 
-    const unsubEvents = realtimeService.subscribe((msg, eventType) => {
-      const type = eventType || msg?.type;
+    const unsubEvents = realtimeService.subscribe((msg, eventType, payload) => {
+      const normalized = String(eventType || msg?.type || "").toLowerCase();
+      const dataPayload = payload || msg?.payload || msg?.data || msg;
+
       if (
-        type === "pipeline_state_changed" ||
-        type === "PIPELINE_STARTED" ||
-        type === "PIPELINE_STOPPED" ||
-        type === "camera_update" ||
-        type === "CAMERA_ADDED" ||
-        type === "CAMERA_DELETED"
+        normalized === "crowd_telemetry" ||
+        normalized === "crowd_update" ||
+        normalized === "crowd_metrics" ||
+        normalized === "crowd_metrics_updated"
+      ) {
+        const camId = dataPayload?.camera_id || dataPayload?.camera_code;
+        if (camId) {
+          setEngineCameras((prev) =>
+            prev.map((cam) => {
+              if (cam.id === camId || cam.camera_code === camId) {
+                return {
+                  ...cam,
+                  people_count: dataPayload.headcount ?? dataPayload.people_count ?? cam.people_count,
+                  in_count: dataPayload.in_count ?? cam.in_count,
+                  out_count: dataPayload.out_count ?? cam.out_count,
+                  occupancy: dataPayload.occupancy ?? cam.occupancy,
+                };
+              }
+              return cam;
+            })
+          );
+        }
+      } else if (
+        normalized === "pipeline_state_changed" ||
+        normalized === "pipeline_started" ||
+        normalized === "pipeline_stopped" ||
+        normalized === "camera_update" ||
+        normalized === "camera_added" ||
+        normalized === "camera_deleted"
       ) {
         loadEngineCameras();
         loadDbCameras();

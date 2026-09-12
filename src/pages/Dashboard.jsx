@@ -122,22 +122,19 @@ export default function Dashboard() {
 
     document.addEventListener("visibilitychange", handleVisibilityChange);
 
-    // 4. WebSocket Real-time event listener
+    // 4. WebSocket Real-time event listener (Instant 0ms count reflection)
     const unsubWs = realtimeService.subscribe((msg, eventType, payload) => {
-      const type = eventType || msg?.type;
+      const type = String(eventType || msg?.type || "").toLowerCase();
       const dataPayload = payload || msg?.payload || msg;
-      if (type === "zone_update") {
-        if (dataPayload?.zone_code) {
-          useDashboardStore.getState().patchZoneDensity(
-            dataPayload.zone_code,
-            dataPayload.current_people,
-            dataPayload.capacity,
-            dataPayload.status,
-            dataPayload.density_pct
-          );
-        }
-        loadData(true);
-      } else if (type === "crowd_update" || type === "queue_update") {
+
+      if (
+        type === "crowd_telemetry" ||
+        type === "crowd_update" ||
+        type === "crowd_metrics" ||
+        type === "crowd_metrics_updated" ||
+        type === "line_crossing"
+      ) {
+        useDashboardStore.getState().patchDashboardCrossing(dataPayload);
         if (dataPayload?.total_visitors_festival !== undefined) {
           useDashboardStore.getState().patchDashboardMetrics({
             total_visitors_festival: dataPayload.total_visitors_festival,
@@ -145,15 +142,23 @@ export default function Dashboard() {
             today_exits: dataPayload.today_exits,
             current_occupancy: dataPayload.current_occupancy,
           });
-        } else {
-          loadData(true);
+        }
+      } else if (type === "zone_update") {
+        if (dataPayload?.zone_code) {
+          useDashboardStore.getState().patchZoneDensity(
+            dataPayload.zone_code,
+            dataPayload.current_people ?? dataPayload.headcount,
+            dataPayload.capacity,
+            dataPayload.status,
+            dataPayload.density_pct
+          );
         }
       } else if (
         type === "new_alert" ||
         type === "frs_candidate" ||
         type === "pipeline_state_changed" ||
-        type === "PIPELINE_STARTED" ||
-        type === "PIPELINE_STOPPED"
+        type === "pipeline_started" ||
+        type === "pipeline_stopped"
       ) {
         loadData(true);
       }

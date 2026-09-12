@@ -1,6 +1,6 @@
-// Realtime Service — Centralized Singleton WebSocket Client for Live AI Event Bus
 import { useCrowdStore } from "../store/useCrowdStore.js";
 import { useAlertStore } from "../store/useAlertStore.js";
+import { useDashboardStore } from "../store/useDashboardStore.js";
 import { getWsUrl } from "../utils/urlConfig.js";
 
 class RealtimeService {
@@ -87,12 +87,30 @@ class RealtimeService {
       return; // Discard message from another site when filtered
     }
 
-    // 1. Update shared Zustand stores
-    if (eventType === "crowd_update" || eventType === "crowd_metrics") {
+    // 1. Instant 0ms real-time state updates across shared stores
+    const normalizedType = String(eventType || "").toLowerCase();
+
+    if (
+      normalizedType === "crowd_telemetry" ||
+      normalizedType === "crowd_update" ||
+      normalizedType === "crowd_metrics" ||
+      normalizedType === "crowd_metrics_updated" ||
+      normalizedType === "line_crossing"
+    ) {
       useCrowdStore.getState().setCrowdFromAPI?.(payload);
-    } else if (eventType === "zone_update") {
+      useDashboardStore.getState().patchDashboardCrossing?.(payload);
+    } else if (normalizedType === "zone_update") {
       useCrowdStore.getState().setZoneUpdate?.(payload);
-    } else if (eventType === "new_alert") {
+      if (payload?.zone_code) {
+        useDashboardStore.getState().patchZoneDensity?.(
+          payload.zone_code,
+          payload.current_people ?? payload.headcount,
+          payload.capacity,
+          payload.status,
+          payload.density_pct
+        );
+      }
+    } else if (normalizedType === "new_alert" || normalizedType === "alert") {
       useAlertStore.getState().addAlert?.(payload);
     }
 

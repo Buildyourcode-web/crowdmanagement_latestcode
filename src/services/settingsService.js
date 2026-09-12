@@ -137,40 +137,8 @@ export const MOCK_PERMISSIONS = [
   { id: '15', code: 'settings:manage', name: 'Manage System Settings', category: 'Administration' },
 ];
 
-export const MOCK_ZONES = [
-  { id: '1', zone_code: 'ZONE-A', name: 'Zone A', label: 'North Gate & Approach', capacity: 10000, current_people: 0, density_label: 'LOW', risk_level: 'LOW', color: '#3fb950', updated_at: new Date().toISOString() },
-  { id: '2', zone_code: 'ZONE-B', name: 'Zone B', label: 'Main Idol Darshan Arena', capacity: 20000, current_people: 0, density_label: 'LOW', risk_level: 'LOW', color: '#3fb950', updated_at: new Date().toISOString() },
-  { id: '3', zone_code: 'ZONE-C', name: 'Zone C', label: 'VIP Enclosure & Stage', capacity: 6000, current_people: 0, density_label: 'LOW', risk_level: 'LOW', color: '#3fb950', updated_at: new Date().toISOString() },
-  { id: '4', zone_code: 'ZONE-D', name: 'Zone D', label: 'Prasadam & Laddu Counters', capacity: 5000, current_people: 0, density_label: 'LOW', risk_level: 'LOW', color: '#3fb950', updated_at: new Date().toISOString() },
-  { id: '5', zone_code: 'ZONE-E', name: 'Zone E', label: 'South Queue Complex', capacity: 8000, current_people: 0, density_label: 'LOW', risk_level: 'LOW', color: '#3fb950', updated_at: new Date().toISOString() },
-  { id: '6', zone_code: 'ZONE-F', name: 'Zone F', label: 'Police & Emergency Post', capacity: 3000, current_people: 0, density_label: 'LOW', risk_level: 'LOW', color: '#3fb950', updated_at: new Date().toISOString() },
-  { id: '7', zone_code: 'ZONE-G', name: 'Zone G', label: 'Medical Response Centre', capacity: 2000, current_people: 0, density_label: 'LOW', risk_level: 'LOW', color: '#3fb950', updated_at: new Date().toISOString() },
-  { id: '8', zone_code: 'ZONE-H', name: 'Zone H', label: 'East Exit Plaza', capacity: 10000, current_people: 0, density_label: 'LOW', risk_level: 'LOW', color: '#3fb950', updated_at: new Date().toISOString() },
-  { id: '9', zone_code: 'ZONE-I', name: 'Zone I', label: 'Media & Broadcast Compound', capacity: 2500, current_people: 0, density_label: 'LOW', risk_level: 'LOW', color: '#3fb950', updated_at: new Date().toISOString() },
-  { id: '10', zone_code: 'ZONE-J', name: 'Zone J', label: 'North-West Parking', capacity: 4000, current_people: 0, density_label: 'LOW', risk_level: 'LOW', color: '#3fb950', updated_at: new Date().toISOString() },
-  { id: '11', zone_code: 'ZONE-K', name: 'Zone K', label: 'South Transit Corridor', capacity: 8000, current_people: 0, density_label: 'LOW', risk_level: 'LOW', color: '#3fb950', updated_at: new Date().toISOString() },
-  { id: '12', zone_code: 'ZONE-L', name: 'Zone L', label: 'Flyover Underpass Buffer', capacity: 5000, current_people: 0, density_label: 'LOW', risk_level: 'LOW', color: '#3fb950', updated_at: new Date().toISOString() },
-];
-
-export const MOCK_CAMERAS = [
-  {
-    id: '1',
-    camera_code: 'CAM-KHB-001',
-    name: 'Khairatabad Main Camera',
-    label: 'Khairatabad Ganesh Main Idol View',
-    zone_code: 'ZONE-A',
-    resolution: '1080p',
-    fps: 24,
-    latency_ms: 35,
-    status: 'online',
-    ai_status: 'online',
-    is_frs_camera: true,
-    is_ptz: false,
-    people_count: 0,
-    has_rtsp_configured: true,
-    updated_at: new Date().toISOString(),
-  },
-];
+export const MOCK_ZONES = [];
+export const MOCK_CAMERAS = [];
 
 // ─── Helper Functions ─────────────────────────────────────────────────────────
 
@@ -212,34 +180,33 @@ export const updateEventSettings = async (data) => {
 };
 
 // Zone Settings
-export const getZoneSettings = () => tryApi(() => apiClient.get('/api/v1/settings/zones'), MOCK_ZONES);
-export const getZoneSetting = (zoneCode) => tryApi(() => apiClient.get(`/api/v1/settings/zones/${zoneCode}`), MOCK_ZONES.find(z => z.zone_code === zoneCode));
+export const getZoneSettings = () => tryApi(() => apiClient.get('/api/v1/settings/zones'), []);
+export const getZoneSetting = (zoneCode) => tryApi(() => apiClient.get(`/api/v1/settings/zones/${zoneCode}`), null);
 export const updateZoneSetting = async (zoneCode, data) => {
-  try {
-    const res = await apiClient.patch(`/api/v1/settings/zones/${zoneCode}`, data);
-    return unpack(res) || { ...MOCK_ZONES.find(z => z.zone_code === zoneCode), ...data, updated_at: new Date().toISOString() };
-  } catch {
-    return { ...MOCK_ZONES.find(z => z.zone_code === zoneCode), ...data, updated_at: new Date().toISOString() };
-  }
+  const res = await apiClient.patch(`/api/v1/settings/zones/${zoneCode}`, data);
+  return unpack(res);
 };
 
 // Camera Settings
-export const getCameraSettings = () => tryApi(() => apiClient.get('/api/v1/settings/cameras'), MOCK_CAMERAS);
-export const getCameraSetting = (cameraCode) => tryApi(() => apiClient.get(`/api/v1/settings/cameras/${cameraCode}`), MOCK_CAMERAS.find(c => c.camera_code === cameraCode));
+export const getCameraSettings = () => tryApi(() => apiClient.get('/api/v1/settings/cameras'), []);
+export const getCameraSetting = (cameraCode) => tryApi(() => apiClient.get(`/api/v1/settings/cameras/${cameraCode}`), null);
 export const updateCameraSetting = async (cameraCode, data) => {
-  try {
-    const res = await apiClient.patch(`/api/v1/settings/cameras/${cameraCode}`, data);
-    return unpack(res) || { ...MOCK_CAMERAS.find(c => c.camera_code === cameraCode), ...data, updated_at: new Date().toISOString() };
-  } catch {
-    return { ...MOCK_CAMERAS.find(c => c.camera_code === cameraCode), ...data, updated_at: new Date().toISOString() };
-  }
+  const res = await apiClient.patch(`/api/v1/settings/cameras/${cameraCode}`, data);
+  return unpack(res);
 };
 export const testCameraConnection = async (cameraCode) => {
   try {
     const res = await apiClient.post(`/api/v1/settings/cameras/${cameraCode}/test`);
-    return unpack(res) || { camera_code: cameraCode, connection_status: 'ONLINE', latency_ms: 35, fps: 24, resolution: '1080p', tested_at: new Date().toISOString(), message: 'Connection successful' };
-  } catch {
-    return { camera_code: cameraCode, connection_status: 'ONLINE', latency_ms: 35, fps: 24, resolution: '1080p', tested_at: new Date().toISOString(), message: 'Connection successful' };
+    return unpack(res);
+  } catch (err) {
+    return {
+      camera_code: cameraCode,
+      connection_status: 'OFFLINE',
+      latency_ms: 0,
+      fps: 0,
+      tested_at: new Date().toISOString(),
+      message: err.response?.data?.detail?.message || err.response?.data?.message || err.message || 'Camera connection failed',
+    };
   }
 };
 

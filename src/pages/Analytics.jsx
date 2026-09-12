@@ -51,7 +51,7 @@ export default function Analytics() {
 
   const safeAttendance = attendance || { totalVisitorsToday: 0, peakHour: "—", peakCount: 0, avgPerHour: 0, hourly: [], daily: [] };
   const safeIncident = incident || { total: 0, resolved: 0, active: 0, avgResolutionMin: 0, byType: [] };
-  const safeCamera = camera || { uptime: "99.9%", totalDetections: 0, avgFps: 25, avgLatencyMs: 30 };
+  const safeCamera = camera || { uptime: "—", totalDetections: 0, avgFps: 0, avgLatencyMs: 0 };
 
   const hourlyChart = {
     backgroundColor: "transparent",

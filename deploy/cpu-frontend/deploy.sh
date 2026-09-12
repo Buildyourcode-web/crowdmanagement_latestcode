@@ -38,6 +38,7 @@ if [ ! -f .env ]; then
     echo -e "${YELLOW}Please enter the IP or DNS of your GPU Backend Instance (e.g. http://10.0.0.5:8000):${NC}"
     read -r user_backend_url
     if [ -n "$user_backend_url" ]; then
+        user_backend_url="${user_backend_url%/}"
         # Ensure protocol is present
         if [[ ! "$user_backend_url" =~ ^https?:// ]]; then
             user_backend_url="http://${user_backend_url}"
@@ -46,6 +47,7 @@ if [ ! -f .env ]; then
         if [[ ! "$user_backend_url" =~ :[0-9]+ ]]; then
             user_backend_url="${user_backend_url}:8000"
         fi
+        user_backend_url="${user_backend_url%/}"
         sed -i "s|BACKEND_URL=.*|BACKEND_URL=${user_backend_url}|g" .env
         echo -e "${GREEN}[✓] Set BACKEND_URL=${user_backend_url} in .env${NC}"
     fi

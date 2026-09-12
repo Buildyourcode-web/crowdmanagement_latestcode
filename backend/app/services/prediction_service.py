@@ -1,4 +1,4 @@
-﻿from typing import List
+from typing import List
 from app.schemas.prediction import CrowdPredictionResponse, QueuePredictionItem, ZoneRiskPredictionItem
 
 

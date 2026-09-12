@@ -97,6 +97,27 @@ class AIOrchestrator:
         self._camera_transition_state: Dict[str, str] = {}
         logger.info("[AI-Orchestrator] Initialized central control-plane orchestrator.")
 
+    async def start(self, pipeline_id: str, profile_id: str) -> OrchestratorResponse:
+        return OrchestratorResponse(action="START", status="NOT_IMPLEMENTED", message="Not implemented. Use start_pipeline(camera_id, db).")
+
+    async def stop(self, pipeline_id: str) -> OrchestratorResponse:
+        return OrchestratorResponse(action="STOP", status="NOT_IMPLEMENTED", message="Not implemented. Use stop_pipeline(camera_id, db).")
+
+    async def restart(self, pipeline_id: str) -> OrchestratorResponse:
+        return OrchestratorResponse(action="RESTART", status="NOT_IMPLEMENTED", message="Not implemented. Use restart_pipeline(camera_id, db).")
+
+    async def pause(self, pipeline_id: str) -> OrchestratorResponse:
+        return OrchestratorResponse(action="PAUSE", status="NOT_IMPLEMENTED", message="Not implemented.")
+
+    async def status(self, pipeline_id: str) -> OrchestratorResponse:
+        return OrchestratorResponse(action="STATUS", status="NOT_IMPLEMENTED", message="Not implemented. Use get_pipeline_status(camera_id, db).")
+
+    async def health_check(self) -> Dict[str, Any]:
+        return {
+            "orchestrator_status": "NOT_IMPLEMENTED",
+            "active_pipelines": 0,
+        }
+
     # ── Camera Resolution ─────────────────────────────────────────────────────
 
     async def _resolve_camera(self, camera_id_or_code: str, db: AsyncSession) -> Camera:
@@ -1183,6 +1204,11 @@ class AIOrchestrator:
                     camera.is_frs_camera = False
                     await db.commit()
 
+                    try:
+                        await self.start_pipeline(cam_code, db=db, current_user=current_user, client_ip=client_ip, custom_detector=custom_detector)
+                    except Exception as ex:
+                        logger.debug(f"[AI-Orchestrator] start_pipeline during CROWD switch: {ex}")
+
                     self._camera_transition_state.pop(cam_code, None)
                     return await self.get_camera_mode(cam_code, db)
 
@@ -1224,6 +1250,11 @@ class AIOrchestrator:
                         camera.camera_type = "MULTI_PURPOSE"
                     camera.is_frs_camera = True
                     await db.commit()
+
+                    try:
+                        await self.start_pipeline(cam_code, db=db, current_user=current_user, client_ip=client_ip)
+                    except Exception as ex:
+                        logger.debug(f"[AI-Orchestrator] start_pipeline during FRS switch: {ex}")
 
                     self._camera_transition_state.pop(cam_code, None)
                     return await self.get_camera_mode(cam_code, db)

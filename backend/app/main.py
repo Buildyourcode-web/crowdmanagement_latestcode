@@ -73,17 +73,28 @@ async def lifespan(app: FastAPI):
                             role = Role(code="SUPER_ADMIN", name="Super Admin", description="Super Admin role")
                             session.add(role)
                             await session.flush()
+                        import secrets
+                        configured_pwd = os.getenv("ADMIN_PASSWORD")
+                        if not configured_pwd:
+                            if settings.APP_ENV == "production":
+                                initial_password = secrets.token_urlsafe(16)
+                                logger.critical(f"[SECURITY] No ADMIN_PASSWORD set in production! Generated secure one-time password: {initial_password}")
+                            else:
+                                initial_password = "admin123"
+                        else:
+                            initial_password = configured_pwd
+
                         admin_user = User(
                             username="admin",
                             email="admin@byc.gov.in",
-                            password_hash=get_password_hash("admin123"),
+                            password_hash=get_password_hash(initial_password),
                             full_name="Administrator",
                             role_id=role.id,
                             is_active=True,
                         )
                         session.add(admin_user)
                         await session.commit()
-                        logger.info("[Auth] Initialized default admin user: admin / admin123")
+                        logger.info("[Auth] Initialized default admin user: admin")
                 except Exception as ex:
                     logger.warning(f"[Auth] Admin user auto-creation skipped: {ex}")
 
@@ -119,11 +130,10 @@ app = FastAPI(
     lifespan=lifespan,
 )
 
-# CORS Middleware (supports all local Vite ports e.g. 5173, 5174, 5175)
+# CORS Middleware: strictly enforce allowed origins (no wildcard regex bypass)
 app.add_middleware(
     CORSMiddleware,
     allow_origins=settings.cors_origins_list,
-    allow_origin_regex=r".*",
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],

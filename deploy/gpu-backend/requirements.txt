@@ -2,6 +2,8 @@
 # Fast API & ASGI Server
 fastapi>=0.110.0,<1.0.0
 uvicorn[standard]>=0.29.0
+uvloop>=0.19.0
+httptools>=0.6.0
 pydantic>=2.7.0,<3.0.0
 pydantic-settings>=2.2.0
 email-validator>=2.1.0

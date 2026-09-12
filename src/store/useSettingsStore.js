@@ -3,16 +3,16 @@ import * as settingsService from '../services/settingsService.js';
 
 export const useSettingsStore = create((set, get) => ({
   // Data
-  eventSettings: settingsService.MOCK_EVENT,
-  zoneSettings: settingsService.MOCK_ZONES,
-  cameraSettings: settingsService.MOCK_CAMERAS,
-  alertSettings: settingsService.MOCK_ALERT_THRESHOLDS,
-  roles: settingsService.MOCK_ROLES,
-  permissions: settingsService.MOCK_PERMISSIONS,
-  notificationSettings: settingsService.MOCK_NOTIFICATION_CONFIG,
-  aiSettings: settingsService.MOCK_AI_CONFIG,
-  frsSettings: settingsService.MOCK_FRS_CONFIG,
-  systemSettings: settingsService.MOCK_SYSTEM_CONFIG,
+  eventSettings: null,
+  zoneSettings: [],
+  cameraSettings: [],
+  alertSettings: null,
+  roles: [],
+  permissions: [],
+  notificationSettings: null,
+  aiSettings: null,
+  frsSettings: null,
+  systemSettings: null,
   
   // UI state
   loading: {},
@@ -28,7 +28,7 @@ export const useSettingsStore = create((set, get) => ({
     set(s => ({ loading: { ...s.loading, event: true }, error: { ...s.error, event: null } }));
     try {
       const data = await settingsService.getEventSettings();
-      set({ eventSettings: data || settingsService.MOCK_EVENT, loading: { ...get().loading, event: false } });
+      set({ eventSettings: data || null, loading: { ...get().loading, event: false } });
     } catch (e) {
       set(s => ({ loading: { ...s.loading, event: false }, error: { ...s.error, event: e.message } }));
     }
@@ -39,7 +39,7 @@ export const useSettingsStore = create((set, get) => ({
     try {
       const data = await settingsService.getZoneSettings();
       const list = Array.isArray(data) ? data : data?.data ?? [];
-      set({ zoneSettings: list.length ? list : settingsService.MOCK_ZONES, loading: { ...get().loading, zones: false } });
+      set({ zoneSettings: list, loading: { ...get().loading, zones: false } });
     } catch {
       set(s => ({ loading: { ...s.loading, zones: false } }));
     }
@@ -50,7 +50,7 @@ export const useSettingsStore = create((set, get) => ({
     try {
       const data = await settingsService.getCameraSettings();
       const list = Array.isArray(data) ? data : data?.data ?? [];
-      set({ cameraSettings: list.length ? list : settingsService.MOCK_CAMERAS, loading: { ...get().loading, cameras: false } });
+      set({ cameraSettings: list, loading: { ...get().loading, cameras: false } });
     } catch {
       set(s => ({ loading: { ...s.loading, cameras: false } }));
     }
@@ -60,7 +60,7 @@ export const useSettingsStore = create((set, get) => ({
     set(s => ({ loading: { ...s.loading, alerts: true } }));
     try {
       const data = await settingsService.getAlertSettings();
-      set({ alertSettings: data || settingsService.MOCK_ALERT_THRESHOLDS, loading: { ...get().loading, alerts: false } });
+      set({ alertSettings: data || null, loading: { ...get().loading, alerts: false } });
     } catch {
       set(s => ({ loading: { ...s.loading, alerts: false } }));
     }
@@ -71,8 +71,8 @@ export const useSettingsStore = create((set, get) => ({
     try {
       const [roles, perms] = await Promise.all([settingsService.getRoles(), settingsService.getPermissions()]);
       set({
-        roles: Array.isArray(roles) && roles.length ? roles : settingsService.MOCK_ROLES,
-        permissions: Array.isArray(perms) && perms.length ? perms : settingsService.MOCK_PERMISSIONS,
+        roles: Array.isArray(roles) ? roles : [],
+        permissions: Array.isArray(perms) ? perms : [],
         loading: { ...get().loading, roles: false },
       });
     } catch {
@@ -84,7 +84,7 @@ export const useSettingsStore = create((set, get) => ({
     set(s => ({ loading: { ...s.loading, notifications: true } }));
     try {
       const data = await settingsService.getNotificationSettings();
-      set({ notificationSettings: data || settingsService.MOCK_NOTIFICATION_CONFIG, loading: { ...get().loading, notifications: false } });
+      set({ notificationSettings: data || null, loading: { ...get().loading, notifications: false } });
     } catch {
       set(s => ({ loading: { ...s.loading, notifications: false } }));
     }
@@ -94,7 +94,7 @@ export const useSettingsStore = create((set, get) => ({
     set(s => ({ loading: { ...s.loading, ai: true } }));
     try {
       const data = await settingsService.getAISettings();
-      set({ aiSettings: data || settingsService.MOCK_AI_CONFIG, loading: { ...get().loading, ai: false } });
+      set({ aiSettings: data || null, loading: { ...get().loading, ai: false } });
     } catch {
       set(s => ({ loading: { ...s.loading, ai: false } }));
     }
@@ -104,7 +104,7 @@ export const useSettingsStore = create((set, get) => ({
     set(s => ({ loading: { ...s.loading, frs: true } }));
     try {
       const data = await settingsService.getFRSSettings();
-      set({ frsSettings: data || settingsService.MOCK_FRS_CONFIG, loading: { ...get().loading, frs: false } });
+      set({ frsSettings: data || null, loading: { ...get().loading, frs: false } });
     } catch {
       set(s => ({ loading: { ...s.loading, frs: false } }));
     }
@@ -114,7 +114,7 @@ export const useSettingsStore = create((set, get) => ({
     set(s => ({ loading: { ...s.loading, system: true } }));
     try {
       const data = await settingsService.getSystemSettings();
-      set({ systemSettings: data || settingsService.MOCK_SYSTEM_CONFIG, loading: { ...get().loading, system: false } });
+      set({ systemSettings: data || null, loading: { ...get().loading, system: false } });
     } catch {
       set(s => ({ loading: { ...s.loading, system: false } }));
     }
