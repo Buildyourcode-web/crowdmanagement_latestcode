@@ -1878,7 +1878,18 @@ class CameraInfo(BaseModel):
 
 @router.post("/cameras", response_model=CameraInfo, status_code=201)
 async def add_frs_camera(req: AddCameraRequest):
-    cam_id = req.camera_id or "CAM-KHB-345"
+    if req.camera_id and req.camera_id.strip():
+        cam_id = req.camera_id.strip()
+    else:
+        with _workers_lock:
+            existing_ids = set(_camera_workers.keys())
+        idx = 1
+        candidate = f"CAM-KHB-{idx:03d}"
+        while candidate in existing_ids or candidate == "CAM-KHB-345":
+            idx += 1
+            candidate = f"CAM-KHB-{idx:03d}"
+        cam_id = candidate
+
     is_frs = req.is_frs if req.camera_type == "FRS" else False
     ai_purp = req.ai_purposes or (["ENTRY"] if req.camera_type == "CROWD" else ["FRS"])
     if req.camera_type == "CROWD" and isinstance(ai_purp, list):
@@ -1886,12 +1897,7 @@ async def add_frs_camera(req: AddCameraRequest):
     zone_cd = (req.zone_code or "ZONE-A").upper().strip()
 
     with _workers_lock:
-        # Check if an existing worker matches by ID or by same RTSP stream URL
-        existing_match = None
-        for existing_id, existing_state in list(_camera_workers.items()):
-            if existing_id == cam_id or existing_state.rtsp_url.strip() == req.rtsp_url.strip():
-                existing_match = (existing_id, existing_state)
-                break
+        existing_match = (cam_id, _camera_workers[cam_id]) if cam_id in _camera_workers else None
 
         if existing_match:
             old_id, state = existing_match
