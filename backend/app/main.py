@@ -45,12 +45,6 @@ async def lifespan(app: FastAPI):
     except Exception as e:
         logger.warning(f"AI Orchestrator startup skipped: {e}")
 
-    try:
-        from app.frs_engine.frs_service import auto_start_main_camera
-        auto_start_main_camera()
-        logger.info("FRS Engine: Auto-started main physical camera worker")
-    except Exception as e:
-        logger.warning(f"FRS Engine camera auto-start skipped: {e}")
 
     # Pre-warm DB connection pool and cache in background (avoids blocking startup)
     async def _warm_db_and_cache():

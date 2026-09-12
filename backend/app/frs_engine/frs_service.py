@@ -2153,10 +2153,6 @@ def get_worker_for_camera(camera_code_or_id: str) -> Optional[CameraWorkerState]
         if len(_camera_workers) == 1:
             return next(iter(_camera_workers.values()))
 
-        # 4. Check worker streaming the physical camera IP (136.232.225.102 or 192.168.0.102)
-        for state in _camera_workers.values():
-            if "136.232.225.102" in state.rtsp_url or "192.168.0.102" in state.rtsp_url:
-                return state
 
         return None
 
