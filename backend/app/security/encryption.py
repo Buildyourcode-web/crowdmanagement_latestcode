@@ -59,10 +59,12 @@ def sanitize_rtsp_url(url: Optional[str], mask: str = "***") -> Optional[str]:
     if not url:
         return None
     try:
-        # Match user:password@ pattern
-        pattern = r"://([^:]+):([^@]+)@"
-        if re.search(pattern, url):
-            return re.sub(pattern, rf"://\1:{mask}@", url)
+        # Match user:password@ pattern (greedy up to last @ before host)
+        pattern = r"://([^/@:]+):(.*)@([^/@]+.*)"
+        m = re.search(pattern, url)
+        if m:
+            proto = url.split("://")[0]
+            return f"{proto}://{m.group(1)}:{mask}@{m.group(3)}"
         return url
     except Exception:
         return "rtsp://***:***@camera-stream"
@@ -78,8 +80,8 @@ def strip_credentials_from_url(url: Optional[str]) -> Optional[str]:
     if not url:
         return None
     try:
-        pattern = r"://([^@]+)@"
-        return re.sub(pattern, "://", url)
+        clean, _, _ = extract_credentials_from_url(url)
+        return clean
     except Exception:
         return url
 
@@ -91,36 +93,43 @@ def build_authenticated_rtsp_url(
 ) -> str:
     """
     Injects or replaces username/password into an RTSP URL cleanly.
+    Properly URL-encodes special characters in the password (e.g. '@', '#', '%').
     """
     if not base_url:
         return ""
 
-    # If username and password are provided, ensure they are in the URL
-    if username and password:
-        # Strip existing credentials if present
-        clean_url = strip_credentials_from_url(base_url)
-        # Re-inject credentials safely
-        if clean_url.startswith("rtsp://"):
-            return clean_url.replace("rtsp://", f"rtsp://{username}:{password}@", 1)
-        elif clean_url.startswith("rtsps://"):
-            return clean_url.replace("rtsps://", f"rtsps://{username}:{password}@", 1)
+    import urllib.parse
 
-    return base_url
+    clean_url, existing_user, existing_pwd = extract_credentials_from_url(base_url)
+    effective_user = username or existing_user
+    effective_pwd = password or existing_pwd
+
+    if effective_user and effective_pwd:
+        enc_pwd = urllib.parse.quote(effective_pwd)
+        parts = clean_url.split("://", 1)
+        if len(parts) == 2:
+            return f"{parts[0]}://{effective_user}:{enc_pwd}@{parts[1]}"
+
+    return clean_url or base_url
 
 
 def extract_credentials_from_url(url: str) -> Tuple[str, Optional[str], Optional[str]]:
     """
     Extracts (clean_url, username, password) from an RTSP URL.
+    Supports special characters in passwords (e.g., passwords containing '@' or '#').
     """
     if not url:
         return "", None, None
 
-    pattern = r"://([^:]+):([^@]+)@"
-    match = re.search(pattern, url)
-    if match:
-        user = match.group(1)
-        pwd = match.group(2)
-        clean = strip_credentials_from_url(url)
+    import urllib.parse
+
+    m = re.search(r"://([^/@:]+):(.*)@([^/@]+.*)", url)
+    if m:
+        user = m.group(1)
+        raw_pwd = m.group(2)
+        pwd = urllib.parse.unquote(raw_pwd)
+        proto = url.split("://", 1)[0]
+        clean = f"{proto}://{m.group(3)}"
         return clean, user, pwd
 
     return url, None, None

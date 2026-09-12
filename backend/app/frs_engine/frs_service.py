@@ -1513,6 +1513,8 @@ class RTSPCameraWorker:
         try:
             face_model, matcher = get_shared_engine()
             reader = RTSPReader(url=self.state.rtsp_url, resize=(1280, 720))
+            self.state.reader = reader
+            self.reader = reader
             reader.start()
             self.state.status = "online"
             logger.info(f"[FRS-Worker:{self.state.camera_id}] RTSP reader started: {self.state.rtsp_url}")
@@ -1852,55 +1854,74 @@ async def add_frs_camera(req: AddCameraRequest):
 
         if existing_match:
             old_id, state = existing_match
-            if old_id != cam_id:
+            url_changed = state.rtsp_url.strip() != req.rtsp_url.strip()
+
+            if url_changed:
+                logger.info(f"[FRS-Engine] RTSP URL changed for {cam_id}: {state.rtsp_url} -> {req.rtsp_url}. Stopping old worker and restarting.")
+                state.running = False
+                if hasattr(state, "reader") and state.reader:
+                    try:
+                        state.reader.stop()
+                    except Exception:
+                        pass
+                if state.thread and state.thread.is_alive():
+                    state.thread.join(timeout=1.5)
                 _camera_workers.pop(old_id, None)
-                state.camera_id = cam_id
-                _camera_workers[cam_id] = state
-            state.is_frs = is_frs
-            state.camera_type = req.camera_type
-            state.ai_purposes = ai_purp
-            state.zone_code = zone_cd
-            if req.name and req.name != "Camera":
-                state.name = req.name
-            logger.info(f"[FRS-Engine] Re-keyed and updated worker for {cam_id} ({req.camera_type}) in zone {zone_cd} with purposes {ai_purp}")
+                existing_match = None
+            else:
+                if old_id != cam_id:
+                    _camera_workers.pop(old_id, None)
+                    state.camera_id = cam_id
+                    _camera_workers[cam_id] = state
+                state.is_frs = is_frs
+                state.camera_type = req.camera_type
+                state.ai_purposes = ai_purp
+                state.zone_code = zone_cd
+                if req.name and req.name != "Camera":
+                    state.name = req.name
+                logger.info(f"[FRS-Engine] Re-keyed and updated worker for {cam_id} ({req.camera_type}) in zone {zone_cd} with purposes {ai_purp}")
 
-            # DB sync
-            try:
-                from app.db.session import AsyncSessionLocal
-                from app.models.camera import Camera
-                from sqlalchemy import select
-                async def _sync_cam_db():
-                    async with AsyncSessionLocal() as pg_db:
-                        clean_id = cam_id.replace("-FRS", "").replace("-CROWD", "")
-                        stmt = select(Camera).where(Camera.camera_code.in_([cam_id, clean_id]))
-                        res = await pg_db.execute(stmt)
-                        for c in res.scalars().all():
-                            c.zone_code = zone_cd
-                        await pg_db.commit()
-                if _main_loop and _main_loop.is_running():
-                    asyncio.run_coroutine_threadsafe(_sync_cam_db(), _main_loop)
-            except Exception:
-                pass
+                # DB sync
+                try:
+                    from app.db.session import AsyncSessionLocal
+                    from app.models.camera import Camera
+                    from app.security.encryption import encrypt_credential
+                    from sqlalchemy import select
+                    async def _sync_cam_db():
+                        async with AsyncSessionLocal() as pg_db:
+                            clean_id = cam_id.replace("-FRS", "").replace("-CROWD", "")
+                            stmt = select(Camera).where(Camera.camera_code.in_([cam_id, clean_id]))
+                            res = await pg_db.execute(stmt)
+                            for c in res.scalars().all():
+                                c.zone_code = zone_cd
+                                c.rtsp_url_encrypted = encrypt_credential(req.rtsp_url)
+                                c.status = "online"
+                                c.stream_status = "ONLINE"
+                            await pg_db.commit()
+                    if _main_loop and _main_loop.is_running():
+                        asyncio.run_coroutine_threadsafe(_sync_cam_db(), _main_loop)
+                except Exception:
+                    pass
 
-            return CameraInfo(
-                camera_id=cam_id,
-                name=state.name,
-                rtsp_url=state.rtsp_url,
-                status=state.status,
-                started_at=state.started_at,
-                detections_count=state.detections_count,
-                stream_url=f"/api/v1/frs-engine/cameras/{cam_id}/stream",
-                is_frs=state.is_frs,
-                camera_type=state.camera_type,
-                crowd_ai_active=getattr(state, "crowd_ai_active", False),
-                in_count=getattr(state, "in_count", 0),
-                out_count=getattr(state, "out_count", 0),
-                occupancy_count=getattr(state, "occupancy_count", 0),
-                ai_purposes=state.ai_purposes,
-                queue_movement_status=getattr(state, "queue_movement_status", "STOPPED"),
-                zone_data=getattr(state, "zone_data", []),
-                zone_code=getattr(state, "zone_code", "ZONE-A"),
-            )
+                return CameraInfo(
+                    camera_id=cam_id,
+                    name=state.name,
+                    rtsp_url=state.rtsp_url,
+                    status=state.status,
+                    started_at=state.started_at,
+                    detections_count=state.detections_count,
+                    stream_url=f"/api/v1/frs-engine/cameras/{cam_id}/stream",
+                    is_frs=state.is_frs,
+                    camera_type=state.camera_type,
+                    crowd_ai_active=getattr(state, "crowd_ai_active", False),
+                    in_count=getattr(state, "in_count", 0),
+                    out_count=getattr(state, "out_count", 0),
+                    occupancy_count=getattr(state, "occupancy_count", 0),
+                    ai_purposes=state.ai_purposes,
+                    queue_movement_status=getattr(state, "queue_movement_status", "STOPPED"),
+                    zone_data=getattr(state, "zone_data", []),
+                    zone_code=getattr(state, "zone_code", "ZONE-A"),
+                )
 
         state = CameraWorkerState(
             camera_id=cam_id,
@@ -1929,14 +1950,19 @@ async def add_frs_camera(req: AddCameraRequest):
     try:
         from app.db.session import AsyncSessionLocal
         from app.models.camera import Camera
+        from app.security.encryption import encrypt_credential
         from sqlalchemy import select
         async def _sync_new_cam_db():
             async with AsyncSessionLocal() as pg_db:
                 clean_id = cam_id.replace("-FRS", "").replace("-CROWD", "")
                 stmt = select(Camera).where(Camera.camera_code.in_([cam_id, clean_id]))
                 res = await pg_db.execute(stmt)
-                for c in res.scalars().all():
+                cams = res.scalars().all()
+                for c in cams:
                     c.zone_code = zone_cd
+                    c.rtsp_url_encrypted = encrypt_credential(req.rtsp_url)
+                    c.status = "online"
+                    c.stream_status = "ONLINE"
                 await pg_db.commit()
         if _main_loop and _main_loop.is_running():
             asyncio.run_coroutine_threadsafe(_sync_new_cam_db(), _main_loop)
@@ -2107,6 +2133,22 @@ def sync_worker_roi_lines(camera_code_or_id: str) -> bool:
     return False
 
 
+def _generate_placeholder_jpeg(camera_id: str, message: str = "Connecting to camera stream...", submessage: str = "") -> bytes:
+    try:
+        img = np.zeros((720, 1280, 3), dtype=np.uint8)
+        img[:] = (15, 23, 42)  # #0f172a
+        cv2.rectangle(img, (20, 20), (1260, 700), (30, 41, 59), 2)
+        cv2.putText(img, f"CAMERA: {camera_id}", (60, 140), cv2.FONT_HERSHEY_SIMPLEX, 1.0, (88, 166, 255), 2, cv2.LINE_AA)
+        cv2.putText(img, message, (60, 340), cv2.FONT_HERSHEY_SIMPLEX, 0.85, (227, 179, 65), 2, cv2.LINE_AA)
+        if submessage:
+            cv2.putText(img, submessage[:80], (60, 400), cv2.FONT_HERSHEY_SIMPLEX, 0.55, (148, 163, 184), 1, cv2.LINE_AA)
+        cv2.putText(img, "Khairatabad Ganesh Command Center - Live Engine", (60, 640), cv2.FONT_HERSHEY_SIMPLEX, 0.55, (100, 116, 139), 1, cv2.LINE_AA)
+        ok, buf = cv2.imencode(".jpg", img, [cv2.IMWRITE_JPEG_QUALITY, 70])
+        return buf.tobytes() if ok else b""
+    except Exception:
+        return b""
+
+
 # ── GET /cameras/{id}/stream  (MJPEG) ────────────────────────────────────────
 
 @router.get("/cameras/{camera_id}/stream")
@@ -2121,6 +2163,7 @@ async def stream_camera(camera_id: str):
 
     async def generate():
         boundary = b"--frame\r\nContent-Type: image/jpeg\r\n\r\n"
+        placeholder_timer = 0.0
         while state.running:
             with state.frame_lock:
                 if is_crowd:
@@ -2136,7 +2179,18 @@ async def stream_camera(camera_id: str):
 
             if frame:
                 yield boundary + frame + b"\r\n"
-            await asyncio.sleep(0.033)
+                await asyncio.sleep(0.033)
+            else:
+                now = time.monotonic()
+                if now - placeholder_timer >= 1.0:
+                    placeholder_timer = now
+                    status_text = "Connecting to camera stream..." if state.status != "error" else "RTSP stream offline / reconnecting..."
+                    import re
+                    safe_url = re.sub(r"://(.*)@", "://***:***@", state.rtsp_url) if "@" in state.rtsp_url else state.rtsp_url
+                    ph_frame = _generate_placeholder_jpeg(state.camera_id, status_text, safe_url)
+                    if ph_frame:
+                        yield boundary + ph_frame + b"\r\n"
+                await asyncio.sleep(0.1)
 
     return StreamingResponse(
         generate(),
@@ -2320,13 +2374,25 @@ async def stream_camera_raw(camera_id: str):
 
     async def generate_clean():
         boundary = b"--frame\r\nContent-Type: image/jpeg\r\n\r\n"
+        placeholder_timer = 0.0
         while state.running:
             with state.frame_lock:
                 frame = getattr(state, "latest_clean_frame", None) or state.latest_frame
 
             if frame:
                 yield boundary + frame + b"\r\n"
-            await asyncio.sleep(0.033)
+                await asyncio.sleep(0.033)
+            else:
+                now = time.monotonic()
+                if now - placeholder_timer >= 1.0:
+                    placeholder_timer = now
+                    status_text = "Connecting to camera feed..." if state.status != "error" else "RTSP stream offline / reconnecting..."
+                    import re
+                    safe_url = re.sub(r"://(.*)@", "://***:***@", state.rtsp_url) if "@" in state.rtsp_url else state.rtsp_url
+                    ph_frame = _generate_placeholder_jpeg(state.camera_id, status_text, safe_url)
+                    if ph_frame:
+                        yield boundary + ph_frame + b"\r\n"
+                await asyncio.sleep(0.1)
 
     return StreamingResponse(
         generate_clean(),

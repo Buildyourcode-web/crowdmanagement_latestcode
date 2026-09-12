@@ -67,6 +67,7 @@ class RTSPReader:
         self._frame_counter = 0
 
         self._last_error_time = 0.0
+        self._cap: cv2.VideoCapture | None = None
 
     # ============================================================
     # START
@@ -87,8 +88,10 @@ class RTSPReader:
 
         self._thread.start()
 
+        import re
+        safe_url = re.sub(r"://(.*)@", "://***:***@", self._url) if "@" in self._url else self._url
         print(
-            f"[RTSPReader] Started: {self._url}"
+            f"[RTSPReader] Started: {safe_url}"
         )
 
     # ============================================================
@@ -99,10 +102,17 @@ class RTSPReader:
 
         self._running = False
 
+        if self._cap is not None:
+            try:
+                self._cap.release()
+            except Exception:
+                pass
+            self._cap = None
+
         if self._thread is not None:
 
             self._thread.join(
-                timeout=3.0
+                timeout=1.5
             )
 
             self._thread = None
@@ -298,68 +308,58 @@ class RTSPReader:
         self,
     ) -> cv2.VideoCapture:
         """
-        Open RTSP using FFmpeg.
-
-        TCP is intentionally used because the CCTV stream previously
-        showed H.264 packet/decoder errors.
-
-        The low-latency flags help prevent OpenCV/FFmpeg from building
-        a large backlog of old frames.
+        Open RTSP using FFmpeg with bounded 5-second timeout and TCP/UDP fallback.
         """
+        import re
+        safe_url = re.sub(r"://(.*)@", "://***:***@", self._url) if "@" in self._url else self._url
 
-        # --------------------------------------------------------
-        # FFmpeg RTSP options
-        # --------------------------------------------------------
-
-        os.environ[
-            "OPENCV_FFMPEG_CAPTURE_OPTIONS"
-        ] = (
+        # 1. Try FFmpeg / TCP first with 5-second connection timeout
+        os.environ["OPENCV_FFMPEG_CAPTURE_OPTIONS"] = (
             "rtsp_transport;tcp|"
+            "stimeout;5000000|"
             "fflags;nobuffer|"
             "flags;low_delay"
         )
 
-        print(
-            "[RTSPReader] Opening RTSP "
-            "using FFmpeg/TCP..."
-        )
+        print(f"[RTSPReader] Opening RTSP via FFmpeg/TCP (5s timeout): {safe_url}")
+        cap = cv2.VideoCapture(self._url, cv2.CAP_FFMPEG)
 
-        cap = cv2.VideoCapture(
-            self._url,
-            cv2.CAP_FFMPEG,
-        )
-
-        # --------------------------------------------------------
-        # Check connection
-        # --------------------------------------------------------
-
-        if not cap.isOpened():
-
-            print(
-                "[RTSPReader] ERROR: "
-                "Could not open RTSP stream."
-            )
-
+        if cap.isOpened():
+            try:
+                cap.set(cv2.CAP_PROP_BUFFERSIZE, 1)
+            except Exception:
+                pass
+            print(f"[RTSPReader] RTSP capture opened successfully via TCP.")
+            self._cap = cap
             return cap
 
-        # --------------------------------------------------------
-        # Minimize OpenCV frame buffering
-        # --------------------------------------------------------
-
         try:
-
-            cap.set(
-                cv2.CAP_PROP_BUFFERSIZE,
-                1,
-            )
-
+            cap.release()
         except Exception:
-
             pass
 
-        print(
-            "[RTSPReader] "
-            "RTSP capture opened successfully."
+        # 2. Try FFmpeg / UDP fallback
+        os.environ["OPENCV_FFMPEG_CAPTURE_OPTIONS"] = (
+            "rtsp_transport;udp|"
+            "stimeout;5000000|"
+            "fflags;nobuffer|"
+            "flags;low_delay"
         )
+
+        print(f"[RTSPReader] TCP failed, retrying via FFmpeg/UDP (5s timeout)...")
+        cap = cv2.VideoCapture(self._url, cv2.CAP_FFMPEG)
+
+        if cap.isOpened():
+            try:
+                cap.set(cv2.CAP_PROP_BUFFERSIZE, 1)
+            except Exception:
+                pass
+            print(f"[RTSPReader] RTSP capture opened successfully via UDP.")
+            self._cap = cap
+            return cap
+
+        print(f"[RTSPReader] ERROR: Could not open RTSP stream (TCP and UDP timed out or rejected).")
+        self._cap = cap
+        return cap
 
         return cap
