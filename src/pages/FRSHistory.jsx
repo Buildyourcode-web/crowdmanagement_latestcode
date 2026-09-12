@@ -6,6 +6,7 @@ import FRSCandidateReviewModal from "../components/frs/FRSCandidateReviewModal.j
 import HDReferenceViewerModal from "../components/frs/HDReferenceViewerModal.jsx";
 import { getFRSHistory, getFRSCameras } from "../services/frsService.js";
 import { LoadingState } from "../components/common/States.jsx";
+import { getBackendUrl } from "../utils/urlConfig.js";
 
 const ZONES = ["ALL", "ZONE-A", "ZONE-B", "ZONE-C", "ZONE-D", "ZONE-E", "ZONE-G", "ZONE-H", "ZONE-I", "ZONE-K", "ZONE-L"];
 const STATUSES = ["ALL", "PENDING_REVIEW", "POSSIBLE_MATCH", "NOT_A_MATCH", "NEEDS_MORE_REVIEW", "DISMISSED", "CLOSED"];
@@ -13,7 +14,7 @@ const STATUSES = ["ALL", "PENDING_REVIEW", "POSSIBLE_MATCH", "NOT_A_MATCH", "NEE
 const getImageUrl = (url) => {
   if (!url) return "";
   if (url.startsWith("http://") || url.startsWith("https://") || url.startsWith("data:")) return url;
-  const base = import.meta.env.VITE_API_BASE_URL || "http://localhost:8000";
+  const base = getBackendUrl();
   return `${base}${url.startsWith("/") ? "" : "/"}${url}`;
 };
 

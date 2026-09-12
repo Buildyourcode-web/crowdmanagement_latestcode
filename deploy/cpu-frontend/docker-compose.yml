@@ -22,7 +22,9 @@ services:
     environment:
       # GPU Backend Target for Nginx Reverse Proxy
       # Replace with your GPU Instance Private IP (if in same VPC) or Public IP
-      - BACKEND_URL=${BACKEND_URL:-http://localhost:8000}
+      - BACKEND_URL=${BACKEND_URL:-http://host.docker.internal:8000}
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
     healthcheck:
       test: ["CMD", "wget", "-q", "--spider", "http://localhost:80/health"]
       interval: 30s

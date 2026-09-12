@@ -1,10 +1,11 @@
 import { useState } from "react";
 import { reviewFRSCandidate } from "../../services/frsService.js";
+import { getBackendUrl } from "../../utils/urlConfig.js";
 
 const getImageUrl = (url) => {
   if (!url) return "";
   if (url.startsWith("http://") || url.startsWith("https://") || url.startsWith("data:")) return url;
-  const base = import.meta.env.VITE_API_BASE_URL || "http://localhost:8000";
+  const base = getBackendUrl();
   return `${base}${url.startsWith("/") ? "" : "/"}${url}`;
 };
 

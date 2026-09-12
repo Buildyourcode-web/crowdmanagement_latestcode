@@ -6,8 +6,9 @@ import { getCameraById, updateCamera, getZones } from "../services/cameraService
 import { getCameraROIConfig } from "../services/aiService.js";
 import ROIEditor from "../components/ai/ROIEditor.jsx";
 import { LoadingState, ErrorState } from "../components/common/States.jsx";
+import { getBackendUrl } from "../utils/urlConfig.js";
 
-const BACKEND = import.meta.env.VITE_API_BASE_URL || `http://${window.location.hostname}:8000`;
+const BACKEND = getBackendUrl();
 
 // Purpose meta: colors + labels + icons + ROI tool mapping
 const PURPOSE_META = {

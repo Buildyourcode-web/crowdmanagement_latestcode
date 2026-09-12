@@ -1,6 +1,7 @@
 // Realtime Service — Centralized Singleton WebSocket Client for Live AI Event Bus
 import { useCrowdStore } from "../store/useCrowdStore.js";
 import { useAlertStore } from "../store/useAlertStore.js";
+import { getWsUrl } from "../utils/urlConfig.js";
 
 class RealtimeService {
   constructor() {
@@ -16,23 +17,7 @@ class RealtimeService {
   }
 
   getWsUrl() {
-    if (import.meta.env.VITE_WS_URL) {
-      const base = import.meta.env.VITE_WS_URL.replace(/\/+$/, "");
-      return `${base}/ws/v1/events`;
-    }
-    if (import.meta.env.VITE_API_BASE_URL) {
-      try {
-        const apiUrl = new URL(import.meta.env.VITE_API_BASE_URL, window.location.href);
-        const wsProto = apiUrl.protocol === "https:" ? "wss:" : "ws:";
-        return `${wsProto}//${apiUrl.host}/ws/v1/events`;
-      } catch {
-        // fallback
-      }
-    }
-    const protocol = window.location.protocol === "https:" ? "wss:" : "ws:";
-    const host = window.location.hostname || "localhost";
-    const port = "8000";
-    return `${protocol}//${host}:${port}/ws/v1/events`;
+    return getWsUrl();
   }
 
   connect() {

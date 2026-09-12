@@ -4,8 +4,9 @@ import { useNavigate } from "react-router-dom";
 import { useAppStore } from "../store/useAppStore.js";
 import { EVENT_CONFIG } from "../config/eventConfig.js";
 import axios from "axios";
+import { getApiBaseUrl } from "../utils/urlConfig.js";
 
-const API_BASE_URL = import.meta.env.VITE_API_BASE_URL || "http://localhost:8000";
+const API_BASE_URL = getApiBaseUrl();
 
 export default function Login() {
   const [username, setUsername] = useState("");

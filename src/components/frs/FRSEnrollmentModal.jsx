@@ -1,7 +1,8 @@
 import { useState, useRef } from "react";
 import axios from "axios";
+import { getApiBaseUrl } from "../../utils/urlConfig.js";
 
-const API_BASE = import.meta.env.VITE_API_BASE_URL || "http://localhost:8000";
+const API_BASE = getApiBaseUrl();
 
 export default function FRSEnrollmentModal({ isOpen, onClose, onEnrolled }) {
   const [enrollMode, setEnrollMode] = useState("file"); // "file" | "camera"

@@ -1,7 +1,8 @@
 import { useState, useEffect } from "react";
 import StatusBadge from "../common/StatusBadge.jsx";
+import { getBackendUrl } from "../../utils/urlConfig.js";
 
-const BACKEND = import.meta.env.VITE_API_BASE_URL || `http://${window.location.hostname || "localhost"}:8000`;
+const BACKEND = getBackendUrl();
 
 function CameraPlaceholder({ status, id, isFrs }) {
   const isInactive = status === "offline" || status === "stopped" || status === "disconnected";

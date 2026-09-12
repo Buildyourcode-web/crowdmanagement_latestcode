@@ -1,8 +1,9 @@
 // Dedicated FRS Camera Grid (Section 11) — with live MJPEG stream support
 import { useState, useEffect } from "react";
 import { useNavigate } from "react-router-dom";
+import { getBackendUrl } from "../../utils/urlConfig.js";
 
-const BACKEND = import.meta.env.VITE_API_BASE_URL || `http://${window.location.hostname}:8000`;
+const BACKEND = getBackendUrl();
 
 export default function FRSCameraGrid({ cameras = [] }) {
   const navigate = useNavigate();

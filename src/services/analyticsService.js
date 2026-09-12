@@ -1,5 +1,5 @@
-// Analytics Service — Real backend API
 import apiClient from "./apiClient.js";
+import { getBackendUrl } from "../utils/urlConfig.js";
 
 export async function getAttendanceAnalytics() {
   const res = await apiClient.get("/api/v1/analytics/attendance");
@@ -40,7 +40,7 @@ export async function getFestival10DaysAnalytics() {
 }
 
 export async function downloadFestival10DaysCsv() {
-  const baseURL = import.meta.env.VITE_API_BASE_URL || "http://localhost:8000";
+  const baseURL = getBackendUrl();
   const token = localStorage.getItem("byc_access_token");
   const eventId = localStorage.getItem("byc_active_event_id");
   const headers = {};

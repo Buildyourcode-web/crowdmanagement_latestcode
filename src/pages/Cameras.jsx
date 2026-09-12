@@ -7,8 +7,9 @@ import { switchCameraAIMode } from "../services/aiService.js";
 import { realtimeService } from "../services/realtimeService.js";
 import { LoadingState } from "../components/common/States.jsx";
 import ROIEditor from "../components/ai/ROIEditor.jsx";
+import { getBackendUrl } from "../utils/urlConfig.js";
 
-const BACKEND = import.meta.env.VITE_API_BASE_URL || `http://${window.location.hostname}:8000`;
+const BACKEND = getBackendUrl();
 const DEFAULT_RTSP = "rtsp://admin:Veeru%40555@192.168.0.102:554/Streaming/Channels/101";
 
 const GRID_SIZES = [
