@@ -2,6 +2,8 @@ import pytest
 from httpx import AsyncClient
 from sqlalchemy.ext.asyncio import AsyncSession
 from app.models.camera import Camera
+from app.models.crowd import CrowdSnapshot
+from app.models.alert import Alert
 
 
 @pytest.mark.asyncio
@@ -54,6 +56,21 @@ async def test_delete_camera(client: AsyncClient, db_session: AsyncSession, supe
         is_ptz=False,
     )
     db_session.add(cam)
+    await db_session.commit()
+    await db_session.refresh(cam)
+
+    # Add a CrowdSnapshot referencing this camera to test FK unlinking
+    snapshot = CrowdSnapshot(
+        camera_id=cam.id,
+        camera_code=cam.camera_code,
+        people_count=42,
+        density=0.5,
+        inflow_rate=5,
+        outflow_rate=2,
+        occupancy_percentage=50.0,
+        risk_level="LOW",
+    )
+    db_session.add(snapshot)
     await db_session.commit()
 
     headers = {"Authorization": f"Bearer {superadmin_token}"}
