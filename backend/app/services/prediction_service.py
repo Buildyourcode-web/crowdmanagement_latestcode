@@ -10,13 +10,13 @@ class PredictionService:
         inflow = 0
         outflow = 0
         try:
-            from app.frs_engine.frs_service import _active_workers, _workers_lock
+            from app.frs_engine.frs_service import _camera_workers, _workers_lock
             with _workers_lock:
-                for w in _active_workers.values():
-                    if getattr(w.state, "running", False) and getattr(w.state, "crowd_ai_active", False):
-                        cur_crowd += getattr(w.state, "occupancy_count", 0)
-                        inflow += getattr(w.state, "in_count", 0)
-                        outflow += getattr(w.state, "out_count", 0)
+                for w in _camera_workers.values():
+                    if getattr(w, "running", False) and getattr(w, "crowd_ai_active", False):
+                        cur_crowd += getattr(w, "occupancy_count", 0)
+                        inflow += getattr(w, "in_count", 0)
+                        outflow += getattr(w, "out_count", 0)
         except Exception:
             pass
 
@@ -46,12 +46,12 @@ class PredictionService:
     def get_queue_predictions() -> List[QueuePredictionItem]:
         items: List[QueuePredictionItem] = []
         try:
-            from app.frs_engine.frs_service import _active_workers, _workers_lock
+            from app.frs_engine.frs_service import _camera_workers, _workers_lock
             with _workers_lock:
-                for cid, w in _active_workers.items():
-                    if getattr(w.state, "running", False) and getattr(w.state, "crowd_ai_active", False) and "QUEUE" in getattr(w.state, "ai_purposes", []):
-                        cnt = getattr(w.state, "occupancy_count", 0)
-                        mov = getattr(w.state, "queue_movement_status", "STOPPED")
+                for cid, w in _camera_workers.items():
+                    if getattr(w, "running", False) and getattr(w, "crowd_ai_active", False) and "QUEUE" in getattr(w, "ai_purposes", []):
+                        cnt = getattr(w, "occupancy_count", 0)
+                        mov = getattr(w, "queue_movement_status", "STOPPED")
                         cur_wait = round((cnt * 1.5) / 60) if cnt > 0 else 0
                         pred_wait = cur_wait + (5 if mov == "SLOW" else (10 if mov == "STOPPED" else 0))
                         items.append(
@@ -70,11 +70,11 @@ class PredictionService:
     def get_zone_risk_predictions() -> List[ZoneRiskPredictionItem]:
         items: List[ZoneRiskPredictionItem] = []
         try:
-            from app.frs_engine.frs_service import _active_workers, _workers_lock
+            from app.frs_engine.frs_service import _camera_workers, _workers_lock
             with _workers_lock:
-                for w in _active_workers.values():
-                    if getattr(w.state, "running", False) and getattr(w.state, "crowd_ai_active", False) and "ZONE" in getattr(w.state, "ai_purposes", []):
-                        zd = getattr(w.state, "zone_data", [])
+                for w in _camera_workers.values():
+                    if getattr(w, "running", False) and getattr(w, "crowd_ai_active", False) and "ZONE" in getattr(w, "ai_purposes", []):
+                        zd = getattr(w, "zone_data", [])
                         for z in zd:
                             zname = z.get("name", "Zone")
                             zstat = z.get("status", "NORMAL")

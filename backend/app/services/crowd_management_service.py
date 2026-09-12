@@ -147,11 +147,11 @@ class CrowdManagementService:
         live_queue_pipes = {p.config.camera_code: p for p in QueuePipelineRegistry.list_all()}
         live_frs_workers = {}
         try:
-            from app.frs_engine.frs_service import _active_workers, _workers_lock
+            from app.frs_engine.frs_service import _camera_workers, _workers_lock
             with _workers_lock:
-                for cid, w in _active_workers.items():
-                    if getattr(w.state, "running", False):
-                        live_frs_workers[cid] = w.state
+                for cid, w in _camera_workers.items():
+                    if getattr(w, "running", False):
+                        live_frs_workers[cid] = w
         except Exception:
             pass
 

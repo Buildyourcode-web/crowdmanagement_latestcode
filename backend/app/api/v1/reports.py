@@ -42,11 +42,11 @@ async def list_reports(
     # 2. Check live in-memory worker counts
     live_in = 0
     try:
-        from app.frs_engine.frs_service import _active_workers, _workers_lock
+        from app.frs_engine.frs_service import _camera_workers, _workers_lock
         with _workers_lock:
-            for w in _active_workers.values():
-                if getattr(w.state, "running", False) and getattr(w.state, "crowd_ai_active", False):
-                    live_in += getattr(w.state, "in_count", 0)
+            for w in _camera_workers.values():
+                if getattr(w, "running", False) and getattr(w, "crowd_ai_active", False):
+                    live_in += getattr(w, "in_count", 0)
     except Exception:
         pass
     tot_in += live_in

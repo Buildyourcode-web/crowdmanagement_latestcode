@@ -157,10 +157,17 @@ export default function Cameras() {
             camera_type: c.camera_type || (c.is_frs ? "FRS" : "CROWD"),
             stream_url: c.stream_url,
             fps: 25,
-            zone_code: c.is_frs ? "ZONE-A" : "ZONE-B",
+            zone_code: c.zone_code || (c.is_frs ? "ZONE-A" : "ZONE-B"),
             detections_count: c.detections_count || 0,
             ai_status: c.status === "online" ? "online" : "offline",
             ai_purposes: (c.ai_purposes || (c.is_frs ? [] : ["ENTRY"])).filter((p) => p !== "ENTRY_EXIT"),
+            // Analytics fields
+            in_count: c.in_count ?? 0,
+            out_count: c.out_count ?? 0,
+            occupancy: c.occupancy_count ?? c.occupancy ?? 0,
+            people_count: c.headcount ?? c.people_count ?? c.occupancy_count ?? 0,
+            queue_movement_status: c.queue_movement_status || "STOPPED",
+            zone_data: c.zone_data || [],
           }))
         );
       }
@@ -316,6 +323,13 @@ export default function Cameras() {
       detections_count: eng.detections_count || existing.detections_count || 0,
       ai_purposes: (eng.ai_purposes || existing.ai_purposes || (isFrs ? [] : ["ENTRY", "ZONE"])).filter((p) => p !== "ENTRY_EXIT"),
       is_running: true,
+      // Analytics fields from live worker
+      in_count: eng.in_count ?? existing.in_count ?? 0,
+      out_count: eng.out_count ?? existing.out_count ?? 0,
+      occupancy: eng.occupancy ?? existing.occupancy ?? 0,
+      people_count: eng.people_count ?? existing.people_count ?? eng.occupancy ?? 0,
+      queue_movement_status: eng.queue_movement_status || existing.queue_movement_status || "STOPPED",
+      zone_data: eng.zone_data || existing.zone_data || [],
     });
   }
 

@@ -340,6 +340,44 @@ export default function CameraCard({ camera, onSelect, onToggleFrs, onFullscreen
           </div>
         </div>
 
+        {/* Entry / Exit / Occupancy counts for Crowd cameras */}
+        {!isFrs && isRunning && (
+          <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr 1fr", gap: 4, fontSize: 10, marginTop: 6 }}>
+            <div>
+              <div className="cc-label" style={{ color: "#3fb950" }}>↑ Entry</div>
+              <div style={{ fontFamily: "var(--cc-font-mono)", color: "#3fb950", fontWeight: 700 }}>
+                {(camera.in_count ?? 0).toLocaleString()}
+              </div>
+            </div>
+            <div>
+              <div className="cc-label" style={{ color: "#f85149" }}>↓ Exit</div>
+              <div style={{ fontFamily: "var(--cc-font-mono)", color: "#f85149", fontWeight: 700 }}>
+                {(camera.out_count ?? 0).toLocaleString()}
+              </div>
+            </div>
+            <div>
+              <div className="cc-label" style={{ color: "#bc8cff" }}>≈ Inside</div>
+              <div style={{ fontFamily: "var(--cc-font-mono)", color: "#bc8cff", fontWeight: 700 }}>
+                {(camera.occupancy ?? 0).toLocaleString()}
+              </div>
+            </div>
+          </div>
+        )}
+
+        {/* Queue status badge for QUEUE cameras */}
+        {!isFrs && isRunning && camera.ai_purposes?.includes("QUEUE") && (
+          <div style={{ marginTop: 5 }}>
+            <span style={{
+              fontSize: 9, fontWeight: 700, padding: "2px 8px", borderRadius: 3,
+              background: camera.queue_movement_status === "STOPPED" ? "rgba(248,81,73,0.15)" : camera.queue_movement_status === "SLOW" ? "rgba(210,153,34,0.15)" : "rgba(63,185,80,0.12)",
+              color: camera.queue_movement_status === "STOPPED" ? "#f85149" : camera.queue_movement_status === "SLOW" ? "#d29922" : "#3fb950",
+              border: `1px solid ${camera.queue_movement_status === "STOPPED" ? "#f8514940" : camera.queue_movement_status === "SLOW" ? "#d2992240" : "#3fb95040"}`,
+            }}>
+              {camera.queue_movement_status === "STOPPED" ? "🚨 QUEUE STOPPED" : camera.queue_movement_status === "SLOW" ? "⚠️ QUEUE SLOW" : camera.queue_movement_status === "EMPTY" ? "⬜ QUEUE EMPTY" : "✅ QUEUE MOVING"}
+            </span>
+          </div>
+        )}
+
         <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", marginTop: 8, paddingTop: 6, borderTop: "1px solid var(--cc-border)" }}>
           <button
             className="cc-btn"

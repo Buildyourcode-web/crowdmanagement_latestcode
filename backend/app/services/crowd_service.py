@@ -52,6 +52,26 @@ class CrowdService:
         total_outflow = sum(s.outflow_rate for s in snapshots) if snapshots else 0
         total_today = sum(s.people_count for s in snapshots) if snapshots else 0
 
+        # Fallback: if no snapshots yet, pull live worker counts
+        if not snapshots:
+            try:
+                from app.frs_engine.frs_service import _camera_workers, _workers_lock
+                acquired = _workers_lock.acquire(timeout=0.3)
+                if acquired:
+                    try:
+                        live_in = sum(getattr(w, "in_count", 0) for w in _camera_workers.values() if getattr(w, "running", False) and getattr(w, "crowd_ai_active", False))
+                        live_out = sum(getattr(w, "out_count", 0) for w in _camera_workers.values() if getattr(w, "running", False) and getattr(w, "crowd_ai_active", False))
+                        live_occ = sum(getattr(w, "occupancy_count", 0) for w in _camera_workers.values() if getattr(w, "running", False) and getattr(w, "crowd_ai_active", False))
+                        if live_in > 0 or live_occ > 0:
+                            total_inflow = live_in
+                            total_outflow = live_out
+                            total_today = live_in + live_out
+                            current_crowd = max(current_crowd, live_occ)
+                    finally:
+                        _workers_lock.release()
+            except Exception:
+                pass
+
         res = CrowdSummaryResponse(
             totalVisitorsToday=total_today,
             currentCrowd=current_crowd,
@@ -66,6 +86,7 @@ class CrowdService:
         _summary_cache = res
         _summary_cache_time = time.time()
         return res
+
 
     async def get_summary(self) -> CrowdSummaryResponse:
         global _summary_cache, _summary_cache_time, _is_refreshing_summary
