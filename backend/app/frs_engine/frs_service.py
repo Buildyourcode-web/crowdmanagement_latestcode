@@ -2190,7 +2190,24 @@ async def remove_frs_camera(camera_id: str, sync_db: bool = True):
                 await srv.delete_camera(camera_id)
             logger.info(f"[FRS-Engine] Camera {camera_id} successfully deleted from database.")
         except Exception as ex:
-            logger.warning(f"Error syncing camera deletion to DB: {ex}")
+            # Belt-and-suspenders: if full delete fails, at least disable the camera
+            # so restore_active_cameras_from_db() won't revive it on next startup
+            logger.warning(f"Error syncing camera deletion to DB (full delete): {ex}. Attempting soft-disable...")
+            try:
+                from app.db.session import AsyncSessionLocal
+                from app.models.camera import Camera
+                from sqlalchemy import select as _sa_select, update as _sa_update
+                async with AsyncSessionLocal() as pg_db:
+                    clean_id = camera_id.replace("-FRS", "").replace("-CROWD", "").strip()
+                    await pg_db.execute(
+                        _sa_update(Camera)
+                        .where(Camera.camera_code.in_([camera_id, clean_id]))
+                        .values(enabled=False, status="offline", stream_status="OFFLINE")
+                    )
+                    await pg_db.commit()
+                logger.info(f"[FRS-Engine] Camera {camera_id} soft-disabled in database as fallback.")
+            except Exception as ex2:
+                logger.warning(f"[FRS-Engine] Soft-disable also failed for {camera_id}: {ex2}")
 
     return {"status": "ok", "removed": camera_id, "had_active_worker": state is not None}
 
@@ -2209,9 +2226,8 @@ def get_worker_for_camera(camera_code_or_id: str) -> Optional[CameraWorkerState]
             if cid_clean == target_clean or target_clean in cid_clean or cid_clean in target_clean:
                 return state
 
-        # 3. If there is a single active worker in the system, map it to the physical camera
-        if len(_camera_workers) == 1:
-            return next(iter(_camera_workers.values()))
+        # 3. [REMOVED] Dangerous catch-all: do NOT map to single worker blindly.
+        # This caused deleted camera IDs to resolve to an unrelated active camera.
 
     # 4. Check PostgreSQL DB if camera exists and auto-start worker on-demand
     try:

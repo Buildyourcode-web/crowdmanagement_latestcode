@@ -1,8 +1,8 @@
 // Camera Service — Real backend API client
 import apiClient from "./apiClient.js";
 
-export async function getCameras(filters = {}) {
-  const res = await apiClient.get("/api/v1/cameras", { params: filters });
+export async function getCameras(filters = {}, skipCache = false) {
+  const res = await apiClient.get("/api/v1/cameras", { params: filters, skipCache });
   return res.data;
 }
 

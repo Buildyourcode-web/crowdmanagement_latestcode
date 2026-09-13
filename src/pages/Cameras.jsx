@@ -178,11 +178,11 @@ export default function Cameras() {
     }
   }, []);
 
-  // Load database cameras
-  const loadDbCameras = useCallback(async () => {
+  // Load database cameras — always skip cache to get latest state
+  const loadDbCameras = useCallback(async (skipCache = false) => {
     try {
       const [camsRes, statsRes] = await Promise.allSettled([
-        getCameras({ page_size: 50 }),
+        getCameras({ page_size: 200, enabled_only: true }, skipCache),
         getCameraStats(),
       ]);
       if (!isMountedRef.current) return;
@@ -191,7 +191,7 @@ export default function Cameras() {
       const camItems = Array.isArray(rawCams)
         ? rawCams
         : (rawCams?.items || rawCams?.data?.items || rawCams?.data || []);
-      // Keep all enabled cameras from DB (persist across reloads/relogins)
+      // Only keep enabled cameras from DB
       setDbCameras(camItems.filter((c) => c && c.enabled !== false));
       if (statsVal) setStats(statsVal?.data || statsVal);
     } catch (e) {
@@ -452,15 +452,17 @@ export default function Cameras() {
     setDbCameras((prev) => prev.filter((c) => c.id !== camId && c.camera_code !== camId));
     try {
       await deleteCamera(camId);
+      // skipCache=true to force fresh data — avoids 30s stale cache showing deleted camera
       if (isMountedRef.current) {
-        await Promise.all([loadDbCameras(), loadEngineCameras()]).catch(() => {});
+        await Promise.all([loadDbCameras(true), loadEngineCameras()]).catch(() => {});
       }
     } catch (err) {
       console.error("Failed to delete camera:", err);
+      // Even on error, refresh with skipCache=true so user sees real state
       if (isMountedRef.current) {
-        await Promise.all([loadDbCameras(), loadEngineCameras()]).catch(() => {});
+        await Promise.all([loadDbCameras(true), loadEngineCameras()]).catch(() => {});
       }
-      alert("Failed to remove camera: " + (err.response?.data?.detail?.message || err.message));
+      alert("Failed to remove camera: " + (err.response?.data?.detail?.message || err.message || "Unknown error"));
     }
   };
 

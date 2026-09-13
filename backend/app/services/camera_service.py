@@ -545,9 +545,17 @@ class CameraService:
             in_db = True
             from sqlalchemy import text
             try:
+                cid = cam.id
+                # Step 1: Soft-disable first — even if hard delete fails, camera won't be restored on startup
+                await self.db.execute(
+                    text("UPDATE cameras SET enabled = FALSE, status = 'offline', stream_status = 'OFFLINE' WHERE id = :cid"),
+                    {"cid": cid}
+                )
+                await self.db.commit()
+
+                # Step 2: Nullify FK references then hard delete
                 # asyncpg does NOT support multiple statements in one text() call.
                 # Each statement must be executed individually.
-                cid = cam.id
                 await self.db.execute(text("UPDATE crowd_snapshots SET camera_id = NULL WHERE camera_id = :cid"), {"cid": cid})
                 await self.db.execute(text("UPDATE queue_snapshots SET camera_id = NULL WHERE camera_id = :cid"), {"cid": cid})
                 await self.db.execute(text("UPDATE frs_candidates SET camera_id = NULL WHERE camera_id = :cid"), {"cid": cid})
