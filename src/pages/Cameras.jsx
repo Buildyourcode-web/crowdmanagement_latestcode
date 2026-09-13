@@ -186,11 +186,14 @@ export default function Cameras() {
         getCameraStats(),
       ]);
       if (!isMountedRef.current) return;
-      const camsVal = camsRes.status === "fulfilled" ? camsRes.value : [];
+      const rawCams = camsRes.status === "fulfilled" ? camsRes.value : [];
       const statsVal = statsRes.status === "fulfilled" ? statsRes.value : null;
+      const camItems = Array.isArray(rawCams)
+        ? rawCams
+        : (rawCams?.items || rawCams?.data?.items || rawCams?.data || []);
       // Keep all enabled cameras from DB (persist across reloads/relogins)
-      setDbCameras(list.filter((c) => c.enabled !== false));
-      if (statsVal) setStats(statsVal);
+      setDbCameras(camItems.filter((c) => c && c.enabled !== false));
+      if (statsVal) setStats(statsVal?.data || statsVal);
     } catch (e) {
       console.warn(e);
     } finally {
@@ -449,12 +452,14 @@ export default function Cameras() {
     setDbCameras((prev) => prev.filter((c) => c.id !== camId && c.camera_code !== camId));
     try {
       await deleteCamera(camId);
-      // Background re-fetch to keep counts in sync
-      Promise.all([loadDbCameras(), loadEngineCameras()]).catch(() => {});
+      if (isMountedRef.current) {
+        await Promise.all([loadDbCameras(), loadEngineCameras()]).catch(() => {});
+      }
     } catch (err) {
       console.error("Failed to delete camera:", err);
-      // Re-fetch to restore state if deletion failed
-      await Promise.all([loadDbCameras(), loadEngineCameras()]).catch(() => {});
+      if (isMountedRef.current) {
+        await Promise.all([loadDbCameras(), loadEngineCameras()]).catch(() => {});
+      }
       alert("Failed to remove camera: " + (err.response?.data?.detail?.message || err.message));
     }
   };
