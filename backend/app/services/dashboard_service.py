@@ -519,33 +519,7 @@ class DashboardService:
                 )
             )
 
-        if not queue_items:
-            # Provide active Queue Status derived from live occupancy & cameras
-            primary_code = all_cameras[0].camera_code if all_cameras else ""
-            live_q = live_occupancy_count if live_occupancy_count > 0 else (total_zone_people if total_zone_people > 0 else 8)
-            wait_m = max(1, round(live_q * 0.6))
-            queue_items.append(
-                QueueStatusItem(
-                    queue_name="Main Darshan Queue (Gate 1)",
-                    camera_code=primary_code,
-                    current_people=live_q,
-                    estimated_wait_minutes=wait_m,
-                    flow_status="NORMAL" if live_q < 30 else ("SLOW" if live_q < 70 else "STOPPED"),
-                    queue_direction="TOWARDS_SANCTUM",
-                    risk_level="LOW" if live_q < 50 else "MODERATE",
-                )
-            )
-            queue_items.append(
-                QueueStatusItem(
-                    queue_name="VVIP & Express Queue (Gate 2)",
-                    camera_code=all_cameras[1].camera_code if len(all_cameras) > 1 else primary_code,
-                    current_people=max(2, round(live_q * 0.25)),
-                    estimated_wait_minutes=max(1, round(wait_m * 0.3)),
-                    flow_status="FAST",
-                    queue_direction="TOWARDS_SANCTUM",
-                    risk_level="LOW",
-                )
-            )
+        # No synthetic fallback — show empty list when no real queue data exists
 
         # -------------------------------------------------------------------
         # 6. Hourly Visitor Flow (24 Hours for Selected Date)
@@ -754,7 +728,9 @@ class DashboardService:
             timestamp=now_iso,
             data_status="LIVE DATA",
             date_range_selected=date_range.upper(),
-            total_visitors_festival=total_visitors_festival,
+            total_visitors_festival=db_total_entries,
+            festival_total_entries=db_total_entries,
+            festival_total_exits=db_total_exits,
             festival_day_current=festival_day_current,
             festival_day_total=festival_day_total,
             festival_day_label=festival_day_label,

@@ -369,8 +369,8 @@ export default function Dashboard() {
       {/* ========================================================================= */}
       {/* SECTION 2 & 9: HERO KPI + PEOPLE MOVEMENT PANEL */}
       {/* ========================================================================= */}
-      <div style={{ display: "grid", gridTemplateColumns: "1.4fr 1fr 1fr 1fr 1.2fr", gap: 10 }}>
-        {/* HERO KPI */}
+      <div style={{ display: "grid", gridTemplateColumns: "1.4fr 1fr 1fr 1fr", gap: 10 }}>
+        {/* HERO KPI — Festival Total Footfall (all days 14-24 Sept) */}
         <div
           className="cc-card"
           onClick={() => navigate("/reports")}
@@ -386,7 +386,7 @@ export default function Dashboard() {
         >
           <div style={{ display: "flex", justifyContent: "space-between", alignItems: "flex-start" }}>
             <span style={{ fontSize: 11, fontWeight: 700, color: "var(--cc-text-muted)", letterSpacing: "0.05em", textTransform: "uppercase" }}>
-              Total Footfall (Entry + Exit)
+              Festival Total (14–24 Sept)
             </span>
             <span style={{ fontSize: 10, background: "rgba(188, 140, 255, 0.2)", border: "1px solid rgba(188, 140, 255, 0.4)", color: "#bc8cff", padding: "1px 6px", borderRadius: 4, fontFamily: "var(--cc-font-mono)", fontWeight: 700 }}>
               {fest10Data ? `Day ${fest10Data.current_day} of 10` : (data?.festival_day_label || "Day 1 of 10")}
@@ -395,56 +395,50 @@ export default function Dashboard() {
 
           <div style={{ margin: "6px 0" }}>
             <div style={{ fontSize: 28, fontWeight: 800, fontFamily: "var(--cc-font-mono)", color: "var(--cc-text-primary)", letterSpacing: "0.02em" }}>
-              {loading && !data ? "—" : ((data?.today_entries || 0) + (data?.today_exits || 0)).toLocaleString()}
+              {loading && !data ? "—" : (
+                fest10Data?.total_entries_10days ??
+                data?.festival_total_entries ??
+                data?.total_visitors_festival ??
+                0
+              ).toLocaleString()}
             </div>
             <div style={{ fontSize: 11, color: "var(--cc-text-muted)" }}>
-              Formula: <strong style={{ color: "#3fb950" }}>{(data?.today_entries || 0).toLocaleString()}</strong> (In) + <strong style={{ color: "#f85149" }}>{(data?.today_exits || 0).toLocaleString()}</strong> (Out)
+              Total unique entries across all 10 festival days
             </div>
           </div>
         </div>
 
-        {/* PEOPLE MOVEMENT: ENTRY */}
+        {/* TODAY ENTRY */}
         <div className="cc-card" style={{ padding: "12px 14px", display: "flex", flexDirection: "column", justifyContent: "space-between" }}>
           <span style={{ fontSize: 11, fontWeight: 600, color: "var(--cc-text-muted)", letterSpacing: "0.05em", textTransform: "uppercase" }}>
-            Total Entry (4 Gates)
+            Total Entry (Today)
           </span>
-          <div style={{ fontSize: 24, fontWeight: 700, fontFamily: "var(--cc-font-mono)", color: "#3fb950" }}>
+          <div style={{ fontSize: 28, fontWeight: 800, fontFamily: "var(--cc-font-mono)", color: "#3fb950" }}>
             {loading && !data ? "—" : (data?.today_entries || 0).toLocaleString()}
           </div>
-          <span style={{ fontSize: 10, color: "var(--cc-text-muted)" }}>CAM-ENTRY 01–04 crossings</span>
+          <span style={{ fontSize: 10, color: "var(--cc-text-muted)" }}>All entry cameras — line crossings IN</span>
         </div>
 
-        {/* PEOPLE MOVEMENT: EXIT */}
+        {/* TODAY EXIT */}
         <div className="cc-card" style={{ padding: "12px 14px", display: "flex", flexDirection: "column", justifyContent: "space-between" }}>
           <span style={{ fontSize: 11, fontWeight: 600, color: "var(--cc-text-muted)", letterSpacing: "0.05em", textTransform: "uppercase" }}>
-            Total Exit (4 Gates)
+            Total Exit (Today)
           </span>
-          <div style={{ fontSize: 24, fontWeight: 700, fontFamily: "var(--cc-font-mono)", color: "#f85149" }}>
+          <div style={{ fontSize: 28, fontWeight: 800, fontFamily: "var(--cc-font-mono)", color: "#f85149" }}>
             {loading && !data ? "—" : (data?.today_exits || 0).toLocaleString()}
           </div>
-          <span style={{ fontSize: 10, color: "var(--cc-text-muted)" }}>CAM-EXIT 01–04 crossings</span>
+          <span style={{ fontSize: 10, color: "var(--cc-text-muted)" }}>All exit cameras — line crossings OUT</span>
         </div>
 
-        {/* PEOPLE MOVEMENT: NET FLOW */}
-        <div className="cc-card" style={{ padding: "12px 14px", display: "flex", flexDirection: "column", justifyContent: "space-between" }}>
-          <span style={{ fontSize: 11, fontWeight: 600, color: "var(--cc-text-muted)", letterSpacing: "0.05em", textTransform: "uppercase" }}>
-            Net Flow
-          </span>
-          <div style={{ fontSize: 24, fontWeight: 700, fontFamily: "var(--cc-font-mono)", color: (data?.net_flow || 0) >= 0 ? "#3fb950" : "#f85149" }}>
-            {loading && !data ? "—" : `${(data?.net_flow || 0) > 0 ? "+" : ""}${(data?.net_flow || 0).toLocaleString()}`}
-          </div>
-          <span style={{ fontSize: 10, color: "var(--cc-text-muted)" }}>Entry minus Exit delta</span>
-        </div>
-
-        {/* PEOPLE MOVEMENT: CURRENT OCCUPANCY */}
+        {/* PEAK HOUR TODAY */}
         <div className="cc-card" style={{ padding: "12px 14px", display: "flex", flexDirection: "column", justifyContent: "space-between", borderLeft: "3px solid #e3b341" }}>
           <span style={{ fontSize: 11, fontWeight: 600, color: "var(--cc-text-muted)", letterSpacing: "0.05em", textTransform: "uppercase" }}>
-            Inside Complex (Net)
+            Peak Hour (Today)
           </span>
-          <div style={{ fontSize: 24, fontWeight: 700, fontFamily: "var(--cc-font-mono)", color: "#e3b341" }}>
-            {loading && !data ? "—" : (data?.current_occupancy || 0).toLocaleString()}
+          <div style={{ fontSize: 18, fontWeight: 800, fontFamily: "var(--cc-font-mono)", color: "#e3b341", marginTop: 4 }}>
+            {loading && !data ? "—" : (data?.peak_hour && data.peak_hour !== "—" ? data.peak_hour : "No data yet")}
           </div>
-          <span style={{ fontSize: 10, color: "var(--cc-text-muted)" }}>Total Entry minus Total Exit</span>
+          <span style={{ fontSize: 10, color: "var(--cc-text-muted)" }}>Highest visitor inflow hour</span>
         </div>
       </div>
 
@@ -566,15 +560,15 @@ export default function Dashboard() {
 
                       <div
                         style={{
-                          fontSize: 10,
+                          fontSize: 12,
                           fontWeight: 700,
                           fontFamily: "var(--cc-font-mono)",
-                          padding: "2px 8px",
-                          borderRadius: 4,
+                          padding: "5px 12px",
+                          borderRadius: 6,
                           background: statusBadge.bg,
                           color: statusBadge.color,
-                          border: `1px solid ${statusBadge.border}`,
-                          minWidth: 70,
+                          border: `1.5px solid ${statusBadge.border}`,
+                          minWidth: 90,
                           textAlign: "center",
                         }}
                       >
@@ -673,15 +667,15 @@ export default function Dashboard() {
                     <div style={{ marginLeft: 16 }}>
                       <div
                         style={{
-                          fontSize: 10,
+                          fontSize: 12,
                           fontWeight: 700,
                           fontFamily: "var(--cc-font-mono)",
-                          padding: "2px 8px",
-                          borderRadius: 4,
+                          padding: "5px 12px",
+                          borderRadius: 6,
                           background: statusStyle.bg,
                           color: statusStyle.color,
-                          border: `1px solid ${statusStyle.border}`,
-                          minWidth: 70,
+                          border: `1.5px solid ${statusStyle.border}`,
+                          minWidth: 90,
                           textAlign: "center",
                         }}
                       >
