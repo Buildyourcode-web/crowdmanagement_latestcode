@@ -11,9 +11,9 @@ async_engine = create_async_engine(
     settings.DATABASE_URL,
     echo=False,
     future=True,
-    pool_size=15,
-    max_overflow=10,
-    pool_timeout=30,
+    pool_size=10,
+    max_overflow=5,
+    pool_timeout=20,
     pool_recycle=300,
     pool_pre_ping=True,   # validates connections before use — prevents stale-connection errors on AWS/Supabase
     connect_args={"statement_cache_size": 0, "prepared_statement_cache_size": 0},

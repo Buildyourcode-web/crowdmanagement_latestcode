@@ -24,10 +24,10 @@ export async function updateCamera(id, payload) {
 export async function deleteCamera(id) {
   try {
     const res = await apiClient.delete(`/api/v1/cameras/${id}`);
-    return res.data;
+    return res?.data || res;
   } catch (e) {
     const fallbackRes = await apiClient.delete(`/api/v1/frs-engine/cameras/${id}`);
-    return fallbackRes.data;
+    return fallbackRes?.data || fallbackRes;
   }
 }
 

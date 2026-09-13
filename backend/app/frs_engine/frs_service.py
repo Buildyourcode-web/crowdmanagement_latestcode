@@ -2185,14 +2185,10 @@ async def remove_frs_camera(camera_id: str, sync_db: bool = True):
         try:
             from app.db.session import AsyncSessionLocal
             from app.services.camera_service import CameraService
-            async def _sync_del():
-                async with AsyncSessionLocal() as pg_db:
-                    srv = CameraService(pg_db)
-                    await srv.delete_camera(camera_id)
-            if _main_loop and _main_loop.is_running():
-                asyncio.run_coroutine_threadsafe(_sync_del(), _main_loop)
-            else:
-                asyncio.create_task(_sync_del())
+            async with AsyncSessionLocal() as pg_db:
+                srv = CameraService(pg_db)
+                await srv.delete_camera(camera_id)
+            logger.info(f"[FRS-Engine] Camera {camera_id} successfully deleted from database.")
         except Exception as ex:
             logger.warning(f"Error syncing camera deletion to DB: {ex}")
 
@@ -3001,6 +2997,25 @@ async def restore_active_cameras_from_db():
                 logger.info("[FRS-Engine] No saved cameras found in database on startup.")
                 return
 
+            # Restore today's cumulative in/out counts for each camera from DB
+            from app.models.crowd import CrowdSnapshot
+            from sqlalchemy import func
+            IST = timezone(timedelta(hours=5, minutes=30))
+            now_ist = datetime.now(timezone.utc).astimezone(IST)
+            today_start = datetime.combine(now_ist.date(), datetime.min.time(), tzinfo=IST).astimezone(timezone.utc)
+
+            counts_stmt = (
+                select(
+                    CrowdSnapshot.camera_code,
+                    func.sum(CrowdSnapshot.inflow_rate).label("in_sum"),
+                    func.sum(CrowdSnapshot.outflow_rate).label("out_sum"),
+                )
+                .where(CrowdSnapshot.timestamp >= today_start)
+                .group_by(CrowdSnapshot.camera_code)
+            )
+            counts_res = await pg_db.execute(counts_stmt)
+            camera_counts = {r.camera_code: (int(r.in_sum or 0), int(r.out_sum or 0)) for r in counts_res.all()}
+
             logger.info(f"[FRS-Engine] Restoring {len(cams)} saved camera(s) from database...")
             for c in cams:
                 cam_id = c.camera_code
@@ -3016,6 +3031,9 @@ async def restore_active_cameras_from_db():
                 cam_type = "FRS" if is_frs else (c.camera_type or "CROWD")
                 ai_purp = ["FRS"] if is_frs else ["ENTRY", "ZONE"]
 
+                clean_code = cam_id.replace("-FRS", "").replace("-CROWD", "")
+                in_val, out_val = camera_counts.get(cam_id) or camera_counts.get(clean_code) or (0, 0)
+
                 state = CameraWorkerState(
                     camera_id=cam_id,
                     rtsp_url=rtsp_url,
@@ -3025,6 +3043,10 @@ async def restore_active_cameras_from_db():
                     ai_purposes=ai_purp,
                     zone_code=c.zone_code or "ZONE-A",
                 )
+                state.in_count = in_val
+                state.out_count = out_val
+                state.occupancy_count = c.people_count or max(0, in_val - out_val)
+
                 worker = RTSPCameraWorker(state)
                 state.running = True
 
