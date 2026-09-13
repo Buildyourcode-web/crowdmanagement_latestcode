@@ -29,13 +29,13 @@ import threading
 import time
 import uuid
 from collections import deque
-from datetime import datetime, timezone
+from datetime import datetime, timezone, timedelta
 from pathlib import Path
 from typing import Dict, List, Optional
 
 import cv2
 import numpy as np
-from fastapi import APIRouter, HTTPException, WebSocket, WebSocketDisconnect
+from fastapi import APIRouter, HTTPException, Request, WebSocket, WebSocketDisconnect
 from fastapi.responses import StreamingResponse
 from loguru import logger
 from pydantic import BaseModel, Field
@@ -915,9 +915,10 @@ class RTSPCameraWorker:
                 frame_to_process = None
                 if self._latest_ai_rgb is not None:
                     frame_to_process = self._latest_ai_rgb.copy()
+                    self._latest_ai_rgb = None
 
             if frame_to_process is None:
-                time.sleep(0.04)
+                time.sleep(0.06)
                 continue
 
             yolo_sess = None
@@ -1106,13 +1107,16 @@ class RTSPCameraWorker:
                     trk["loco_history"].append((curr_time, trk["centroid"], trk["bottom_center"], bh_curr))
 
                 # Spawn new tracks for unassigned high detections
+                # IoU-based tracking (threshold > 0.60) allows people walking side-by-side to receive independent tracks.
+                # Every new track starts clean with crossed_lines = set() (no propagation from preceding people).
                 for d_idx in unassigned_high_d:
                     det = high_detections[d_idx]
                     det_c = det["centroid"]
-                    # Prevent duplicate track if too close to an existing track
+
+                    # 1. IoU-based multi-person tracking check (replaces old 45px rule):
                     too_close = False
                     for existing_trk in self._crowd_tracks.values():
-                        if math.hypot(det_c[0] - existing_trk["centroid"][0], det_c[1] - existing_trk["centroid"][1]) < 45.0:
+                        if _box_iou(det["bbox"], existing_trk["bbox"]) > 0.60:
                             too_close = True
                             break
                     if too_close:
@@ -1121,12 +1125,6 @@ class RTSPCameraWorker:
                     new_tid = self._next_track_id
                     self._next_track_id += 1
                     self.state.detections_count += 1
-                    new_crossed = set()
-                    for old_trk in self._crowd_tracks.values():
-                        if old_trk.get("crossed_lines"):
-                            if math.hypot(det_c[0] - old_trk["centroid"][0], det_c[1] - old_trk["centroid"][1]) < 100.0:
-                                new_crossed.update(old_trk["crossed_lines"])
-                                break
                     bh_new = det["bbox"][3] - det["bbox"][1]
                     self._crowd_tracks[new_tid] = {
                         "track_id": new_tid,
@@ -1142,7 +1140,7 @@ class RTSPCameraWorker:
                         "history": deque([(det_c, curr_time)], maxlen=20),
                         "loco_history": deque([(curr_time, det_c, det["bottom_center"], bh_new)], maxlen=25),
                         "cooldown_until": 0.0,
-                        "crossed_lines": new_crossed,
+                        "crossed_lines": set(),  # Independent: never inherited from other tracks!
                         "movement_state": "MOVING",
                         "last_moving_time": curr_time,
                         "stopped_frames": 0,
@@ -1197,49 +1195,63 @@ class RTSPCameraWorker:
 
                             has_crossed = False
                             crossing_prev = None
+                            bh = trk["bbox"][3] - trk["bbox"][1]
 
-                            # Check trajectory segments across el1 -> el2 over last 6 history frames
+                            # 1. Multi-Trajectory Checks (Centroid, Feet, Mid-Body)
                             for i in range(max(0, len(hist) - 6), len(hist) - 1):
                                 p_a = hist[i][0]
                                 p_b = hist[i + 1][0]
-                                # Centroid trajectory crossing
+
+                                # A. Centroid Path — center of body
                                 if _segments_cross(p_a, p_b, el1, el2):
                                     has_crossed = True
                                     crossing_prev = p_a
                                     break
-                                # Feet trajectory crossing
-                                bh = trk["bbox"][3] - trk["bbox"][1]
-                                bc_a = (p_a[0], p_a[1] + bh * 0.45)
-                                bc_b = (p_b[0], p_b[1] + bh * 0.45)
-                                if _segments_cross(bc_a, bc_b, el1, el2):
+
+                                # B. Feet Path — bottom/feet region
+                                feet_a = (p_a[0], p_a[1] + bh * 0.48)
+                                feet_b = (p_b[0], p_b[1] + bh * 0.48)
+                                if _segments_cross(feet_a, feet_b, el1, el2):
                                     has_crossed = True
                                     crossing_prev = p_a
                                     break
 
+                                # C. Mid-Body Path — torso / chest region
+                                mid_a = (p_a[0], p_a[1] + bh * 0.20)
+                                mid_b = (p_b[0], p_b[1] + bh * 0.20)
+                                if _segments_cross(mid_a, mid_b, el1, el2):
+                                    has_crossed = True
+                                    crossing_prev = p_a
+                                    break
+
+                            # 2. Side Flip Detection — detects movement from one side of line to the other
+                            if not has_crossed and len(hist) >= 2:
+                                p_early = hist[max(0, len(hist) - 6)][0]
+                                p_now = trk["centroid"]
+                                side_early = (el2[0] - el1[0]) * (p_early[1] - el1[1]) - (el2[1] - el1[1]) * (p_early[0] - el1[0])
+                                side_now = (el2[0] - el1[0]) * (p_now[1] - el1[1]) - (el2[1] - el1[1]) * (p_now[0] - el1[0])
+                                if (side_early * side_now) < 0:
+                                    if _point_to_segment_dist(p_now, el1, el2) <= max(90.0, bh * 1.2):
+                                        has_crossed = True
+                                        crossing_prev = p_early
+
+                            # 3. Bounding Box Straddle & Touch — detects bounding box touching/straddling counting line
+                            if not has_crossed and _box_touches_line(trk["bbox"], el1, el2):
+                                p_early = hist[max(0, len(hist) - 6)][0]
+                                p_now = trk["centroid"]
+                                if math.hypot(p_now[0] - p_early[0], p_now[1] - p_early[1]) > 12.0:
+                                    has_crossed = True
+                                    crossing_prev = p_early
+
                             if not has_crossed:
                                 continue
 
-                            # Rule A: Mark line crossed for this track IMMEDIATELY
+                            # Mark line crossed for THIS Track ID only — cooldown only for this person
                             trk["crossed_lines"].add(line_id)
-                            trk["cooldown_until"] = curr_time + 4.0
+                            trk["cooldown_until"] = curr_time + 3.0
 
-                            # Rule B: Spatial deduplication against recent crossings
-                            is_dup = False
-                            for rc in self._recent_crossings:
-                                if (curr_time - rc["time"]) < 2.2 and rc.get("line_id") == line_id:
-                                    if math.hypot(trk["centroid"][0] - rc["pos"][0], trk["centroid"][1] - rc["pos"][1]) < 120.0:
-                                        is_dup = True
-                                        break
-                            if is_dup:
-                                continue
-
-                            self._recent_crossings.append({
-                                "time": curr_time,
-                                "pos": trk["centroid"],
-                                "line_id": line_id,
-                                "track_id": trk["track_id"],
-                            })
-                            self._recent_crossings = [rc for rc in self._recent_crossings if (curr_time - rc["time"]) < 10.0]
+                            # RULE B REMOVED COMPLETELY: Every person is evaluated independently!
+                            # No suppression of adjacent, side-by-side, or following tracks.
 
                             # Direction determination using trajectory vector
                             start_c = crossing_prev or hist[0][0]
@@ -1567,7 +1579,7 @@ class RTSPCameraWorker:
             except Exception as e:
                 logger.warning(f"[Crowd-AI-Worker:{self.state.camera_id}] Inference loop warning: {type(e).__name__}: {e}")
 
-            time.sleep(0.12)
+            time.sleep(0.18)
 
     def run(self):
         (FaceModel, IdentityMatcher, FaceQualityAssessor, FaceTracker, RTSPReader, db) = _load_frs_components()
@@ -1931,6 +1943,8 @@ class AddCameraRequest(BaseModel):
     is_frs: bool = True
     ai_purposes: Optional[List[str]] = Field(default_factory=lambda: ["ENTRY_EXIT", "ZONE"])
     zone_code: Optional[str] = "ZONE-A"
+    event_id: Optional[str] = None
+    site_id: Optional[str] = None
 
 
 class CameraInfo(BaseModel):
@@ -1956,7 +1970,11 @@ class CameraInfo(BaseModel):
 # ── POST /cameras ────────────────────────────────────────────────────────────
 
 @router.post("/cameras", response_model=CameraInfo, status_code=201)
-async def add_frs_camera(req: AddCameraRequest):
+async def add_frs_camera(req: AddCameraRequest, request: Request):
+    if not req.event_id:
+        h_evt = request.headers.get("X-Event-ID")
+        if h_evt:
+            req.event_id = h_evt
     if req.camera_id and req.camera_id.strip():
         cam_id = req.camera_id.strip()
     else:
@@ -2075,16 +2093,34 @@ async def add_frs_camera(req: AddCameraRequest):
     try:
         from app.db.session import AsyncSessionLocal
         from app.models.camera import Camera
+        from app.models.event import Event
         from app.security.encryption import encrypt_credential
         from sqlalchemy import select
         async def _sync_new_cam_db():
             async with AsyncSessionLocal() as pg_db:
+                # Resolve target event and site
+                target_event_id = None
+                target_site_id = None
+                if req.event_id:
+                    try:
+                        target_event_id = uuid.UUID(str(req.event_id))
+                    except Exception:
+                        pass
+                if not target_event_id:
+                    evt_stmt = select(Event).where((Event.code == "KHB-2026") | (Event.name.ilike("%Khairatabad%"))).limit(1)
+                    evt_res = await pg_db.execute(evt_stmt)
+                    evt = evt_res.scalars().first()
+                    if evt:
+                        target_event_id = evt.id
+                        target_site_id = evt.site_id
+
                 clean_id = cam_id.replace("-FRS", "").replace("-CROWD", "")
                 stmt = select(Camera).where(Camera.camera_code.in_([cam_id, clean_id]))
                 res = await pg_db.execute(stmt)
                 cams = res.scalars().all()
+                now_utc = datetime.now(timezone.utc)
+
                 if not cams:
-                    import uuid
                     new_c = Camera(
                         id=uuid.uuid4(),
                         camera_code=clean_id,
@@ -2096,6 +2132,11 @@ async def add_frs_camera(req: AddCameraRequest):
                         status="online",
                         stream_status="ONLINE",
                         enabled=True,
+                        is_active=True,
+                        active_from=now_utc,
+                        removed_at=None,
+                        event_id=target_event_id,
+                        site_id=target_site_id,
                     )
                     pg_db.add(new_c)
                 else:
@@ -2104,6 +2145,12 @@ async def add_frs_camera(req: AddCameraRequest):
                         c.rtsp_url_encrypted = encrypt_credential(req.rtsp_url)
                         c.status = "online"
                         c.stream_status = "ONLINE"
+                        c.enabled = True
+                        c.is_active = True
+                        c.removed_at = None
+                        if target_event_id and not c.event_id:
+                            c.event_id = target_event_id
+                            c.site_id = target_site_id
                 await pg_db.commit()
         await _sync_new_cam_db()
     except Exception as e:
@@ -2212,7 +2259,7 @@ async def remove_frs_camera(camera_id: str, sync_db: bool = True):
     return {"status": "ok", "removed": camera_id, "had_active_worker": state is not None}
 
 
-def get_worker_for_camera(camera_code_or_id: str) -> Optional[CameraWorkerState]:
+def get_worker_for_camera(camera_code_or_id: str, auto_revive: bool = False) -> Optional[CameraWorkerState]:
     """Resolves a CameraWorkerState for the requested camera code or ID with flexible mapping."""
     with _workers_lock:
         # 1. Exact match
@@ -2226,8 +2273,8 @@ def get_worker_for_camera(camera_code_or_id: str) -> Optional[CameraWorkerState]
             if cid_clean == target_clean or target_clean in cid_clean or cid_clean in target_clean:
                 return state
 
-        # 3. [REMOVED] Dangerous catch-all: do NOT map to single worker blindly.
-        # This caused deleted camera IDs to resolve to an unrelated active camera.
+    if not auto_revive:
+        return None
 
     # 4. Check PostgreSQL DB if camera exists and auto-start worker on-demand
     try:
@@ -2241,7 +2288,9 @@ def get_worker_for_camera(camera_code_or_id: str) -> Optional[CameraWorkerState]
                 clean_id = camera_code_or_id.replace("-FRS", "").replace("-CROWD", "").strip()
                 stmt = sa_select(Camera).where(
                     Camera.camera_code.in_([camera_code_or_id, clean_id]),
-                    Camera.enabled.is_(True)
+                    Camera.enabled.is_(True),
+                    Camera.is_active.is_(True),
+                    Camera.status != 'removed',
                 )
                 cam_rec = pg_db.execute(stmt).scalars().first()
                 if cam_rec and cam_rec.rtsp_url_encrypted:
@@ -2279,7 +2328,7 @@ def get_worker_for_camera(camera_code_or_id: str) -> Optional[CameraWorkerState]
 
 def stop_frs_camera_worker(camera_code_or_id: str) -> bool:
     """Safely stops and unregisters any FRS engine worker running for the given physical camera."""
-    state = get_worker_for_camera(camera_code_or_id)
+    state = get_worker_for_camera(camera_code_or_id, auto_revive=False)
     if state and state.running:
         state.running = False
         state.is_frs = False
@@ -2296,13 +2345,14 @@ def stop_frs_camera_worker(camera_code_or_id: str) -> bool:
 
 def is_frs_worker_running(camera_code_or_id: str) -> bool:
     """Checks if an FRS engine worker is actively running for the given physical camera."""
-    state = get_worker_for_camera(camera_code_or_id)
+    state = get_worker_for_camera(camera_code_or_id, auto_revive=False)
     return bool(state and state.running and state.is_frs)
 
 
 def is_crowd_worker_running(camera_code_or_id: str) -> bool:
     """Checks if a Crowd AI (YOLO11x) worker is actively running for the given camera."""
-    state = get_worker_for_camera(camera_code_or_id)
+    state = get_worker_for_camera(camera_code_or_id, auto_revive=False)
+    return bool(state and state.running and getattr(state, "crowd_ai_active", False) and not state.is_frs)
     return bool(state and state.running and getattr(state, "crowd_ai_active", False) and not state.is_frs)
 
 
@@ -3005,7 +3055,11 @@ async def restore_active_cameras_from_db():
             return
 
         async with AsyncSessionLocal() as pg_db:
-            stmt = select(Camera).where(Camera.enabled.is_(True))
+            stmt = select(Camera).where(
+                Camera.enabled.is_(True),
+                Camera.is_active.is_(True),
+                Camera.status != "removed",
+            )
             res = await pg_db.execute(stmt)
             cams = res.scalars().all()
 

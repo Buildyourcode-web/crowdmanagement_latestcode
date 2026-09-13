@@ -3,6 +3,7 @@ import { useState } from "react";
 import { useNavigate } from "react-router-dom";
 import { useAppStore } from "../store/useAppStore.js";
 import { EVENT_CONFIG } from "../config/eventConfig.js";
+import logoBold from "../assets/LOGO_Bold.png";
 import axios from "axios";
 import { getApiBaseUrl } from "../utils/urlConfig.js";
 
@@ -105,13 +106,12 @@ export default function Login() {
         <div style={{ textAlign: "center", marginBottom: 36 }}>
           <div
             style={{
-              width: 56, height: 56, background: "var(--cc-accent)", borderRadius: 8,
+              width: "100%", maxWidth: 220, height: 56,
               display: "flex", alignItems: "center", justifyContent: "center",
-              fontSize: 22, fontWeight: 900, color: "#fff", margin: "0 auto 16px",
-              letterSpacing: "-0.03em",
+              margin: "0 auto 16px",
             }}
           >
-            BYC
+            <img src={logoBold} alt="BYC Logo" style={{ width: "100%", height: "100%", objectFit: "contain" }} />
           </div>
           <div style={{ fontSize: 16, fontWeight: 700, color: "var(--cc-text-primary)", letterSpacing: "0.03em" }}>
             BYC AI COMMAND CENTER

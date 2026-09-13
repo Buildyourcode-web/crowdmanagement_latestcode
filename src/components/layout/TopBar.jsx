@@ -5,6 +5,7 @@ import { useAlertStore } from "../../store/useAlertStore.js";
 import { useSystemStore } from "../../store/useSystemStore.js";
 import { useEventStore } from "../../store/useEventStore.js";
 import { EVENT_CONFIG } from "../../config/eventConfig.js";
+import logoBold from "../../assets/LOGO_Bold.png";
 
 function Clock() {
   const [time, setTime] = useState(new Date());
@@ -28,17 +29,26 @@ export default function TopBar() {
   const { events, activeEvent, activeEventId, setActiveEvent, fetchEvents, sites, activeSiteId, setActiveSiteId } = useEventStore();
   const [userMenuOpen, setUserMenuOpen] = useState(false);
   const userMenuRef = useRef(null);
+  const [eventMenuOpen, setEventMenuOpen] = useState(false);
+  const eventMenuRef = useRef(null);
+  const [siteMenuOpen, setSiteMenuOpen] = useState(false);
+  const siteMenuRef = useRef(null);
 
   useEffect(() => {
     fetchEvents();
   }, []);
 
-  // Close dropdown on outside click
-
+  // Close dropdowns on outside click
   useEffect(() => {
     const handleClickOutside = (event) => {
       if (userMenuRef.current && !userMenuRef.current.contains(event.target)) {
         setUserMenuOpen(false);
+      }
+      if (eventMenuRef.current && !eventMenuRef.current.contains(event.target)) {
+        setEventMenuOpen(false);
+      }
+      if (siteMenuRef.current && !siteMenuRef.current.contains(event.target)) {
+        setSiteMenuOpen(false);
       }
     };
     document.addEventListener("mousedown", handleClickOutside);
@@ -58,7 +68,9 @@ export default function TopBar() {
     <header className="cc-topbar">
       {/* Brand / Logo */}
       <div className={`cc-topbar-brand${sidebarCollapsed ? " collapsed" : ""}`}>
-        <div className="cc-topbar-logo">BYC</div>
+        <div className="cc-topbar-logo">
+          <img src={logoBold} alt="BYC Logo" />
+        </div>
         {!sidebarCollapsed && (
           <div className="cc-topbar-brand-text">
             <span className="cc-topbar-brand-name">{activeEvent?.name || EVENT_CONFIG.shortName}</span>
@@ -81,7 +93,7 @@ export default function TopBar() {
       {/* Event & Site Selector in Header */}
       <div style={{ display: "flex", alignItems: "center", gap: 8, marginLeft: 12 }}>
         {/* Event Dropdown */}
-        <div className="dropdown">
+        <div className="dropdown" ref={eventMenuRef} style={{ position: "relative" }}>
           <button
             className="btn btn-sm d-flex align-items-center gap-2"
             style={{
@@ -92,59 +104,75 @@ export default function TopBar() {
               fontWeight: 600,
               padding: "4px 10px",
               borderRadius: 6,
+              cursor: "pointer",
             }}
             type="button"
-            data-bs-toggle="dropdown"
+            onClick={() => setEventMenuOpen((o) => !o)}
           >
             <span className="cc-live-dot" style={{ width: 7, height: 7 }} />
             <span style={{ maxWidth: 160, whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" }}>
               {activeEvent?.name || "Select Event"}
             </span>
-            <i className="bi bi-chevron-down" style={{ fontSize: 10, color: "var(--cc-text-muted)" }} />
+            <i className={`bi bi-chevron-${eventMenuOpen ? "up" : "down"}`} style={{ fontSize: 10, color: "var(--cc-text-muted)" }} />
           </button>
-          <ul
-            className="dropdown-menu dropdown-menu-dark shadow"
-            style={{
-              background: "var(--cc-card-bg)",
-              borderColor: "var(--cc-border)",
-              fontSize: 12,
-              minWidth: 240,
-            }}
-          >
-            <li className="dropdown-header text-muted" style={{ fontSize: 10, letterSpacing: 0.5 }}>
-              ACCESSIBLE FESTIVALS & EVENTS
-            </li>
-            {events.map((evt) => (
-              <li key={evt.id}>
-                <button
-                  className={`dropdown-item d-flex justify-content-between align-items-center py-2 ${evt.id === activeEventId ? "active" : ""}`}
-                  onClick={() => setActiveEvent(evt)}
-                >
-                  <div>
-                    <div style={{ fontWeight: 600 }}>{evt.name}</div>
-                    <small style={{ color: "var(--cc-text-muted)" }}>
-                      {evt.code} • {evt.site_count || 0} Sites
-                    </small>
-                  </div>
-                  <span className={`badge ${evt.status === "ACTIVE" || evt.status === "LIVE" ? "bg-success" : "bg-secondary"}`} style={{ fontSize: 9 }}>
-                    {evt.status}
-                  </span>
-                </button>
+          {eventMenuOpen && (
+            <ul
+              className="dropdown-menu dropdown-menu-dark shadow show"
+              style={{
+                display: "block",
+                position: "absolute",
+                top: "100%",
+                left: 0,
+                marginTop: 4,
+                background: "var(--cc-card-bg)",
+                borderColor: "var(--cc-border)",
+                fontSize: 12,
+                minWidth: 260,
+                zIndex: 1060,
+              }}
+            >
+              <li className="dropdown-header text-muted" style={{ fontSize: 10, letterSpacing: 0.5 }}>
+                ACCESSIBLE FESTIVALS & EVENTS
               </li>
-            ))}
-            <li><hr className="dropdown-divider" style={{ borderColor: "var(--cc-border)" }} /></li>
-            <li>
-              <Link to="/events" className="dropdown-item py-2 text-primary d-flex align-items-center gap-2">
-                <i className="bi bi-gear" />
-                Manage All Events
-              </Link>
-            </li>
-          </ul>
+              {events.map((evt) => (
+                <li key={evt.id}>
+                  <button
+                    className={`dropdown-item d-flex justify-content-between align-items-center py-2 ${evt.id === activeEventId ? "active" : ""}`}
+                    onClick={() => {
+                      setActiveEvent(evt);
+                      setEventMenuOpen(false);
+                    }}
+                  >
+                    <div>
+                      <div style={{ fontWeight: 600 }}>{evt.name}</div>
+                      <small style={{ color: "var(--cc-text-muted)" }}>
+                        {evt.code} • {evt.site_count || 0} Sites
+                      </small>
+                    </div>
+                    <span className={`badge ${evt.status === "ACTIVE" || evt.status === "LIVE" ? "bg-success" : "bg-secondary"}`} style={{ fontSize: 9 }}>
+                      {evt.status}
+                    </span>
+                  </button>
+                </li>
+              ))}
+              <li><hr className="dropdown-divider" style={{ borderColor: "var(--cc-border)" }} /></li>
+              <li>
+                <Link
+                  to="/events"
+                  className="dropdown-item py-2 text-primary d-flex align-items-center gap-2"
+                  onClick={() => setEventMenuOpen(false)}
+                >
+                  <i className="bi bi-gear" />
+                  Manage All Events
+                </Link>
+              </li>
+            </ul>
+          )}
         </div>
 
         {/* Site Dropdown (if active event has sites) */}
         {sites && sites.length > 0 && (
-          <div className="dropdown">
+          <div className="dropdown" ref={siteMenuRef} style={{ position: "relative" }}>
             <button
               className="btn btn-sm d-flex align-items-center gap-2"
               style={{
@@ -154,47 +182,62 @@ export default function TopBar() {
                 fontSize: 12,
                 padding: "4px 10px",
                 borderRadius: 6,
+                cursor: "pointer",
               }}
               type="button"
-              data-bs-toggle="dropdown"
+              onClick={() => setSiteMenuOpen((o) => !o)}
             >
               <i className="bi bi-geo-alt" style={{ fontSize: 11 }} />
               <span style={{ maxWidth: 120, whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" }}>
                 {sites.find((s) => s.id === activeSiteId)?.site_name || "All Sites"}
               </span>
-              <i className="bi bi-chevron-down" style={{ fontSize: 10 }} />
+              <i className={`bi bi-chevron-${siteMenuOpen ? "up" : "down"}`} style={{ fontSize: 10 }} />
             </button>
-            <ul
-              className="dropdown-menu dropdown-menu-dark shadow"
-              style={{
-                background: "var(--cc-card-bg)",
-                borderColor: "var(--cc-border)",
-                fontSize: 12,
-                minWidth: 200,
-              }}
-            >
-              <li>
-                <button
-                  className={`dropdown-item py-2 ${!activeSiteId ? "active" : ""}`}
-                  onClick={() => setActiveSiteId(null)}
-                >
-                  <i className="bi bi-grid me-2" />
-                  All Sites (Full Event)
-                </button>
-              </li>
-              <li><hr className="dropdown-divider" style={{ borderColor: "var(--cc-border)" }} /></li>
-              {sites.map((s) => (
-                <li key={s.id}>
+            {siteMenuOpen && (
+              <ul
+                className="dropdown-menu dropdown-menu-dark shadow show"
+                style={{
+                  display: "block",
+                  position: "absolute",
+                  top: "100%",
+                  left: 0,
+                  marginTop: 4,
+                  background: "var(--cc-card-bg)",
+                  borderColor: "var(--cc-border)",
+                  fontSize: 12,
+                  minWidth: 200,
+                  zIndex: 1060,
+                }}
+              >
+                <li>
                   <button
-                    className={`dropdown-item py-2 ${s.id === activeSiteId ? "active" : ""}`}
-                    onClick={() => setActiveSiteId(s.id)}
+                    className={`dropdown-item py-2 ${!activeSiteId ? "active" : ""}`}
+                    onClick={() => {
+                      setActiveSiteId(null);
+                      setSiteMenuOpen(false);
+                    }}
                   >
-                    <div style={{ fontWeight: 600 }}>{s.site_name}</div>
-                    <small style={{ color: "var(--cc-text-muted)" }}>{s.site_code}</small>
+                    <i className="bi bi-grid me-2" />
+                    All Sites (Full Event)
                   </button>
                 </li>
-              ))}
-            </ul>
+                <li><hr className="dropdown-divider" style={{ borderColor: "var(--cc-border)" }} /></li>
+                {sites.map((s) => (
+                  <li key={s.id}>
+                    <button
+                      className={`dropdown-item py-2 ${s.id === activeSiteId ? "active" : ""}`}
+                      onClick={() => {
+                        setActiveSiteId(s.id);
+                        setSiteMenuOpen(false);
+                      }}
+                    >
+                      <div style={{ fontWeight: 600 }}>{s.site_name}</div>
+                      <small style={{ color: "var(--cc-text-muted)" }}>{s.site_code}</small>
+                    </button>
+                  </li>
+                ))}
+              </ul>
+            )}
           </div>
         )}
       </div>

@@ -96,8 +96,24 @@ async def lifespan(app: FastAPI):
                 await CrowdService(session).get_summary()
                 await ZoneService(session).list_zones()
                 await CameraService(session).get_camera_stats()
-                await DashboardService(session).get_summary()
-            logger.info("DB cache pre-warmed successfully (summary, zones, camera stats, dashboard)")
+
+                # Pre-warm Command Center summary cache for both Today and Yesterday
+                dash_svc = DashboardService(session)
+                try:
+                    from app.models.event import Event
+                    from sqlalchemy import select
+                    evt_res = await session.execute(
+                        select(Event).where((Event.code == "KHB-2026") | (Event.name.ilike("%Khairatabad%"))).limit(1)
+                    )
+                    evt = evt_res.scalars().first()
+                    evt_id = evt.id if evt else None
+                    await dash_svc.get_summary(date_range="today", event_id=evt_id)
+                    await dash_svc.get_summary(date_range="yesterday", event_id=evt_id)
+                    await dash_svc.get_summary(date_range="today", event_id=None)
+                    await dash_svc.get_summary(date_range="yesterday", event_id=None)
+                except Exception as dash_ex:
+                    logger.warning(f"Dashboard cache pre-warm partial: {dash_ex}")
+            logger.info("DB cache pre-warmed successfully (summary, zones, camera stats, dashboard today/yesterday)")
         except Exception as e:
             logger.warning(f"DB cache pre-warm skipped (non-fatal): {e}")
 

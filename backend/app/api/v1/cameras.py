@@ -93,6 +93,7 @@ async def list_cameras(
 @router.post("", response_model=StandardResponse[CameraRead], status_code=status.HTTP_201_CREATED)
 async def create_camera(
     payload: CameraCreate,
+    ctx: EventContext = Depends(get_event_context),
     db: AsyncSession = Depends(get_db),
     current_user: User = Depends(require_permission(Permissions.CAMERA_MANAGE)),
 ):
@@ -100,6 +101,8 @@ async def create_camera(
     Onboard a new camera into the BYC C&C Platform.
     Validates uniqueness of camera_id, IP, and RTSP URL, verifies zone, and encrypts credentials.
     """
+    if payload.event_id is None and ctx.event_id is not None:
+        payload.event_id = ctx.event_id
     service = CameraService(db)
     camera = await service.create_camera(payload)
     return success_response(camera)
@@ -122,12 +125,13 @@ async def test_ad_hoc_stream(
 
 @router.get("/stats", response_model=StandardResponse[CameraStatsResponse])
 async def get_camera_stats(
+    ctx: EventContext = Depends(get_event_context),
     db: AsyncSession = Depends(get_db),
     current_user: User = Depends(require_permission(Permissions.CAMERA_READ)),
 ):
     """Returns camera infrastructure metrics and counts based on actual database status."""
     service = CameraService(db)
-    stats_data = await service.get_camera_stats()
+    stats_data = await service.get_camera_stats(event_id=ctx.event_id)
     return success_response(stats_data)
 
 

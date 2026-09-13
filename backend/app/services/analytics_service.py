@@ -12,6 +12,7 @@ from app.models.gate import Gate
 from app.models.incident import Incident
 from app.models.queue import QueueSnapshot
 from app.models.zone import Zone
+from app.services.counting_service import CanonicalCountingService
 from app.schemas.analytics import (
     AttendanceAnalyticsResponse,
     CameraAnalyticsResponse,
@@ -32,98 +33,58 @@ from app.schemas.analytics import (
 class AnalyticsService:
     def __init__(self, db: AsyncSession):
         self.db = db
+        self.counting_service = CanonicalCountingService(db)
 
     async def get_attendance_analytics(
         self, event_id: Optional[uuid.UUID] = None
     ) -> AttendanceAnalyticsResponse:
-        # 1. Use local event timezone (IST / Asia/Kolkata)
-        now = datetime.now(timezone.utc)
-        IST = timezone(timedelta(hours=5, minutes=30))
-        now_ist = now.astimezone(IST)
-        today_start_ist = datetime.combine(now_ist.date(), time.min, tzinfo=IST)
-        today_start_utc = today_start_ist.astimezone(timezone.utc)
+        evt = await self.counting_service.get_event(event_id)
+        target_event_id = evt.id if evt else event_id
+        tz = self.counting_service.get_event_timezone(evt)
+        now_local = datetime.now(timezone.utc).astimezone(tz)
+        today_date = now_local.date()
 
-        # 2. Check live active workers for live in-memory counts
-        live_in = 0
-        try:
-            from app.frs_engine.frs_service import _camera_workers, _workers_lock
-            acquired = _workers_lock.acquire(timeout=0.5)
-            if acquired:
-                try:
-                    for w in list(_camera_workers.values()):
-                        if getattr(w, "running", False):
-                            is_crowd = getattr(w, "crowd_ai_active", False) or getattr(w, "camera_type", "") == "CROWD" or not getattr(w, "is_frs", False)
-                            if is_crowd:
-                                live_in += getattr(w, "in_count", 0)
-                finally:
-                    _workers_lock.release()
-        except Exception:
-            pass
+        # Today's hourly inflow from canonical counting service
+        if target_event_id:
+            hourly_raw, peak_hour = await self.counting_service.get_hourly_breakdown(target_event_id, today_date)
+            hourly_items = [HourlyAttendanceItem(hour=h.hour, visitors=h.entry) for h in hourly_raw]
+        else:
+            hourly_items = [HourlyAttendanceItem(hour=f"{h:02d}:00", visitors=0) for h in range(24)]
+            peak_hour = "—"
 
-        # 3. Query today's hourly inflow from crowd_snapshots in IST (1-hour resolution)
-        stmt_hourly = text("""
-            SELECT 
-                EXTRACT(hour FROM timezone('Asia/Kolkata', timestamp)) AS h,
-                COALESCE(SUM(inflow_rate), 0) AS inflow
-            FROM crowd_snapshots
-            WHERE timestamp >= :today_start
-            GROUP BY 1
-            ORDER BY 1
-        """)
+        total_visitors_today = sum(h.visitors for h in hourly_items)
+        peak_count = max((h.visitors for h in hourly_items), default=0)
 
-        res_hourly = await self.db.execute(stmt_hourly, {"today_start": today_start_utc})
-        hour_map: Dict[int, int] = {h: 0 for h in range(24)}
-        for row in res_hourly.all():
-            if row.h is not None:
-                h_val = int(row.h)
-                if 0 <= h_val <= 23:
-                    hour_map[h_val] = int(row.inflow or 0)
-
-        # Inject only unpersisted live counts into current IST hour (prevents doubling)
-        cur_hour = now_ist.hour
-        db_in_today = sum(hour_map.values())
-        unpersisted_live = max(0, live_in - db_in_today)
-        hour_map[cur_hour] = hour_map.get(cur_hour, 0) + unpersisted_live
-
-        # 4. Build 1-HOUR interval slots for every single hour of the day (00:00 to 23:00)
-        hourly_items: List[HourlyAttendanceItem] = []
-        peak_hour = "—"
-        peak_count = 0
-        total_visitors_today = sum(hour_map.values())
-
-        for h in range(24):
-            v_count = hour_map.get(h, 0)
-            if v_count > peak_count and v_count > 0:
-                peak_count = v_count
-                peak_hour = f"{h:02d}:00"
-            hourly_items.append(HourlyAttendanceItem(hour=f"{h:02d}:00", visitors=v_count))
-
-        if peak_count == 0 and total_visitors_today > 0:
-            peak_count = total_visitors_today
-            peak_hour = f"{cur_hour:02d}:00"
-
-        # 5. Query daily historical inflow for past 7 days
-        cutoff_7d = datetime.combine((now - timedelta(days=7)).date(), time.min, tzinfo=timezone.utc)
-        stmt_daily = (
-            select(
-                func.date(CrowdSnapshot.timestamp).label("d"),
-                func.sum(CrowdSnapshot.inflow_rate).label("inflow"),
-            )
-            .where(CrowdSnapshot.timestamp >= cutoff_7d)
-            .group_by(func.date(CrowdSnapshot.timestamp))
-            .order_by(func.date(CrowdSnapshot.timestamp).asc())
-        )
-
-        res_daily = await self.db.execute(stmt_daily)
+        # Query daily historical inflow for past 7 days (Event-scoped)
         daily_items: List[DailyAttendanceItem] = []
-        for idx, row in enumerate(res_daily.all()):
-            d_label = f"Day {idx + 1}"
-            inf_val = int(row.inflow or 0)
-            daily_items.append(DailyAttendanceItem(day=d_label, visitors=inf_val))
+        if target_event_id:
+            cutoff_7d = datetime.combine((today_date - timedelta(days=6)), time.min, tzinfo=tz).astimezone(timezone.utc)
+            tz_name = (evt.timezone if evt and evt.timezone else "Asia/Kolkata").strip()
+            kolkata_ts = func.timezone(tz_name, CrowdSnapshot.timestamp)
 
-        # If today has visitors but wasn't in daily query, append/update today
-        if not daily_items and total_visitors_today > 0:
-            daily_items.append(DailyAttendanceItem(day="Day 1", visitors=total_visitors_today))
+            stmt_daily = (
+                select(
+                    func.date(kolkata_ts).label("d"),
+                    func.sum(CrowdSnapshot.inflow_rate).label("inflow"),
+                )
+                .where(
+                    CrowdSnapshot.event_id == target_event_id,
+                    CrowdSnapshot.timestamp >= cutoff_7d,
+                )
+                .group_by(func.date(kolkata_ts))
+                .order_by(func.date(kolkata_ts).asc())
+            )
+            res_daily = await self.db.execute(stmt_daily)
+            d_map = {str(r.d): int(r.inflow or 0) for r in res_daily.all() if r.d is not None}
+
+            for idx in range(7):
+                d_val = today_date - timedelta(days=6 - idx)
+                d_str = str(d_val)
+                v_cnt = d_map.get(d_str, 0)
+                if d_val == today_date:
+                    v_cnt = total_visitors_today
+                d_label = f"Day {idx + 1}"
+                daily_items.append(DailyAttendanceItem(day=d_label, visitors=v_cnt))
 
         avg_per_hour = total_visitors_today // max(1, len(hourly_items))
 
@@ -141,7 +102,7 @@ class AnalyticsService:
     ) -> IncidentAnalyticsResponse:
         stmt = select(Incident)
         if event_id:
-            stmt = stmt.where(or_(Incident.event_id == event_id, Incident.event_id.is_(None)))
+            stmt = stmt.where(Incident.event_id == event_id)
         res = await self.db.execute(stmt)
         incidents = list(res.scalars().all())
 
@@ -178,31 +139,22 @@ class AnalyticsService:
     async def get_camera_analytics(
         self, event_id: Optional[uuid.UUID] = None
     ) -> CameraAnalyticsResponse:
-        stmt_c = select(Camera)
+        stmt_c = select(Camera).where(Camera.is_active.is_(True), Camera.status != "removed")
         if event_id:
-            stmt_c = stmt_c.where(or_(Camera.event_id == event_id, Camera.event_id.is_(None)))
+            stmt_c = stmt_c.where(Camera.event_id == event_id)
         res_c = await self.db.execute(stmt_c)
         cams = list(res_c.scalars().all())
 
         total_cams = len(cams)
         online_cams = sum(1 for c in cams if c.enabled and (c.status or "").lower() == "online")
-        uptime_pct = round((online_cams / total_cams * 100), 1) if total_cams > 0 else 99.4
+        uptime_pct = round((online_cams / total_cams * 100), 1) if total_cams > 0 else 100.0
 
-        # Total detections from crowd_snapshots count + active live workers
+        # Total detections from crowd_snapshots count for this event
         stmt_det = select(func.count(CrowdSnapshot.id))
+        if event_id:
+            stmt_det = stmt_det.where(CrowdSnapshot.event_id == event_id)
         res_det = await self.db.execute(stmt_det)
         total_detections = int(res_det.scalar() or 0)
-        try:
-            from app.frs_engine.frs_service import _camera_workers, _workers_lock
-            acquired = _workers_lock.acquire(timeout=0.5)
-            if acquired:
-                try:
-                    for w in list(_camera_workers.values()):
-                        total_detections += getattr(w, "detections_count", 0)
-                finally:
-                    _workers_lock.release()
-        except Exception:
-            pass
 
         return CameraAnalyticsResponse(
             uptime=f"{uptime_pct}%",
@@ -224,35 +176,64 @@ class AnalyticsService:
         now_dt = datetime.now(timezone.utc)
         now_iso = now_dt.isoformat()
 
-        # 1. Fetch Zones
+        # 1. Fetch Zones strictly for this event
         stmt_z = select(Zone)
         if event_id:
-            stmt_z = stmt_z.where(or_(Zone.event_id == event_id, Zone.event_id.is_(None)))
+            stmt_z = stmt_z.where(Zone.event_id == event_id)
         stmt_z = stmt_z.order_by(Zone.zone_code)
         res_z = await self.db.execute(stmt_z)
         zones_db = list(res_z.scalars().all())
-        if not zones_db:
-            zones_db = list((await self.db.execute(select(Zone).order_by(Zone.zone_code))).scalars().all())
 
-        # 2. Fetch Gates
-        stmt_g = select(Gate).order_by(Gate.gate_code)
+        # 2. Fetch Gates strictly for this event
+        stmt_g = select(Gate)
+        if event_id:
+            stmt_g = stmt_g.where(Gate.event_id == event_id)
+        stmt_g = stmt_g.order_by(Gate.gate_code)
         gates_db = list((await self.db.execute(stmt_g)).scalars().all())
 
-        # 3. Fetch latest Queue Snapshots
-        stmt_q = select(QueueSnapshot).order_by(QueueSnapshot.timestamp.desc()).limit(8)
+        # 3. Fetch latest Queue Snapshots strictly for this event
+        stmt_q = select(QueueSnapshot)
+        if event_id:
+            stmt_q = stmt_q.where(QueueSnapshot.event_id == event_id)
+        stmt_q = stmt_q.order_by(QueueSnapshot.timestamp.desc()).limit(8)
         q_snaps = list((await self.db.execute(stmt_q)).scalars().all())
 
-        # 4. In-memory live camera workers
+        # 4. In-memory live camera workers strictly for this event
         live_in = 0
         live_out = 0
         live_occ = 0
         active_worker_cameras = []
+        event_cam_codes = None
+        if event_id:
+            stmt_cams = select(Camera.id, Camera.camera_code).where(
+                Camera.event_id == event_id,
+                Camera.is_active.is_(True),
+                Camera.status != "removed",
+            )
+            res_cams = await self.db.execute(stmt_cams)
+            event_cam_codes = set()
+            for cid, code in res_cams.all():
+                if cid:
+                    event_cam_codes.add(str(cid))
+                if code:
+                    event_cam_codes.add(str(code))
+
         try:
             from app.frs_engine.frs_service import _camera_workers, _workers_lock
             acquired = _workers_lock.acquire(timeout=0.5)
             if acquired:
                 try:
                     for cid, w in list(_camera_workers.items()):
+                        if event_cam_codes is not None:
+                            w_cid = str(cid)
+                            w_cam_id = str(getattr(w, "camera_id", ""))
+                            w_code = str(getattr(w, "camera_code", ""))
+                            if (
+                                w_cid not in event_cam_codes
+                                and w_cam_id not in event_cam_codes
+                                and w_code not in event_cam_codes
+                            ):
+                                continue
                         if getattr(w, "running", False):
                             active_worker_cameras.append(cid)
                             is_crowd = getattr(w, "crowd_ai_active", False) or getattr(w, "camera_type", "") == "CROWD" or not getattr(w, "is_frs", False)
@@ -519,158 +500,68 @@ class AnalyticsService:
         self, event_id: Optional[uuid.UUID] = None
     ) -> Festival10DaysResponse:
         """
-        10-Day Festival Day-Wise Attendance & Footfall Engine.
-        Calculates exact day-wise counts:
-        - Date, Day name (e.g. 12th Monday / Mon 07 Sep)
-        - Entry Count (across all 4 Entry gates)
-        - Exit Count (across all 4 Exit gates)
-        - Total Count = Entry Count + Exit Count (Formula strictly matching user command)
+        Operational Period Festival Day-Wise Attendance & Footfall Engine.
+        Calculates exact day-wise counts dynamically from event.start_date to event.end_date:
+        - Date, Day name (e.g. Day 1: 14 Sep (Mon))
+        - Entry Count
+        - Exit Count
+        - Total Count = Entry Count
         - Net Inside Occupancy = max(0, Entry - Exit)
         - Peak Hour
         - Status: COMPLETED, TODAY, or UPCOMING
         """
-        now = datetime.now(timezone.utc)
-        IST = timezone(timedelta(hours=5, minutes=30))
-        now_ist = now.astimezone(IST)
-        today_date = now_ist.date()
-
-        # 1. Fetch Event record or default to Khairatabad Ganesh Festival 2026
-        event = None
-        if event_id:
-            stmt_e = select(Event).where(Event.id == event_id)
-            event = (await self.db.execute(stmt_e)).scalars().first()
-        if not event:
-            stmt_e = select(Event).where(Event.name.ilike("%Khairatabad%")).limit(1)
-            event = (await self.db.execute(stmt_e)).scalars().first()
-
-        event_name = event.name if event else "Khairatabad Ganesh Festival 2026"
-        fest_start_dt = event.start_date if (event and event.start_date) else datetime(2026, 9, 7, 0, 0, 0, tzinfo=timezone.utc)
-        fest_start_ist = fest_start_dt.astimezone(IST)
-        fest_start_date = fest_start_ist.date()
-
-        # 2. In-memory live camera workers for today's active counts
-        live_in = 0
-        live_out = 0
-        try:
-            from app.frs_engine.frs_service import _camera_workers, _workers_lock
-            acquired = _workers_lock.acquire(timeout=0.5)
-            if acquired:
-                try:
-                    for w in list(_camera_workers.values()):
-                        if getattr(w, "running", False):
-                            is_crowd = getattr(w, "crowd_ai_active", False) or getattr(w, "camera_type", "") == "CROWD" or not getattr(w, "is_frs", False)
-                            if is_crowd:
-                                live_in += getattr(w, "in_count", 0)
-                                live_out += getattr(w, "out_count", 0)
-                finally:
-                    _workers_lock.release()
-        except Exception:
-            pass
-
-        # 3. Query all day-wise totals from crowd_snapshots in Asia/Kolkata timezone
-        stmt_daily = text("""
-            SELECT 
-                DATE(timezone('Asia/Kolkata', timestamp)) AS day_dt,
-                COALESCE(SUM(inflow_rate), 0) AS entries,
-                COALESCE(SUM(outflow_rate), 0) AS exits
-            FROM crowd_snapshots
-            GROUP BY 1
-        """)
-        res_daily = await self.db.execute(stmt_daily)
-        db_day_map = {}
-        for row in res_daily.all():
-            if row.day_dt is not None:
-                d_str = str(row.day_dt)
-                db_day_map[d_str] = {
-                    "entries": int(row.entries or 0),
-                    "exits": int(row.exits or 0),
-                }
-
-        # Query peak hours by day
-        stmt_peak = text("""
-            SELECT 
-                DATE(timezone('Asia/Kolkata', timestamp)) AS day_dt,
-                EXTRACT(hour FROM timezone('Asia/Kolkata', timestamp)) AS h,
-                COALESCE(SUM(inflow_rate + outflow_rate), 0) AS volume
-            FROM crowd_snapshots
-            GROUP BY 1, 2
-            ORDER BY 1, volume DESC
-        """)
-        res_peak = await self.db.execute(stmt_peak)
-        peak_map = {}
-        for row in res_peak.all():
-            if row.day_dt is not None:
-                d_str = str(row.day_dt)
-                if d_str not in peak_map and int(row.volume or 0) > 0:
-                    h_val = int(row.h)
-                    peak_map[d_str] = f"{h_val:02d}:00 - {h_val+1:02d}:00"
-
-        # 4. Generate the exact 10 days of the festival
-        days: List[FestivalDayAttendanceItem] = []
-        cur_day_num = 1
-        total_in_all = 0
-        total_out_all = 0
-
-        for i in range(10):
-            day_d = fest_start_date + timedelta(days=i)
-            day_d_str = str(day_d)
-            day_name = day_d.strftime("%A")
-            day_label = f"Day {i+1}: {day_d.strftime('%d %b')} ({day_name[:3]})"
-
-            day_stats = db_day_map.get(day_d_str, {"entries": 0, "exits": 0})
-            entries = day_stats["entries"]
-            exits = day_stats["exits"]
-            peak = peak_map.get(day_d_str, "—")
-
-            if day_d == today_date:
-                cur_day_num = i + 1
-                status = "TODAY"
-                # Add only unpersisted live delta (prevents doubling)
-                extra_in = max(0, live_in - entries)
-                extra_out = max(0, live_out - exits)
-                entries += extra_in
-                exits += extra_out
-                if peak == "—" and (entries > 0 or exits > 0):
-                    peak = f"{now_ist.hour:02d}:00 - {now_ist.hour+1:02d}:00"
-            elif day_d < today_date:
-                status = "COMPLETED"
-            else:
-                status = "UPCOMING"
-
-            # Formula Requirement: Total Count = Entry + Exit
-            total_traffic = entries + exits
-            net_inside = max(0, entries - exits)
-
-            total_in_all += entries
-            total_out_all += exits
-
-            days.append(
-                FestivalDayAttendanceItem(
-                    day_number=i + 1,
-                    date=day_d_str,
-                    day_name=day_name,
-                    label=day_label,
-                    entry_count=entries,
-                    exit_count=exits,
-                    total_count=total_traffic,
-                    net_inside=net_inside,
-                    peak_hour=peak,
-                    status=status,
-                )
+        evt = await self.counting_service.get_event(event_id)
+        target_event_id = evt.id if evt else event_id
+        if not target_event_id:
+            return Festival10DaysResponse(
+                event_id=None,
+                event_name="Festival Event",
+                start_date="",
+                end_date="",
+                current_day=1,
+                total_entries_10days=0,
+                total_exits_10days=0,
+                grand_total_footfall=0,
+                days=[],
             )
 
-        grand_total = total_in_all + total_out_all
+        tz = self.counting_service.get_event_timezone(evt)
+        now_local = datetime.now(timezone.utc).astimezone(tz)
+        today_date = now_local.date()
+
+        start_date = evt.start_date.astimezone(tz).date() if evt.start_date else today_date
+        end_date = evt.end_date.astimezone(tz).date() if evt.end_date else (start_date + timedelta(days=10))
+
+        days_list, total_entries, total_exits, cur_day_num = (
+            await self.counting_service.get_festival_daily_breakdown(target_event_id)
+        )
+
+        response_days = [
+            FestivalDayAttendanceItem(
+                day_number=d.day_number,
+                date=d.date,
+                day_name=d.day_name,
+                label=d.label,
+                entry_count=d.entry_count,
+                exit_count=d.exit_count,
+                total_count=d.total_count,
+                net_inside=d.net_inside,
+                peak_hour=d.peak_hour,
+                status=d.status,
+            )
+            for d in days_list
+        ]
 
         return Festival10DaysResponse(
-            event_id=str(event.id) if event else None,
-            event_name=event_name,
-            start_date=str(fest_start_date),
-            end_date=str(fest_start_date + timedelta(days=9)),
+            event_id=str(evt.id),
+            event_name=evt.name,
+            start_date=str(start_date),
+            end_date=str(end_date),
             current_day=cur_day_num,
-            total_entries_10days=total_in_all,
-            total_exits_10days=total_out_all,
-            grand_total_footfall=grand_total,
-            days=days,
+            total_entries_10days=total_entries,
+            total_exits_10days=total_exits,
+            grand_total_footfall=total_entries,
+            days=response_days,
         )
 
 

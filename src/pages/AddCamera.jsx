@@ -4,6 +4,7 @@ import { useState, useEffect } from "react";
 import { useNavigate } from "react-router-dom";
 import { createCamera, testAdHocStream, getZones } from "../services/cameraService.js";
 import { useAppStore } from "../store/useAppStore.js";
+import { useEventStore } from "../store/useEventStore.js";
 
 const STEPS = [
   { step: 1, title: "Camera Info", desc: "Identifier & label" },
@@ -25,6 +26,7 @@ export default function AddCamera() {
   const navigate = useNavigate();
   const theme = useAppStore((s) => s.theme);
   const isLight = theme === "light";
+  const activeEventId = useEventStore((s) => s.activeEventId);
 
   const [currentStep, setCurrentStep] = useState(1);
   const [zones, setZones] = useState([]);
@@ -163,6 +165,7 @@ export default function AddCamera() {
       is_ptz: form.is_ptz,
       resolution: testResult?.resolution || "1080p",
       fps: testResult?.fps || 25,
+      event_id: activeEventId || null,
     };
 
     try {

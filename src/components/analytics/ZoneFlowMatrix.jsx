@@ -237,7 +237,7 @@ export default function ZoneFlowMatrix({ flowData, loading }) {
 
                     <div style={{ textAlign: "right", whiteSpace: "nowrap", marginLeft: 10 }}>
                       <div style={{ fontFamily: "var(--cc-font-mono)", fontWeight: 700, color: "var(--cc-text-primary)" }}>
-                        {g.flow_rate_per_min} <span style={{ fontSize: 9, color: "var(--cc-text-muted)" }}>pax/m</span>
+                        {g.flow_rate_per_min} <span style={{ fontSize: 9, color: "var(--cc-text-muted)" }}>/min</span>
                       </div>
                       <span
                         style={{

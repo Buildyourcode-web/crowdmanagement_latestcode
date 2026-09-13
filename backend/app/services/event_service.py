@@ -1,4 +1,5 @@
 import uuid
+from datetime import datetime, timezone
 from typing import List, Optional
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -14,9 +15,47 @@ from app.models.user_access import UserEventAccess
 from app.schemas.event import EventCreate, EventRead, EventSummary, EventUpdate
 
 
+def _normalize_dt(dt: Optional[datetime]) -> Optional[datetime]:
+    """Ensure datetime has UTC timezone for reliable comparison."""
+    if dt is None:
+        return None
+    if dt.tzinfo is None:
+        return dt.replace(tzinfo=timezone.utc)
+    return dt.astimezone(timezone.utc)
+
+
 class EventService:
     def __init__(self, db: AsyncSession):
         self.db = db
+
+    def _evaluate_timing_lifecycle(self, e: Event, now_utc: datetime) -> bool:
+        """
+        Auto-transitions event status based on operational start_date and end_date:
+        - If SCHEDULED and now >= start_date and now <= end_date -> ACTIVE
+        - If SCHEDULED, ACTIVE, or LIVE and now > end_date -> COMPLETED
+        Returns True if status changed.
+        """
+        if not e.start_date or not e.end_date:
+            return False
+        # Do not override manual operator overrides (DRAFT, PAUSED, ARCHIVED)
+        if e.status in ("DRAFT", "PAUSED", "ARCHIVED"):
+            return False
+
+        s_utc = _normalize_dt(e.start_date)
+        e_utc = _normalize_dt(e.end_date)
+        if not s_utc or not e_utc:
+            return False
+
+        changed = False
+        if e.status == "SCHEDULED" and s_utc <= now_utc <= e_utc:
+            e.status = "ACTIVE"
+            e.is_active = True
+            changed = True
+        elif e.status in ("SCHEDULED", "ACTIVE", "LIVE") and now_utc > e_utc:
+            e.status = "COMPLETED"
+            e.is_active = False
+            changed = True
+        return changed
 
     async def list_accessible_events(self, user: User) -> List[EventRead]:
         """Lists events the user has explicit or superadmin access to."""
@@ -44,6 +83,15 @@ class EventService:
 
         if not events:
             return []
+
+        # Automatic lifecycle evaluation based on real-world operational timings
+        now_utc = datetime.now(timezone.utc)
+        any_changed = False
+        for e in events:
+            if self._evaluate_timing_lifecycle(e, now_utc):
+                any_changed = True
+        if any_changed:
+            await self.db.commit()
 
         event_ids = [e.id for e in events]
 
@@ -113,6 +161,12 @@ class EventService:
         if not e:
             raise HTTPException(status_code=404, detail="Event not found")
 
+        # Automatic lifecycle evaluation based on real-world operational timings
+        now_utc = datetime.now(timezone.utc)
+        if self._evaluate_timing_lifecycle(e, now_utc):
+            await self.db.commit()
+            await self.db.refresh(e)
+
         is_super = user.is_super_admin
         user_role = "SUPER_ADMIN"
         if not is_super:
@@ -165,6 +219,21 @@ class EventService:
         if existing:
             raise HTTPException(status_code=400, detail=f"Event code '{data.code}' already exists")
 
+        now_utc = datetime.now(timezone.utc)
+        s_utc = _normalize_dt(data.start_date)
+        e_utc = _normalize_dt(data.end_date)
+
+        status_val = data.status
+        is_active_val = data.is_active
+        # Auto-activate if operational timing is current
+        if status_val == "SCHEDULED" and s_utc and e_utc:
+            if s_utc <= now_utc <= e_utc:
+                status_val = "ACTIVE"
+                is_active_val = True
+            elif now_utc > e_utc:
+                status_val = "COMPLETED"
+                is_active_val = False
+
         new_event = Event(
             code=data.code.upper(),
             name=data.name,
@@ -172,8 +241,8 @@ class EventService:
             year=data.year,
             start_date=data.start_date,
             end_date=data.end_date,
-            status=data.status,
-            is_active=data.is_active,
+            status=status_val,
+            is_active=is_active_val,
             timezone=data.timezone,
             location=data.location,
             city=data.city,

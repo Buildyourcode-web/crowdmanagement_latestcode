@@ -118,6 +118,11 @@ class CameraService:
             stream_status=c.stream_status or "NOT_TESTED",
             stream_stability=c.stream_stability or "UNKNOWN",
             enabled=c.enabled,
+            is_active=getattr(c, "is_active", True) if getattr(c, "is_active", None) is not None else True,
+            active_from=getattr(c, "active_from", None),
+            removed_at=getattr(c, "removed_at", None),
+            event_id=getattr(c, "event_id", None),
+            site_id=getattr(c, "site_id", None),
             is_frs_camera=c.is_frs_camera,
             is_ptz=c.is_ptz,
             resolution=c.resolution or "1080p",
@@ -166,8 +171,8 @@ class CameraService:
         return [self._build_camera_read(c) for c in cameras], total
 
 
-    async def get_camera_by_code(self, camera_code: str) -> CameraRead:
-        camera = await self.camera_repo.get_by_code(camera_code)
+    async def get_camera_by_code(self, camera_code: str, active_only: bool = True) -> CameraRead:
+        camera = await self.camera_repo.get_by_code(camera_code, active_only=active_only)
         if not camera:
             raise HTTPException(
                 status_code=status.HTTP_404_NOT_FOUND,
@@ -175,8 +180,8 @@ class CameraService:
             )
         return self._build_camera_read(camera)
 
-    async def get_camera_model(self, camera_code: str) -> Camera:
-        camera = await self.camera_repo.get_by_code(camera_code)
+    async def get_camera_model(self, camera_code: str, active_only: bool = True) -> Camera:
+        camera = await self.camera_repo.get_by_code(camera_code, active_only=active_only)
         if not camera:
             raise HTTPException(
                 status_code=status.HTTP_404_NOT_FOUND,
@@ -207,31 +212,24 @@ class CameraService:
         _stats_cache_time = time.time()
         return res
 
-    async def get_camera_stats(self) -> CameraStatsResponse:
-        global _stats_cache, _stats_cache_time, _is_refreshing_stats
-        now = time.time()
+    async def get_camera_stats(self, event_id: Optional[uuid.UUID] = None) -> CameraStatsResponse:
+        cameras, total = await self.camera_repo.list_cameras(limit=2000, event_id=event_id)
+        online = sum(1 for c in cameras if (c.status == "online" or c.stream_status == "ONLINE"))
+        degraded = sum(1 for c in cameras if (c.status == "degraded" or c.stream_status == "DEGRADED"))
+        offline = sum(1 for c in cameras if (c.status == "offline" or c.stream_status == "OFFLINE"))
+        not_tested = sum(1 for c in cameras if c.stream_status == "NOT_TESTED")
+        frs_count = sum(1 for c in cameras if c.is_frs_camera)
+        ptz_count = sum(1 for c in cameras if c.is_ptz)
 
-        if _stats_cache is not None:
-            if (now - _stats_cache_time) > _STATS_TTL and not _is_refreshing_stats:
-                _is_refreshing_stats = True
-                asyncio.create_task(_background_refresh_camera_stats())
-            return _stats_cache
-
-        # Cold fallback so user never waits
-        default_stats = CameraStatsResponse(
-            total=0,
-            online=0,
-            degraded=0,
-            offline=0,
-            not_tested=0,
-            frs_count=0,
-            ptz_count=0,
+        return CameraStatsResponse(
+            total=total,
+            online=online,
+            degraded=degraded,
+            offline=offline,
+            not_tested=not_tested,
+            frs_count=frs_count,
+            ptz_count=ptz_count,
         )
-        _stats_cache = default_stats
-        if not _is_refreshing_stats:
-            _is_refreshing_stats = True
-            asyncio.create_task(_background_refresh_camera_stats())
-        return default_stats
 
     async def get_camera_health(self, camera_code: str) -> CameraHealth:
         camera = await self.get_camera_model(camera_code)
@@ -355,6 +353,8 @@ class CameraService:
             protocol=data.protocol or "rtsp",
             zone_id=zone_id,
             zone_code=zone_code,
+            event_id=data.event_id,
+            site_id=data.site_id,
             location_name=data.location_name,
             latitude=data.latitude,
             longitude=data.longitude,
@@ -364,6 +364,9 @@ class CameraService:
             stream_status="NOT_TESTED",
             stream_stability="UNKNOWN",
             enabled=True,
+            is_active=True,
+            active_from=datetime.now(timezone.utc),
+            removed_at=None,
             is_frs_camera=is_frs,
             is_ptz=data.is_ptz,
             resolution=data.resolution or "1080p",
@@ -472,6 +475,10 @@ class CameraService:
             camera.is_frs_camera = data.is_frs_camera
         if data.is_ptz is not None:
             camera.is_ptz = data.is_ptz
+        if data.event_id is not None:
+            camera.event_id = data.event_id
+        if data.site_id is not None:
+            camera.site_id = data.site_id
 
         await self.db.commit()
         await self.db.refresh(camera)
@@ -510,11 +517,12 @@ class CameraService:
 
     async def delete_camera(self, camera_code: str) -> Dict[str, Any]:
         """
-        Permanently deletes camera, cleans up relations, unlinks events/metrics,
-        and halts all streaming threads and AI inference pipelines.
+        Soft-deletes a camera by marking is_active=False, status='removed', enabled=False,
+        and removed_at=now. Halts all streaming threads and AI inference pipelines.
+        CRITICAL: Never deletes database records and NEVER sets historical snapshot foreign keys to NULL.
         """
         global _stats_cache
-        cam = await self.camera_repo.get_by_code(camera_code)
+        cam = await self.camera_repo.get_by_code(camera_code, active_only=False)
 
         target_code = cam.camera_code if cam else camera_code
 
@@ -539,54 +547,31 @@ class CameraService:
         except Exception:
             pass
 
-        # 3. If in database, nullify foreign key references and delete
+        # 3. Soft-delete camera record (Preserve historical data forever)
         in_db = False
         if cam:
             in_db = True
-            from sqlalchemy import text
-            try:
-                cid = cam.id
-                # Step 1: Soft-disable first — even if hard delete fails, camera won't be restored on startup
-                await self.db.execute(
-                    text("UPDATE cameras SET enabled = FALSE, status = 'offline', stream_status = 'OFFLINE' WHERE id = :cid"),
-                    {"cid": cid}
-                )
-                await self.db.commit()
-
-                # Step 2: Nullify FK references then hard delete
-                # asyncpg does NOT support multiple statements in one text() call.
-                # Each statement must be executed individually.
-                await self.db.execute(text("UPDATE crowd_snapshots SET camera_id = NULL WHERE camera_id = :cid"), {"cid": cid})
-                await self.db.execute(text("UPDATE queue_snapshots SET camera_id = NULL WHERE camera_id = :cid"), {"cid": cid})
-                await self.db.execute(text("UPDATE frs_candidates SET camera_id = NULL WHERE camera_id = :cid"), {"cid": cid})
-                await self.db.execute(text("UPDATE alerts SET camera_id = NULL WHERE camera_id = :cid"), {"cid": cid})
-                await self.db.execute(text("DELETE FROM camera_roi_configurations WHERE camera_id = :cid"), {"cid": cid})
-                await self.db.execute(text("DELETE FROM camera_ai_profile_assignments WHERE camera_id = :cid"), {"cid": cid})
-                await self.db.execute(text("DELETE FROM ai_pipeline_deployments WHERE camera_id = :cid"), {"cid": cid})
-                await self.db.execute(text("DELETE FROM cameras WHERE id = :cid"), {"cid": cid})
-                await self.db.commit()
-            except Exception as e:
-                logger.warning(f"Error unlinking and deleting camera {cam.camera_code}: {e}")
-                await self.db.rollback()
-                try:
-                    await self.db.delete(cam)
-                    await self.db.commit()
-                except Exception:
-                    pass
+            cam.is_active = False
+            cam.status = "removed"
+            cam.enabled = False
+            cam.stream_status = "OFFLINE"
+            cam.removed_at = datetime.now(timezone.utc)
+            self.db.add(cam)
+            await self.db.commit()
 
             try:
                 asyncio.create_task(
                     event_bus.publish(
                         channel="cameras",
                         event_type="CAMERA_DELETED",
-                        payload={"camera_id": cam.camera_code},
+                        payload={"camera_id": cam.camera_code, "status": "removed"},
                     )
                 )
             except Exception:
                 pass
 
         _stats_cache = None
-        logger.info(f"[CameraService] Camera {target_code} deleted (in_database={in_db})")
+        logger.info(f"[CameraService] Camera {target_code} soft-deleted/retired (in_database={in_db})")
         return {"deleted": True, "camera_code": target_code, "in_database": in_db}
 
     async def test_camera_stream(self, camera_code: str, timeout_sec: float = 6.0) -> RTSPTestResponse:

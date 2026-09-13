@@ -5,7 +5,7 @@ Single-flight, bulk-query aggregation service providing unified, real-time
 festival operations telemetry without N+1 database queries or synthetic values.
 """
 
-from datetime import datetime, timedelta, timezone
+from datetime import datetime, time as dtime, timedelta, timezone
 import asyncio
 import time
 import uuid
@@ -30,6 +30,7 @@ from app.models.zone import Zone
 from app.repositories.alert_repository import AlertRepository
 from app.repositories.camera_repository import CameraRepository
 from app.repositories.zone_repository import ZoneRepository
+from app.services.counting_service import CanonicalCountingService
 from app.schemas.dashboard import (
     AICameraHealth,
     ActiveCriticalEventItem,
@@ -67,6 +68,7 @@ class DashboardService:
         self.camera_repo = CameraRepository(db)
         self.zone_repo = ZoneRepository(db)
         self.alert_repo = AlertRepository(db)
+        self.counting_service = CanonicalCountingService(db)
 
     async def get_summary(
         self,
@@ -185,73 +187,66 @@ class DashboardService:
         # -------------------------------------------------------------------
         # 1. Festival Event & Days Information
         # -------------------------------------------------------------------
-        if event_id:
-            stmt_event = select(Event).where(Event.id == event_id)
-        else:
-            stmt_event = select(Event).where((Event.code == "KHB-2026") | (Event.name.ilike("%Khairatabad%"))).limit(1)
-        res_event = await self.db.execute(stmt_event)
-        active_event = res_event.scalars().first()
-        if not active_event:
-            stmt_event = select(Event).where(Event.status.in_(["ACTIVE", "LIVE"])).order_by(Event.start_date.desc()).limit(1)
-            res_event = await self.db.execute(stmt_event)
-            active_event = res_event.scalars().first()
-        _step("1-event-query")
+        active_event = await self.counting_service.get_event(event_id)
+        target_event_id = active_event.id if active_event else event_id
+        tz = self.counting_service.get_event_timezone(active_event)
+        now_local = now_dt.astimezone(tz)
+        today_date = now_local.date()
 
         festival_day_current = 1
-        festival_day_total = 10
+        festival_day_total = 11
         if active_event and active_event.start_date and active_event.end_date:
-            total_days = max(1, (active_event.end_date.date() - active_event.start_date.date()).days + 1)
-            cur_day = max(1, min(total_days, (now_dt.date() - active_event.start_date.date()).days + 1))
+            s_date = active_event.start_date.astimezone(tz).date()
+            e_date = active_event.end_date.astimezone(tz).date()
+            total_days = max(1, (e_date - s_date).days + 1)
+            cur_day = max(1, min(total_days, (today_date - s_date).days + 1))
             festival_day_current = cur_day
             festival_day_total = total_days
 
         festival_day_label = f"Day {festival_day_current} of {festival_day_total}"
+        _step("1-event-query")
 
         # -------------------------------------------------------------------
-        # 2. Cameras & Live AI Pipeline States (Scoped to Event & Sites)
+        # 2. Cameras & Live AI Pipeline States (Strictly Scoped to Event & Sites, Active Only)
         # -------------------------------------------------------------------
-        stmt_cams = select(Camera)
-        if event_id:
-            stmt_cams = stmt_cams.where(or_(Camera.event_id == event_id, Camera.event_id.is_(None)))
+        stmt_cams = select(Camera).where(
+            Camera.is_active.is_(True),
+            Camera.status != "removed",
+        )
+        if target_event_id:
+            stmt_cams = stmt_cams.where(Camera.event_id == target_event_id)
         if allowed_site_ids:
-            stmt_cams = stmt_cams.where(or_(Camera.site_id.in_(allowed_site_ids), Camera.site_id.is_(None)))
+            stmt_cams = stmt_cams.where(Camera.site_id.in_(allowed_site_ids))
         stmt_cams = stmt_cams.order_by(Camera.camera_code)
         res_cams = await self.db.execute(stmt_cams)
         all_cameras = list(res_cams.scalars().all())
         _step("2-cameras-query")
 
-        # Fallback: if selected event filter matched 0 cameras, retrieve festival fleet so live feeds are not hidden
-        if not all_cameras:
-            stmt_cams_fallback = select(Camera).order_by(Camera.camera_code)
-            res_cams_fallback = await self.db.execute(stmt_cams_fallback)
-            all_cameras = list(res_cams_fallback.scalars().all())
+        event_camera_codes = {c.camera_code for c in all_cameras}
 
-        # Check live AI pipelines & FRS workers
-        live_crowd_pipes = {p.camera_code: p for p in CrowdPipelineRegistry.list_pipelines() if p.state == PipelineState.RUNNING}
-        live_queue_pipes = {p.config.camera_code: p for p in QueuePipelineRegistry.list_all() if p.state == PipelineState.RUNNING}
+        # Check live AI pipelines & FRS workers matching this event's active cameras
+        live_crowd_pipes = {
+            p.camera_code: p for p in CrowdPipelineRegistry.list_pipelines()
+            if p.state == PipelineState.RUNNING and p.camera_code in event_camera_codes
+        }
+        live_queue_pipes = {
+            p.config.camera_code: p for p in QueuePipelineRegistry.list_all()
+            if p.state == PipelineState.RUNNING and p.config.camera_code in event_camera_codes
+        }
 
-        # Check FRS / Crowd AI workers in frs_service
         frs_running_count = 0
-        live_in_count = 0
-        live_out_count = 0
-        live_occupancy_count = 0
         live_frs_workers = {}
         try:
             from app.frs_engine.frs_service import _camera_workers, _workers_lock
-            # Use timeout=0.5s — camera RTSP thread holds lock during frame decode
             acquired = _workers_lock.acquire(timeout=0.5)
             if acquired:
                 try:
                     for cid, w in list(_camera_workers.items()):
-                        if getattr(w, "running", False):
-                            if getattr(w, "is_frs", False):
-                                frs_running_count += 1
-                            is_crowd = getattr(w, "crowd_ai_active", False) or getattr(w, "camera_type", "") == "CROWD" or not getattr(w, "is_frs", False)
-                            if is_crowd:
-                                live_in_count += getattr(w, "in_count", 0)
-                                live_out_count += getattr(w, "out_count", 0)
-                                live_occupancy_count += getattr(w, "occupancy_count", 0)
-                            live_frs_workers[cid] = w
+                        if cid in event_camera_codes or getattr(w, "camera_id", "") in event_camera_codes:
+                            if getattr(w, "running", False):
+                                if getattr(w, "is_frs", False):
+                                    frs_running_count += 1
+                                live_frs_workers[cid] = w
                 finally:
                     _workers_lock.release()
         except Exception:
@@ -273,8 +268,6 @@ class DashboardService:
 
         crowd_ai_running = len(live_crowd_pipes) + sum(1 for s in live_frs_workers.values() if getattr(s, "crowd_ai_active", False))
         queue_ai_running = len(live_queue_pipes) + sum(1 for s in live_frs_workers.values() if getattr(s, "crowd_ai_active", False) and "QUEUE" in getattr(s, "ai_purposes", []))
-        if frs_running_count == 0 and any(getattr(s, "is_frs", False) for s in live_frs_workers.values()):
-            frs_running_count = sum(1 for s in live_frs_workers.values() if getattr(s, "is_frs", False))
         _step("3-workers-lock")
 
         health = AICameraHealth(
@@ -288,64 +281,26 @@ class DashboardService:
         )
 
         # -------------------------------------------------------------------
-        # 3. Total Festival Visitors & Historical Entry / Exit Aggregation
+        # 3. Canonical Festival Totals & Selected Range Aggregation
         # -------------------------------------------------------------------
-        # Cumulative festival entries and exits from crowd snapshots
-        stmt_tot_entries = select(
-            func.coalesce(func.sum(CrowdSnapshot.inflow_rate), 0).label("tot_in"),
-            func.coalesce(func.sum(CrowdSnapshot.outflow_rate), 0).label("tot_out"),
-        )
-        res_tot = await self.db.execute(stmt_tot_entries)
-        tot_row = res_tot.first()
-        db_total_entries = int(tot_row.tot_in if tot_row else 0)
-        db_total_exits = int(tot_row.tot_out if tot_row else 0)
-        _step("4-total-entries")
+        if target_event_id:
+            fest_total_in, fest_total_out, fest_occ = await self.counting_service.get_festival_totals(target_event_id)
+            range_in, range_out, range_occ = await self.counting_service.get_range_counts(target_event_id, date_range)
+            today_in, today_out, today_occ = await self.counting_service.get_range_counts(target_event_id, "today")
+        else:
+            fest_total_in, fest_total_out, fest_occ = 0, 0, 0
+            range_in, range_out, range_occ = 0, 0, 0
+            today_in, today_out, today_occ = 0, 0, 0
 
-        # Today's entries, exits & hourly distribution calculated in IST (+05:30)
-        IST = timezone(timedelta(hours=5, minutes=30))
-        now_ist = now_dt.astimezone(IST)
-        today_start_ist = datetime.combine(now_ist.date(), datetime.min.time(), tzinfo=IST)
-        today_start = today_start_ist.astimezone(timezone.utc)
-
-        hourly_map: Dict[int, Dict[str, int]] = {h: {"entry": 0, "exit": 0} for h in range(24)}
-        kolkata_ts = func.timezone("Asia/Kolkata", CrowdSnapshot.timestamp)
-        stmt_hourly = (
-            select(
-                func.extract("hour", kolkata_ts).label("h"),
-                func.sum(CrowdSnapshot.inflow_rate).label("inflow"),
-                func.sum(CrowdSnapshot.outflow_rate).label("outflow"),
-            )
-            .where(CrowdSnapshot.timestamp >= today_start)
-            .group_by(func.extract("hour", kolkata_ts))
-        )
-        res_hourly = await self.db.execute(stmt_hourly)
-        db_today_in = 0
-        db_today_out = 0
-        for row in res_hourly.all():
-            h_val = int(row.h) if row.h is not None else -1
-            inf = int(row.inflow or 0)
-            outf = int(row.outflow or 0)
-            db_today_in += inf
-            db_today_out += outf
-            if 0 <= h_val <= 23:
-                hourly_map[h_val]["entry"] += inf
-                hourly_map[h_val]["exit"] += outf
-
-        # Prevent double counting: DB already persists line crossings synchronously.
-        # Only add unpersisted in-memory delta if live_in_count > db_today_in.
-        unpersisted_in = max(0, live_in_count - db_today_in)
-        unpersisted_out = max(0, live_out_count - db_today_out)
-        today_entries = db_today_in + unpersisted_in
-        today_exits = db_today_out + unpersisted_out
-
-        # Formula Requirement: Total Count = Total Entry + Total Exit (exact match)
-        total_visitors_festival = today_entries + today_exits
-        _step("5-hourly-and-today-totals")
+        _step("4-canonical-totals")
 
         # -------------------------------------------------------------------
-        # 4. Zones & Current Occupancy
+        # 4. Zones & Current Occupancy (Event-Scoped)
         # -------------------------------------------------------------------
-        stmt_zones = select(Zone).options(noload(Zone.cameras), noload(Zone.gates)).order_by(Zone.zone_code.asc())
+        stmt_zones = select(Zone).options(noload(Zone.cameras), noload(Zone.gates))
+        if target_event_id:
+            stmt_zones = stmt_zones.where(Zone.event_id == target_event_id)
+        stmt_zones = stmt_zones.order_by(Zone.zone_code.asc())
         res_zones = await self.db.execute(stmt_zones)
         all_zones = list(res_zones.scalars().all())
         _step("6-list-zones")
@@ -355,16 +310,19 @@ class DashboardService:
         # Bulk fetch latest crowd snapshots for zones
         zone_codes = [z.zone_code for z in all_zones]
         latest_zone_snaps: Dict[str, CrowdSnapshot] = {}
-        if zone_codes:
+        if zone_codes and target_event_id:
             subq = (
                 select(CrowdSnapshot.zone_code, func.max(CrowdSnapshot.timestamp).label("max_ts"))
-                .where(CrowdSnapshot.zone_code.in_(zone_codes))
+                .where(
+                    CrowdSnapshot.event_id == target_event_id,
+                    CrowdSnapshot.zone_code.in_(zone_codes),
+                )
                 .group_by(CrowdSnapshot.zone_code)
                 .subquery()
             )
             stmt_z_snaps = select(CrowdSnapshot).join(
                 subq, (CrowdSnapshot.zone_code == subq.c.zone_code) & (CrowdSnapshot.timestamp == subq.c.max_ts)
-            )
+            ).where(CrowdSnapshot.event_id == target_event_id)
             res_z_snaps = await self.db.execute(stmt_z_snaps)
             for s in res_z_snaps.scalars().all():
                 latest_zone_snaps[s.zone_code] = s
@@ -391,9 +349,11 @@ class DashboardService:
             d_thresh = None
 
             # Check if live worker is actively monitoring this zone
+            worker_active = False
             for s in live_frs_workers.values():
                 w_zone = getattr(s, "zone_code", "").upper()
                 if w_zone == z.zone_code.upper():
+                    worker_active = getattr(s, "running", False)
                     cam_code = s.camera_id
                     cam_name = s.name
                     if getattr(s, "warning_threshold", None):
@@ -423,6 +383,11 @@ class DashboardService:
                             live_occ = getattr(s, "occupancy_count", 0)
                             if live_occ > 0:
                                 cur_p = max(cur_p, live_occ)
+
+            # PRODUCTION RULE: Only show zones that have active/enabled cameras monitoring them!
+            # If no camera is configured or active for this zone, omit it to avoid displaying dummy zeros.
+            if not matched_cam and not worker_active:
+                continue
 
             total_zone_people += cur_p
             density_pct = round((cur_p / float(cap)) * 100.0, 1) if cap > 0 else 0.0
@@ -461,29 +426,18 @@ class DashboardService:
                 )
             )
 
-        # True net facility occupancy = Total Entry - Total Exit across all 4 entry + 4 exit gates
-        current_occupancy = max(0, today_entries - today_exits)
-        net_flow = today_entries - today_exits
+        current_occupancy = fest_occ
+        net_flow = range_in - range_out
 
         # -------------------------------------------------------------------
-        # 5. Queue Status & Flow
+        # 5. Queue Status & Flow (Enabled Cameras for this event)
         # -------------------------------------------------------------------
         queue_items: List[QueueStatusItem] = []
-        stmt_q_snaps = (
-            select(QueueSnapshot)
-            .order_by(QueueSnapshot.queue_code, QueueSnapshot.timestamp.desc())
-            .limit(20)
-        )
-        res_q_snaps = await self.db.execute(stmt_q_snaps)
-        latest_queues_by_code: Dict[str, QueueSnapshot] = {}
-        for qs in res_q_snaps.scalars().all():
-            if qs.queue_code not in latest_queues_by_code:
-                latest_queues_by_code[qs.queue_code] = qs
-        _step("9-queue-snaps")
+        enabled_camera_codes = {c.camera_code for c in all_cameras if c.enabled}
 
-        # If live workers exist with QUEUE purpose, include them
+        # 1. From live workers actively monitoring QUEUE
         for cid, s in live_frs_workers.items():
-            if getattr(s, "crowd_ai_active", False) and "QUEUE" in getattr(s, "ai_purposes", []):
+            if getattr(s, "running", False) and getattr(s, "crowd_ai_active", False) and "QUEUE" in getattr(s, "ai_purposes", []):
                 q_cnt = getattr(s, "occupancy_count", 0)
                 q_mov = getattr(s, "queue_movement_status", "STOPPED")
                 flow_stat = q_mov if q_mov in ("FAST", "NORMAL", "SLOW", "STOPPED") else ("FAST" if q_cnt < 20 else "NORMAL")
@@ -499,6 +453,17 @@ class DashboardService:
                         risk_level="HIGH" if flow_stat == "STOPPED" and q_cnt > 50 else "LOW",
                     )
                 )
+
+        stmt_q_snaps = select(QueueSnapshot)
+        if target_event_id:
+            stmt_q_snaps = stmt_q_snaps.where(QueueSnapshot.event_id == target_event_id)
+        stmt_q_snaps = stmt_q_snaps.order_by(QueueSnapshot.queue_code, QueueSnapshot.timestamp.desc()).limit(20)
+        res_q_snaps = await self.db.execute(stmt_q_snaps)
+        latest_queues_by_code: Dict[str, QueueSnapshot] = {}
+        for qs in res_q_snaps.scalars().all():
+            if qs.camera_code and qs.camera_code in enabled_camera_codes:
+                if qs.queue_code not in latest_queues_by_code:
+                    latest_queues_by_code[qs.queue_code] = qs
 
         for qcode, qs in latest_queues_by_code.items():
             if any(q.queue_name == qcode or q.camera_code == qs.camera_code for q in queue_items):
@@ -519,35 +484,87 @@ class DashboardService:
                 )
             )
 
-        # No synthetic fallback — show empty list when no real queue data exists
-
         # -------------------------------------------------------------------
-        # 6. Hourly Visitor Flow (24 Hours for Selected Date)
+        # 6. Hourly / Daily Visitor Flow (Dynamic per date_range)
         # -------------------------------------------------------------------
         hourly_flow: List[HourlyFlowPoint] = []
-
-        # Add only unpersisted live counts to current hour (prevents doubling)
-        cur_hour = now_ist.hour
-        hourly_map[cur_hour]["entry"] += unpersisted_in
-        hourly_map[cur_hour]["exit"] += unpersisted_out
-
         peak_h = "—"
-        max_entry = -1
-        for h in range(24):
-            ent = hourly_map[h]["entry"]
-            ext = hourly_map[h]["exit"]
-            net = ent - ext
-            if ent > max_entry and ent > 0:
-                max_entry = ent
-                peak_h = f"{h:02d}:00 - {h+1:02d}:00"
-            hourly_flow.append(
-                HourlyFlowPoint(
-                    hour=f"{h:02d}:00",
-                    entry=ent,
-                    exit=ext,
-                    net_flow=net,
+        range_mode = (date_range or "today").lower().strip()
+
+        if range_mode == "yesterday":
+            range_label = "Yesterday"
+            yesterday_d = today_date - timedelta(days=1)
+            if target_event_id:
+                h_items, peak_h = await self.counting_service.get_hourly_breakdown(target_event_id, yesterday_d)
+                hourly_flow = [HourlyFlowPoint(hour=i.hour, entry=i.entry, exit=i.exit, net_flow=i.net_flow) for i in h_items]
+        elif range_mode in ("7days", "7_days", "last7days", "last_7_days"):
+            range_label = "Last 7 Days"
+            seven_days_ago = today_date - timedelta(days=6)
+            s_start_utc = datetime.combine(seven_days_ago, dtime.min, tzinfo=tz).astimezone(timezone.utc)
+            tz_name = (active_event.timezone if active_event and active_event.timezone else "Asia/Kolkata").strip()
+            kolkata_ts = func.timezone(tz_name, CrowdSnapshot.timestamp)
+
+            stmt_7 = (
+                select(
+                    func.date(kolkata_ts).label("d"),
+                    func.sum(CrowdSnapshot.inflow_rate).label("inflow"),
+                    func.sum(CrowdSnapshot.outflow_rate).label("outflow"),
                 )
+                .where(
+                    CrowdSnapshot.event_id == target_event_id,
+                    CrowdSnapshot.timestamp >= s_start_utc,
+                )
+                .group_by(func.date(kolkata_ts))
             )
+            res_7 = await self.db.execute(stmt_7)
+            d7_map = {}
+            for r in res_7.all():
+                if r.d is not None:
+                    d7_map[str(r.d)] = {"entry": int(r.inflow or 0), "exit": int(r.outflow or 0)}
+
+            max_7_ent = -1
+            for i in range(7):
+                day_d = seven_days_ago + timedelta(days=i)
+                d_str = str(day_d)
+                ent = d7_map.get(d_str, {}).get("entry", 0)
+                ext = d7_map.get(d_str, {}).get("exit", 0)
+                lbl = day_d.strftime("%d %b")
+                if ent > max_7_ent and ent > 0:
+                    max_7_ent = ent
+                    peak_h = f"{lbl} (Peak Day)"
+                hourly_flow.append(
+                    HourlyFlowPoint(
+                        hour=lbl,
+                        entry=ent,
+                        exit=ext,
+                        net_flow=ent - ext,
+                    )
+                )
+        elif range_mode in ("festival", "fest"):
+            range_label = "Festival"
+            if target_event_id:
+                daily_items, _, _, _ = await self.counting_service.get_festival_daily_breakdown(target_event_id)
+                max_f_ent = -1
+                for d_item in daily_items:
+                    if d_item.entry_count > max_f_ent and d_item.entry_count > 0:
+                        max_f_ent = d_item.entry_count
+                        peak_h = f"{d_item.label} (Peak Day)"
+                    hourly_flow.append(
+                        HourlyFlowPoint(
+                            hour=d_item.label,
+                            entry=d_item.entry_count,
+                            exit=d_item.exit_count,
+                            net_flow=d_item.entry_count - d_item.exit_count,
+                        )
+                    )
+        else:
+            range_label = "Today"
+            if target_event_id:
+                h_items, peak_h = await self.counting_service.get_hourly_breakdown(target_event_id, today_date)
+                hourly_flow = [HourlyFlowPoint(hour=i.hour, entry=i.entry, exit=i.exit, net_flow=i.net_flow) for i in h_items]
+
+        range_entries = range_in
+        range_exits = range_out
         _step("9-hourly-flow-built")
 
         # -------------------------------------------------------------------
@@ -561,7 +578,10 @@ class DashboardService:
                 func.sum(CrowdSnapshot.inflow_rate).label("inflow"),
                 func.sum(CrowdSnapshot.outflow_rate).label("outflow"),
             )
-            .where(func.date(CrowdSnapshot.timestamp) >= cutoff_date)
+            .where(
+                CrowdSnapshot.event_id == target_event_id,
+                func.date(CrowdSnapshot.timestamp) >= cutoff_date,
+            )
             .group_by(func.date(CrowdSnapshot.timestamp))
             .order_by(func.date(CrowdSnapshot.timestamp).asc())
         )
@@ -589,9 +609,9 @@ class DashboardService:
             daily_trend.append(
                 DailyTrendPoint(
                     date=today_str,
-                    entries=today_entries,
-                    exits=today_exits,
-                    net_flow=today_entries - today_exits,
+                    entries=today_in,
+                    exits=today_out,
+                    net_flow=today_in - today_out,
                 )
             )
 
@@ -664,9 +684,10 @@ class DashboardService:
         stmt_alerts = (
             select(Alert)
             .where(Alert.status.in_(["active", "ACTIVE", "TRIGGERED", "UNRESOLVED"]))
-            .order_by(Alert.detected_at.desc())
-            .limit(5)
         )
+        if target_event_id:
+            stmt_alerts = stmt_alerts.where(Alert.event_id == target_event_id)
+        stmt_alerts = stmt_alerts.order_by(Alert.detected_at.desc()).limit(5)
         res_alerts = await self.db.execute(stmt_alerts)
         for a in res_alerts.scalars().all():
             active_critical_events.append(
@@ -686,9 +707,10 @@ class DashboardService:
         # 11. Queue Movement & Zone Trend Series (Real data or empty)
         # -------------------------------------------------------------------
         queue_movement: List[QueueMovementPoint] = []
-        if latest_queues_by_code:
+        if latest_queues_by_code and target_event_id:
             stmt_q_hist = (
                 select(QueueSnapshot)
+                .where(QueueSnapshot.event_id == target_event_id)
                 .order_by(QueueSnapshot.timestamp.desc())
                 .limit(12)
             )
@@ -706,38 +728,43 @@ class DashboardService:
         _step("14-q-hist-query")
 
         zone_trends: List[ZoneTrendPoint] = []
-        stmt_z_hist = (
-            select(CrowdSnapshot)
-            .order_by(CrowdSnapshot.timestamp.desc())
-            .limit(20)
-        )
-        res_z_hist = await self.db.execute(stmt_z_hist)
-        for cs in reversed(list(res_z_hist.scalars().all())):
-            t_str = cs.timestamp.strftime("%H:%M") if cs.timestamp else "—"
-            zone_trends.append(
-                ZoneTrendPoint(
-                    time=t_str,
-                    zone_code=cs.zone_code or "ZONE-A",
-                    people_count=cs.people_count or 0,
-                    density_pct=cs.occupancy_percentage or 0.0,
-                )
+        if target_event_id:
+            stmt_z_hist = (
+                select(CrowdSnapshot)
+                .where(CrowdSnapshot.event_id == target_event_id)
+                .order_by(CrowdSnapshot.timestamp.desc())
+                .limit(20)
             )
+            res_z_hist = await self.db.execute(stmt_z_hist)
+            for cs in reversed(list(res_z_hist.scalars().all())):
+                t_str = cs.timestamp.strftime("%H:%M") if cs.timestamp else "—"
+                zone_trends.append(
+                    ZoneTrendPoint(
+                        time=t_str,
+                        zone_code=cs.zone_code or "ZONE-A",
+                        people_count=cs.people_count or 0,
+                        density_pct=cs.occupancy_percentage or 0.0,
+                    )
+                )
         _step("15-z-hist-query")
 
         return DashboardSummaryResponse(
             timestamp=now_iso,
             data_status="LIVE DATA",
             date_range_selected=date_range.upper(),
-            total_visitors_festival=db_total_entries,
-            festival_total_entries=db_total_entries,
-            festival_total_exits=db_total_exits,
+            total_visitors_festival=fest_total_in,
+            festival_total_entries=fest_total_in,
+            festival_total_exits=fest_total_out,
             festival_day_current=festival_day_current,
             festival_day_total=festival_day_total,
             festival_day_label=festival_day_label,
-            today_entries=today_entries,
-            today_exits=today_exits,
-            current_occupancy=current_occupancy,
-            net_flow=net_flow,
+            today_entries=today_in,
+            today_exits=today_out,
+            selected_range_entries=range_entries,
+            selected_range_exits=range_exits,
+            selected_range_label=range_label,
+            current_occupancy=fest_occ,
+            net_flow=range_entries - range_exits,
             hourly_flow=hourly_flow,
             peak_hour=peak_h,
             daily_trend=daily_trend,

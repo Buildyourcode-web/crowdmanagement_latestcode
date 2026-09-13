@@ -1,8 +1,10 @@
 import React, { useEffect, useState, useCallback } from "react";
 import { getFestival10DaysAnalytics, downloadFestival10DaysCsv } from "../services/analyticsService.js";
 import { LoadingState } from "../components/common/States.jsx";
+import { useEventStore } from "../store/useEventStore.js";
 
 export default function Reports() {
+  const activeEventId = useEventStore((s) => s.activeEventId);
   const [festData, setFestData] = useState(null);
   const [loading, setLoading] = useState(true);
   const [downloading, setDownloading] = useState(false);
@@ -12,23 +14,23 @@ export default function Reports() {
     try {
       setLoading(true);
       setError(null);
-      const res = await getFestival10DaysAnalytics();
+      const res = await getFestival10DaysAnalytics(activeEventId);
       setFestData(res?.data || res);
     } catch (err) {
       setError(err.message || "Failed to load festival report");
     } finally {
       setLoading(false);
     }
-  }, []);
+  }, [activeEventId]);
 
   useEffect(() => {
     loadData();
-  }, [loadData]);
+  }, [loadData, activeEventId]);
 
   const handleDownload = async () => {
     try {
       setDownloading(true);
-      await downloadFestival10DaysCsv();
+      await downloadFestival10DaysCsv(activeEventId);
     } catch (err) {
       alert("Error exporting CSV: " + err.message);
     } finally {
@@ -51,7 +53,7 @@ export default function Reports() {
         <div>
           <div className="cc-page-title">Festival & Operational Reports</div>
           <div className="cc-page-subtitle">
-            {festData?.event_name || "Khairatabad Ganesh Festival 2026"} — Official 10-Day Attendance & Gate Flow Audit
+            {festData?.event_name || "Festival Command Center"} — Official {days.length > 0 ? `${days.length}-Day` : "Festival"} Attendance & Gate Flow Audit
           </div>
         </div>
 
@@ -79,7 +81,7 @@ export default function Reports() {
             disabled={downloading}
           >
             <i className={`bi ${downloading ? "bi-hourglass-split" : "bi-download"}`} />{" "}
-            {downloading ? "Generating CSV..." : "Download 10-Day CSV"}
+            {downloading ? "Generating CSV..." : `Download ${days.length > 0 ? `${days.length}-Day` : "Festival"} CSV`}
           </button>
         </div>
       </div>
@@ -178,7 +180,7 @@ export default function Reports() {
           <div>
             <div className="cc-section-title" style={{ margin: 0, display: "flex", alignItems: "center", gap: 8 }}>
               <i className="bi bi-calendar3" style={{ color: "var(--cc-accent)" }} />
-              <span>10-Day Festival Day-Wise Footfall & Attendance</span>
+              <span>{days.length > 0 ? `${days.length}-Day` : "Festival"} Day-Wise Footfall & Attendance</span>
             </div>
             <div style={{ fontSize: 11, color: "var(--cc-text-muted)", marginTop: 2 }}>
               Verified line-crossing counts aggregated across all 4 Entry and 4 Exit AI cameras
@@ -322,7 +324,7 @@ export default function Reports() {
             <tfoot>
               <tr style={{ background: "var(--cc-bg-secondary)", fontWeight: 800, borderTop: "2px solid var(--cc-border)" }}>
                 <td colSpan={3} style={{ padding: "12px 14px", fontSize: 13, color: "var(--cc-text-primary)" }}>
-                  TOTAL 10-DAY FESTIVAL TRAFFIC
+                  TOTAL {days.length > 0 ? `${days.length}-DAY` : "FESTIVAL"} FOOTFALL (INFLOW)
                 </td>
                 <td style={{ padding: "12px 14px", fontSize: 15, fontFamily: "var(--cc-font-mono)", color: "#3fb950", textAlign: "right" }}>
                   {totalEntries.toLocaleString()}
@@ -334,7 +336,7 @@ export default function Reports() {
                   {grandTotal.toLocaleString()}
                 </td>
                 <td colSpan={3} style={{ padding: "12px 14px", fontSize: 11, color: "var(--cc-text-muted)", textAlign: "center" }}>
-                  Formula: Total Entry + Total Exit
+                  Total Footfall = Cumulative Entries
                 </td>
               </tr>
             </tfoot>

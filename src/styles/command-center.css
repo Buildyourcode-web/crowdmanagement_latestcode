@@ -37,18 +37,29 @@
 .cc-topbar-brand.collapsed { min-width: var(--cc-sidebar-collapsed-width); }
 
 .cc-topbar-logo {
-  width: 28px;
-  height: 28px;
-  background: var(--cc-accent);
-  border-radius: 4px;
+  height: 48px;
+  width: auto;
+  max-width: 140px;
+  background: transparent;
   display: flex;
   align-items: center;
-  justify-content: center;
-  font-size: 14px;
-  font-weight: 900;
-  color: #fff;
+  justify-content: flex-start;
   flex-shrink: 0;
-  letter-spacing: -0.03em;
+}
+.cc-topbar-logo img {
+  height: 46px;
+  width: auto;
+  max-width: 140px;
+  object-fit: contain;
+  display: block;
+}
+.cc-topbar-brand.collapsed .cc-topbar-logo {
+  max-width: 46px;
+  justify-content: center;
+}
+.cc-topbar-brand.collapsed .cc-topbar-logo img {
+  max-width: 46px;
+  height: 28px;
 }
 
 .cc-topbar-brand-text { display: flex; flex-direction: column; overflow: hidden; }
@@ -257,19 +268,18 @@
 /* === Main content === */
 .cc-main {
   flex: 1;
-  overflow: auto;
+  overflow-x: hidden;
+  overflow-y: auto;
   background: var(--cc-bg-primary);
   display: flex;
   flex-direction: column;
 }
 
 .cc-page {
-  flex: 1;
   padding: 16px;
   display: flex;
   flex-direction: column;
   gap: 14px;
-  overflow-y: auto;
 }
 .cc-page-fullscreen {
   padding: 0;

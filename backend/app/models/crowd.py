@@ -35,4 +35,7 @@ class CrowdSnapshot(Base, UUIDMixin, TimestampMixin):
     __table_args__ = (
         Index("idx_crowd_snapshots_lookup", "zone_code", "timestamp"),
         Index("idx_crowd_snapshots_cam_time", "camera_code", "timestamp"),
+        Index("idx_crowd_event_time", "event_id", "timestamp"),
+        Index("idx_crowd_event_cam_time", "event_id", "camera_id", "timestamp"),
+        Index("idx_crowd_event_zone_time", "event_id", "zone_id", "timestamp"),
     )

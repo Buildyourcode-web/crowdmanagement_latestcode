@@ -3,43 +3,114 @@ import { create } from "zustand";
 
 // Load initial cached snapshot for instant 0ms render (no blank dashes)
 let initialCachedData = null;
+const initialRangeCache = {};
+
 try {
   const cachedStr = sessionStorage.getItem("byc_dashboard_cache");
   if (cachedStr) {
     initialCachedData = JSON.parse(cachedStr);
+    const rKey = (initialCachedData.date_range_selected || "TODAY").toUpperCase();
+    initialRangeCache[rKey] = initialCachedData;
   }
+  ["TODAY", "YESTERDAY", "7DAYS", "FESTIVAL"].forEach((k) => {
+    const s = sessionStorage.getItem(`byc_dashboard_cache_${k}`);
+    if (s) {
+      try {
+        initialRangeCache[k] = JSON.parse(s);
+      } catch (_) {}
+    }
+  });
 } catch (_) {}
 
 export const useDashboardStore = create((set, get) => ({
   dateRange: "TODAY",
   data: initialCachedData,
+  rangeCache: initialRangeCache,
   loading: initialCachedData ? false : true,
   isRefreshing: false,
+  isRangeLoading: false,
   error: null,
   dataStatus: "LIVE DATA",
   lastUpdated: initialCachedData ? new Date().toISOString() : null,
 
-  setDateRange: (range) =>
-    set((s) => (s.dateRange === range ? s : { dateRange: range })),
+  setDateRange: (range) => {
+    const upper = (range || "TODAY").toUpperCase();
+    const current = get();
+    if (current.dateRange === upper) return;
+
+    const cachedForRange = current.rangeCache?.[upper];
+    if (cachedForRange) {
+      // Instant 0ms switch to cached range data!
+      set({
+        dateRange: upper,
+        data: cachedForRange,
+        isRangeLoading: false,
+      });
+    } else {
+      // Range not cached yet — mark range as loading so stale counts aren't shown
+      set({
+        dateRange: upper,
+        isRangeLoading: true,
+      });
+    }
+  },
+
+  resetDashboardData: () => {
+    try {
+      sessionStorage.removeItem("byc_dashboard_cache");
+      ["TODAY", "YESTERDAY", "7DAYS", "FESTIVAL"].forEach((k) => {
+        sessionStorage.removeItem(`byc_dashboard_cache_${k}`);
+      });
+    } catch (_) {}
+    set({
+      data: null,
+      rangeCache: {},
+      loading: true,
+      isRefreshing: false,
+      isRangeLoading: false,
+      error: null,
+      lastUpdated: null,
+    });
+  },
+
   setDataStatus: (status) =>
     set((s) => (s.dataStatus === status ? s : { dataStatus: status })),
   setLoading: (loading) =>
     set((s) => (s.loading === loading ? s : { loading })),
   setIsRefreshing: (isRefreshing) =>
     set((s) => (s.isRefreshing === isRefreshing ? s : { isRefreshing })),
+  setIsRangeLoading: (isRangeLoading) =>
+    set((s) => (s.isRangeLoading === isRangeLoading ? s : { isRangeLoading })),
   setError: (error) =>
     set((s) => (s.error === error ? s : { error })),
 
-  setDashboardData: (payload) => {
+  setDashboardData: (payload, forRange = null) => {
+    const current = get();
+    const rangeKey = (
+      forRange ||
+      payload?.date_range_selected ||
+      current.dateRange ||
+      "TODAY"
+    ).toUpperCase();
+
     try {
       if (payload) {
+        sessionStorage.setItem(`byc_dashboard_cache_${rangeKey}`, JSON.stringify(payload));
         sessionStorage.setItem("byc_dashboard_cache", JSON.stringify(payload));
       }
     } catch (_) {}
+
+    const updatedCache = {
+      ...(current.rangeCache || {}),
+      [rangeKey]: payload,
+    };
+
     set({
       data: payload,
+      rangeCache: updatedCache,
       loading: false,
       isRefreshing: false,
+      isRangeLoading: false,
       error: null,
       lastUpdated: new Date().toISOString(),
     });

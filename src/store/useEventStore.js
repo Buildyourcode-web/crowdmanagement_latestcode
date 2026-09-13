@@ -1,6 +1,8 @@
 // Event & Site Zustand Store
 import { create } from "zustand";
 import { eventService } from "../services/eventService";
+import { invalidateApiCache } from "../services/apiClient";
+import { useDashboardStore } from "./useDashboardStore";
 
 export const useEventStore = create((set, get) => ({
   events: [],
@@ -18,19 +20,16 @@ export const useEventStore = create((set, get) => ({
       const events = await eventService.getEvents();
       set({ events, isLoadingEvents: false });
 
-      const currentActiveId = get().activeEventId;
-      const khbEvent = events.find((e) => e.code === "KHB-2026" || e.name?.toLowerCase().includes("khairatabad"));
+      const currentActiveId = get().activeEventId || localStorage.getItem("byc_active_event_id");
       let matched = events.find((e) => e.id === currentActiveId);
 
-      // Prioritize Khairatabad Ganesh Festival 2026 by default
+      // If no valid active event currently selected, pick default
       if (!matched) {
+        const khbEvent = events.find((e) => e.code === "KHB-2026" || e.name?.toLowerCase().includes("khairatabad"));
         matched = khbEvent || events.find((e) => e.status === "ACTIVE" || e.status === "LIVE") || events[0];
-      } else if (matched.code !== "KHB-2026" && khbEvent && !localStorage.getItem("byc_user_explicit_event")) {
-        // If it was auto-selected previously to Tank Bund, auto-switch to Khairatabad
-        matched = khbEvent;
       }
 
-      if (matched) {
+      if (matched && (!get().activeEvent || get().activeEvent.id !== matched.id)) {
         get().setActiveEvent(matched);
       }
     } catch (err) {
@@ -47,6 +46,7 @@ export const useEventStore = create((set, get) => ({
     const eventId = eventObj.id;
     try {
       localStorage.setItem("byc_active_event_id", eventId);
+      localStorage.setItem("byc_user_explicit_event", "true");
     } catch (e) {}
 
     // Reset site filter when event changes
@@ -54,11 +54,18 @@ export const useEventStore = create((set, get) => ({
       localStorage.removeItem("byc_active_site_id");
     } catch (e) {}
 
+    // Reset dashboard data so new event's metrics immediately reload
+    try {
+      useDashboardStore.getState().resetDashboardData();
+    } catch (e) {}
+
     set({
       activeEvent: eventObj,
       activeEventId: eventId,
       activeSiteId: null,
     });
+
+    invalidateApiCache();
 
     get().fetchSites(eventId);
   },

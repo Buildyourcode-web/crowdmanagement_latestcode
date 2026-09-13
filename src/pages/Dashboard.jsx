@@ -6,6 +6,7 @@ import { getDashboardSummary } from "../services/dashboardService.js";
 import { getFestival10DaysAnalytics, downloadFestival10DaysCsv } from "../services/analyticsService.js";
 import { realtimeService } from "../services/realtimeService.js";
 import { useDashboardStore } from "../store/useDashboardStore.js";
+import { useEventStore } from "../store/useEventStore.js";
 import { useAppStore } from "../store/useAppStore.js";
 import { getChartTheme } from "../utils/chartTheme.js";
 
@@ -20,12 +21,14 @@ export default function Dashboard() {
   const navigate = useNavigate();
   const theme = useAppStore((s) => s.theme);
   const ct = getChartTheme(theme);
+  const activeEventId = useEventStore((s) => s.activeEventId);
 
   // Zustand State Selectors (fine-grained to prevent redundant renders)
   const dateRange = useDashboardStore((s) => s.dateRange);
   const data = useDashboardStore((s) => s.data);
   const loading = useDashboardStore((s) => s.loading);
   const isRefreshing = useDashboardStore((s) => s.isRefreshing);
+  const isRangeLoading = useDashboardStore((s) => s.isRangeLoading);
   const error = useDashboardStore((s) => s.error);
   const dataStatus = useDashboardStore((s) => s.dataStatus);
   const setDateRange = useDashboardStore((s) => s.setDateRange);
@@ -39,35 +42,52 @@ export default function Dashboard() {
   const timerRef = useRef(null);
   const isMountedRef = useRef(true);
 
-  // 1. Live Clock
+  // 1. Precise Header Clock
   useEffect(() => {
-    const tick = () =>
-      setClockStr(new Date().toLocaleTimeString("en-IN", { hour12: false, timeZone: "Asia/Kolkata" }));
-    tick();
-    const iv = setInterval(tick, 1000);
-    return () => clearInterval(iv);
+    const updateClock = () => {
+      const now = new Date();
+      setClockStr(
+        now.toLocaleTimeString("en-GB", {
+          hour: "2-digit",
+          minute: "2-digit",
+          second: "2-digit",
+          hour12: false,
+        })
+      );
+    };
+    updateClock();
+    const interval = setInterval(updateClock, 1000);
+    return () => clearInterval(interval);
   }, []);
 
+  const currentIstHour = useMemo(() => {
+    const now = new Date();
+    const utc = now.getTime() + now.getTimezoneOffset() * 60000;
+    const ist = new Date(utc + 3600000 * 5.5);
+    return ist.getHours();
+  }, [clockStr]);
+
   // 2. Fetch authoritative dashboard summary with stable callback
-  const loadData = useCallback(async (silent = false) => {
-    if (inFlightRef.current) {
+  const loadData = useCallback(async (silent = false, overrideRange = null) => {
+    const store = useDashboardStore.getState();
+    const range = (overrideRange || store.dateRange || "today").toLowerCase();
+
+    if (inFlightRef.current && !overrideRange) {
       pendingRef.current = true;
       return;
     }
     inFlightRef.current = true;
-    const store = useDashboardStore.getState();
     if (!silent && !store.data) store.setLoading(true);
     if (!silent) store.setIsRefreshing(true);
 
     try {
-      const range = (store.dateRange || "today").toLowerCase();
       const [res, festRes] = await Promise.allSettled([
-        getDashboardSummary(range),
+        getDashboardSummary(range, true),
         getFestival10DaysAnalytics(),
       ]);
       if (!isMountedRef.current) return;
       if (res.status === "fulfilled" && res.value) {
-        store.setDashboardData(res.value);
+        store.setDashboardData(res.value, range);
       }
       if (festRes.status === "fulfilled" && festRes.value) {
         setFest10Data(festRes.value?.data || festRes.value);
@@ -87,7 +107,10 @@ export default function Dashboard() {
       if (pendingRef.current && isMountedRef.current) {
         pendingRef.current = false;
         setTimeout(() => {
-          if (isMountedRef.current) loadData(true);
+          if (isMountedRef.current) {
+            const curRange = useDashboardStore.getState().dateRange || "today";
+            loadData(true, curRange);
+          }
         }, 1000);
       }
     }
@@ -96,14 +119,16 @@ export default function Dashboard() {
   // 3. Mount & Polling with Tab Visibility Awareness
   useEffect(() => {
     isMountedRef.current = true;
-    loadData();
+    const initialRange = useDashboardStore.getState().dateRange || "today";
+    loadData(false, initialRange);
 
     const scheduleNext = () => {
       clearTimeout(timerRef.current);
       if (typeof document !== "undefined" && document.visibilityState === "hidden") return;
       timerRef.current = setTimeout(async () => {
         if (isMountedRef.current && document.visibilityState === "visible") {
-          await loadData(true);
+          const curRange = useDashboardStore.getState().dateRange || "today";
+          await loadData(true, curRange);
           scheduleNext();
         }
       }, 5000);
@@ -113,7 +138,8 @@ export default function Dashboard() {
 
     const handleVisibilityChange = () => {
       if (document.visibilityState === "visible") {
-        loadData(true);
+        const curRange = useDashboardStore.getState().dateRange || "today";
+        loadData(true, curRange);
         scheduleNext();
       } else {
         clearTimeout(timerRef.current);
@@ -134,14 +160,18 @@ export default function Dashboard() {
         type === "crowd_metrics_updated" ||
         type === "line_crossing"
       ) {
-        useDashboardStore.getState().patchDashboardCrossing(dataPayload);
-        if (dataPayload?.total_visitors_festival !== undefined) {
-          useDashboardStore.getState().patchDashboardMetrics({
-            total_visitors_festival: dataPayload.total_visitors_festival,
-            today_entries: dataPayload.today_entries,
-            today_exits: dataPayload.today_exits,
-            current_occupancy: dataPayload.current_occupancy,
-          });
+        // ONLY patch live numbers when viewing TODAY — never overwrite historical ranges (e.g. YESTERDAY)
+        const curRange = (useDashboardStore.getState().dateRange || "TODAY").toUpperCase();
+        if (curRange === "TODAY") {
+          useDashboardStore.getState().patchDashboardCrossing(dataPayload);
+          if (dataPayload?.total_visitors_festival !== undefined) {
+            useDashboardStore.getState().patchDashboardMetrics({
+              total_visitors_festival: dataPayload.total_visitors_festival,
+              today_entries: dataPayload.today_entries,
+              today_exits: dataPayload.today_exits,
+              current_occupancy: dataPayload.current_occupancy,
+            });
+          }
         }
       } else if (type === "zone_update") {
         if (dataPayload?.zone_code) {
@@ -177,125 +207,161 @@ export default function Dashboard() {
     };
   }, [loadData]);
 
-  // 5. Reload when dateRange changes
+  // Re-fetch immediately when active event selection changes
   useEffect(() => {
-    loadData();
-  }, [dateRange, loadData]);
+    if (activeEventId) {
+      useDashboardStore.getState().setLoading(true);
+      const curRange = useDashboardStore.getState().dateRange || "today";
+      loadData(false, curRange);
+    }
+  }, [activeEventId, loadData]);
 
   // Handle Date Range Change
   const handleDateRangeChange = (rangeId) => {
-    setDateRange(rangeId.toUpperCase());
+    const upper = rangeId.toUpperCase();
+    setDateRange(upper);
+    loadData(false, rangeId);
   };
 
-  // Memoized Chart Options
+  // Memoized Chart Options (Matching 24-Hour Person Count Distribution aesthetic)
   const hourlyChartOption = useMemo(() => {
     if (!data?.hourly_flow || data.hourly_flow.length === 0) return null;
 
     const hours = data.hourly_flow.map((p) => p.hour);
-    const entries = data.hourly_flow.map((p) => p.entry);
-    const exits = data.hourly_flow.map((p) => p.exit);
+    const isToday = (dateRange || "TODAY") === "TODAY";
+    const isYesterday = (dateRange || "").toUpperCase() === "YESTERDAY";
+    const currentHourStr = `${String(currentIstHour).padStart(2, "0")}:00`;
+
+    const barData = data.hourly_flow.map((p, idx) => {
+      const isCurrent =
+        isToday &&
+        (p.hour === currentHourStr ||
+          (hours.indexOf(currentHourStr) === -1 && idx === currentIstHour));
+
+      const isYesterdayPeak =
+        isYesterday &&
+        data.peak_hour &&
+        data.peak_hour !== "—" &&
+        data.peak_hour.startsWith(p.hour);
+
+      const isCurrentDay =
+        !isToday &&
+        !isYesterday &&
+        (p.hour?.toLowerCase().includes("today") ||
+          (dateRange === "7DAYS" && idx === data.hourly_flow.length - 1) ||
+          (dateRange === "FESTIVAL" && p.hour?.includes("Day 1")));
+
+      const isHighlighted = isCurrent || isYesterdayPeak || isCurrentDay;
+
+      return {
+        value: p.entry,
+        exitValue: p.exit,
+        isCurrent: isHighlighted,
+        itemStyle: isHighlighted
+          ? {
+              color: {
+                type: "linear",
+                x: 0,
+                y: 0,
+                x2: 0,
+                y2: 1,
+                colorStops: [
+                  { offset: 0, color: "#fbb034" },
+                  { offset: 1, color: "#f5a623" },
+                ],
+              },
+              borderColor: "#fbbf24",
+              borderWidth: 1.5,
+              borderRadius: [6, 6, 0, 0],
+              shadowColor: "rgba(245, 166, 35, 0.4)",
+              shadowBlur: 8,
+            }
+          : {
+              color: {
+                type: "linear",
+                x: 0,
+                y: 0,
+                x2: 0,
+                y2: 1,
+                colorStops: [
+                  { offset: 0, color: "#2da8e8" },
+                  { offset: 1, color: "#1f7fb8" },
+                ],
+              },
+              borderRadius: [6, 6, 0, 0],
+            },
+      };
+    });
 
     return {
       backgroundColor: "transparent",
-      textStyle: ct.textStyle,
-      legend: {
-        top: 6,
-        right: 16,
-        textStyle: ct.legendText,
-        data: ["ENTRY", "EXIT"],
-        icon: "roundRect",
-      },
-      grid: { top: 40, right: 20, bottom: 30, left: 50 },
+      grid: { top: 25, right: 15, bottom: 45, left: 55 },
       tooltip: {
         trigger: "axis",
-        backgroundColor: "rgba(13, 17, 23, 0.95)",
-        borderColor: "rgba(255, 255, 255, 0.15)",
+        backgroundColor: "rgba(13, 20, 30, 0.96)",
+        borderColor: "rgba(45, 168, 232, 0.3)",
         borderWidth: 1,
+        padding: [10, 14],
         textStyle: { color: "#fff", fontSize: 12 },
         formatter: (params) => {
-          let str = `<div style="font-weight:700;margin-bottom:4px;color:#8b949e">${params[0]?.axisValueLabel || ""}</div>`;
-          params.forEach((p) => {
-            const col = p.seriesName === "ENTRY" ? "#3fb950" : "#58a6ff";
-            str += `<div style="display:flex;justify-content:space-between;gap:16px;color:${col}">
-              <span>${p.seriesName}:</span>
-              <span style="font-family:monospace;font-weight:700">${p.value?.toLocaleString()} pax</span>
-            </div>`;
-          });
-          const ent = params.find((p) => p.seriesName === "ENTRY")?.value || 0;
-          const ext = params.find((p) => p.seriesName === "EXIT")?.value || 0;
-          const net = ent - ext;
-          const netCol = net >= 0 ? "#3fb950" : "#f85149";
-          str += `<div style="margin-top:4px;padding-top:4px;border-top:1px solid rgba(255,255,255,0.1);display:flex;justify-content:space-between;color:${netCol}">
-            <span>NET FLOW:</span>
-            <span style="font-family:monospace;font-weight:700">${net > 0 ? "+" : ""}${net.toLocaleString()} pax</span>
-          </div>`;
-          return str;
+          const p = params[0];
+          const raw = data.hourly_flow[p.dataIndex];
+          const isCurr = p.data?.isCurrent;
+          return `
+            <div style="font-weight:700;margin-bottom:6px;color:${isCurr ? '#fbb034' : '#2da8e8'};display:flex;align-items:center;gap:6px">
+              <span>${p.name}</span>
+              ${isCurr ? '<span style="font-size:9px;background:rgba(251,176,52,0.2);color:#fbb034;padding:1px 5px;border-radius:3px;border:1px solid #fbb034">CURRENT</span>' : ''}
+            </div>
+            <div style="display:flex;justify-content:space-between;gap:20px;margin-bottom:3px">
+              <span style="color:#8b949e">Person Count:</span>
+              <strong style="font-family:monospace;color:#fff">${(p.value || 0).toLocaleString()}</strong>
+            </div>
+            ${raw?.exit ? `
+            <div style="display:flex;justify-content:space-between;gap:20px">
+              <span style="color:#8b949e">Exits:</span>
+              <span style="font-family:monospace;color:#58a6ff">${raw.exit.toLocaleString()}</span>
+            </div>` : ''}
+          `;
         },
       },
       xAxis: {
         type: "category",
         data: hours,
-        axisLine: ct.axisLine,
+        axisLine: { show: false },
         axisTick: { show: false },
-        axisLabel: { color: ct.axisLabelColor, fontSize: 10 },
+        axisLabel: {
+          color: "#718294",
+          fontSize: 10,
+          interval: 0,
+          rotate: 45,
+        },
         splitLine: { show: false },
       },
       yAxis: {
         type: "value",
-        axisLine: ct.axisLine,
-        splitLine: ct.splitLine,
+        axisLine: { show: false },
+        axisTick: { show: false },
+        splitLine: {
+          show: true,
+          lineStyle: { color: "rgba(255, 255, 255, 0.04)", type: "dashed" },
+        },
         axisLabel: {
-          formatter: (v) => (v >= 1000 ? `${(v / 1000).toFixed(0)}k` : v),
-          color: ct.axisLabelColor,
+          formatter: (v) => v.toLocaleString(),
+          color: "#718294",
           fontSize: 10,
         },
       },
       series: [
         {
-          name: "ENTRY",
-          type: "line",
-          data: entries,
-          smooth: true,
-          showSymbol: false,
-          lineStyle: { color: "#3fb950", width: 2.5 },
-          areaStyle: {
-            color: {
-              type: "linear",
-              x: 0,
-              y: 0,
-              x2: 0,
-              y2: 1,
-              colorStops: [
-                { offset: 0, color: "rgba(63, 185, 80, 0.35)" },
-                { offset: 1, color: "rgba(63, 185, 80, 0.0)" },
-              ],
-            },
-          },
-        },
-        {
-          name: "EXIT",
-          type: "line",
-          data: exits,
-          smooth: true,
-          showSymbol: false,
-          lineStyle: { color: "#58a6ff", width: 2.5 },
-          areaStyle: {
-            color: {
-              type: "linear",
-              x: 0,
-              y: 0,
-              x2: 0,
-              y2: 1,
-              colorStops: [
-                { offset: 0, color: "rgba(88, 166, 255, 0.35)" },
-                { offset: 1, color: "rgba(88, 166, 255, 0.0)" },
-              ],
-            },
-          },
+          name: "Person Count",
+          type: "bar",
+          data: barData,
+          barMaxWidth: 22,
+          barCategoryGap: "28%",
         },
       ],
     };
-  }, [data?.hourly_flow, ct]);
+  }, [data?.hourly_flow, dateRange, currentIstHour]);
 
   // Daily Trend Table / Chart Option
   const statusColor = dataStatus === "LIVE DATA" ? "#3fb950" : dataStatus === "DEGRADED" ? "#e3b341" : "#8b949e";
@@ -386,10 +452,10 @@ export default function Dashboard() {
         >
           <div style={{ display: "flex", justifyContent: "space-between", alignItems: "flex-start" }}>
             <span style={{ fontSize: 11, fontWeight: 700, color: "var(--cc-text-muted)", letterSpacing: "0.05em", textTransform: "uppercase" }}>
-              Festival Total (14–24 Sept)
+              Festival Total {fest10Data?.start_date && fest10Data?.end_date ? `(${fest10Data.start_date} – ${fest10Data.end_date})` : ""}
             </span>
             <span style={{ fontSize: 10, background: "rgba(188, 140, 255, 0.2)", border: "1px solid rgba(188, 140, 255, 0.4)", color: "#bc8cff", padding: "1px 6px", borderRadius: 4, fontFamily: "var(--cc-font-mono)", fontWeight: 700 }}>
-              {fest10Data ? `Day ${fest10Data.current_day} of 10` : (data?.festival_day_label || "Day 1 of 10")}
+              {fest10Data ? `Day ${fest10Data.current_day} of ${fest10Data.days?.length || 11}` : (data?.festival_day_label || "Day 1")}
             </span>
           </div>
 
@@ -403,93 +469,232 @@ export default function Dashboard() {
               ).toLocaleString()}
             </div>
             <div style={{ fontSize: 11, color: "var(--cc-text-muted)" }}>
-              Total unique entries across all 10 festival days
+              {`Total unique entries across all ${fest10Data?.days?.length || 11} festival days`}
             </div>
           </div>
         </div>
 
-        {/* TODAY ENTRY */}
+        {/* RANGE-AWARE ENTRY */}
         <div className="cc-card" style={{ padding: "12px 14px", display: "flex", flexDirection: "column", justifyContent: "space-between" }}>
           <span style={{ fontSize: 11, fontWeight: 600, color: "var(--cc-text-muted)", letterSpacing: "0.05em", textTransform: "uppercase" }}>
-            Total Entry (Today)
+            Total Entry ({data?.selected_range_label || (dateRange === "7DAYS" ? "Last 7 Days" : dateRange === "FESTIVAL" ? "Festival" : dateRange === "YESTERDAY" ? "Yesterday" : "Today")})
           </span>
           <div style={{ fontSize: 28, fontWeight: 800, fontFamily: "var(--cc-font-mono)", color: "#3fb950" }}>
-            {loading && !data ? "—" : (data?.today_entries || 0).toLocaleString()}
+            {isRangeLoading ? (
+              <span style={{ opacity: 0.5, fontSize: 20 }}>Updating...</span>
+            ) : loading && !data ? (
+              "—"
+            ) : (
+              (data?.today_entries || 0).toLocaleString()
+            )}
           </div>
-          <span style={{ fontSize: 10, color: "var(--cc-text-muted)" }}>All entry cameras — line crossings IN</span>
+          <span style={{ fontSize: 10, color: "var(--cc-text-muted)" }}>
+            All entry cameras — line crossings IN ({data?.selected_range_label || (dateRange === "YESTERDAY" ? "Yesterday" : "Selected Period")})
+          </span>
         </div>
 
-        {/* TODAY EXIT */}
+        {/* RANGE-AWARE EXIT */}
         <div className="cc-card" style={{ padding: "12px 14px", display: "flex", flexDirection: "column", justifyContent: "space-between" }}>
           <span style={{ fontSize: 11, fontWeight: 600, color: "var(--cc-text-muted)", letterSpacing: "0.05em", textTransform: "uppercase" }}>
-            Total Exit (Today)
+            Total Exit ({data?.selected_range_label || (dateRange === "7DAYS" ? "Last 7 Days" : dateRange === "FESTIVAL" ? "Festival" : dateRange === "YESTERDAY" ? "Yesterday" : "Today")})
           </span>
           <div style={{ fontSize: 28, fontWeight: 800, fontFamily: "var(--cc-font-mono)", color: "#f85149" }}>
-            {loading && !data ? "—" : (data?.today_exits || 0).toLocaleString()}
+            {isRangeLoading ? (
+              <span style={{ opacity: 0.5, fontSize: 20 }}>Updating...</span>
+            ) : loading && !data ? (
+              "—"
+            ) : (
+              (data?.today_exits || 0).toLocaleString()
+            )}
           </div>
-          <span style={{ fontSize: 10, color: "var(--cc-text-muted)" }}>All exit cameras — line crossings OUT</span>
+          <span style={{ fontSize: 10, color: "var(--cc-text-muted)" }}>
+            All exit cameras — line crossings OUT ({data?.selected_range_label || (dateRange === "YESTERDAY" ? "Yesterday" : "Selected Period")})
+          </span>
         </div>
 
-        {/* PEAK HOUR TODAY */}
+        {/* RANGE-AWARE PEAK */}
         <div className="cc-card" style={{ padding: "12px 14px", display: "flex", flexDirection: "column", justifyContent: "space-between", borderLeft: "3px solid #e3b341" }}>
           <span style={{ fontSize: 11, fontWeight: 600, color: "var(--cc-text-muted)", letterSpacing: "0.05em", textTransform: "uppercase" }}>
-            Peak Hour (Today)
+            Peak {dateRange === "7DAYS" || dateRange === "FESTIVAL" ? "Day" : "Hour"} ({data?.selected_range_label || (dateRange === "7DAYS" ? "Last 7 Days" : dateRange === "FESTIVAL" ? "Festival" : dateRange === "YESTERDAY" ? "Yesterday" : "Today")})
           </span>
           <div style={{ fontSize: 18, fontWeight: 800, fontFamily: "var(--cc-font-mono)", color: "#e3b341", marginTop: 4 }}>
-            {loading && !data ? "—" : (data?.peak_hour && data.peak_hour !== "—" ? data.peak_hour : "No data yet")}
+            {isRangeLoading ? (
+              <span style={{ opacity: 0.5, fontSize: 14 }}>Updating...</span>
+            ) : loading && !data ? (
+              "—"
+            ) : data?.peak_hour && data.peak_hour !== "—" ? (
+              data.peak_hour
+            ) : (
+              "No data"
+            )}
           </div>
-          <span style={{ fontSize: 10, color: "var(--cc-text-muted)" }}>Highest visitor inflow hour</span>
+          <span style={{ fontSize: 10, color: "var(--cc-text-muted)" }}>Highest visitor inflow period</span>
         </div>
       </div>
 
       {/* ========================================================================= */}
-      {/* SECTION 3 & 4: HOURLY VISITOR FLOW & DATE RANGE SELECTOR */}
+      {/* SECTION 3 & 4: 24-HOUR PERSON COUNT DISTRIBUTION (MATCHING REFERENCE UI) */}
       {/* ========================================================================= */}
-      <div className="cc-card" style={{ padding: 0, overflow: "hidden" }}>
-        <div className="cc-section-header" style={{ padding: "10px 14px", display: "flex", justifyContent: "space-between", alignItems: "center" }}>
-          <div style={{ display: "flex", alignItems: "center", gap: 12 }}>
-            <span style={{ fontWeight: 700, fontSize: 13, color: "var(--cc-text-primary)", letterSpacing: "0.04em" }}>
-              VISITOR FLOW — HOURLY
-            </span>
-            {data?.peak_hour && data.peak_hour !== "—" && (
-              <span style={{ fontSize: 10, background: "rgba(227, 179, 65, 0.15)", border: "1px solid var(--cc-yellow)", color: "var(--cc-yellow)", padding: "1px 6px", borderRadius: 4, fontFamily: "var(--cc-font-mono)" }}>
-                Peak: {data.peak_hour}
-              </span>
-            )}
+      <div
+        className="cc-card"
+        style={{
+          padding: 0,
+          overflow: "hidden",
+          background: "#131b26",
+          border: "1px solid rgba(45, 168, 232, 0.22)",
+          borderRadius: 14,
+          boxShadow: "0 4px 20px rgba(0, 0, 0, 0.35)",
+        }}
+      >
+        <div
+          className="cc-section-header"
+          style={{
+            padding: "14px 18px",
+            display: "flex",
+            justifyContent: "space-between",
+            alignItems: "center",
+            flexWrap: "wrap",
+            gap: 12,
+            borderBottom: "1px solid rgba(255, 255, 255, 0.06)",
+            background: "rgba(255, 255, 255, 0.015)",
+          }}
+        >
+          {/* Left: Icon + Title */}
+          <div style={{ display: "flex", alignItems: "center", gap: 10 }}>
+            <div
+              style={{
+                width: 30,
+                height: 30,
+                borderRadius: 7,
+                background: "rgba(32, 133, 199, 0.16)",
+                border: "1px solid rgba(45, 168, 232, 0.45)",
+                display: "flex",
+                alignItems: "center",
+                justifyContent: "center",
+                color: "#2da8e8",
+                fontSize: 14,
+              }}
+            >
+              <i className="bi bi-bar-chart-fill" />
+            </div>
+            <div>
+              <div style={{ display: "flex", alignItems: "center", gap: 10 }}>
+                <span style={{ fontWeight: 800, fontSize: 15, color: "#fff", letterSpacing: "0.02em" }}>
+                  {dateRange === "7DAYS"
+                    ? "7-Day Person Count Distribution"
+                    : dateRange === "FESTIVAL"
+                    ? "Festival Day-Wise Person Count Distribution"
+                    : dateRange === "YESTERDAY"
+                    ? "Yesterday's 24-Hour Person Count Distribution"
+                    : "24-Hour Person Count Distribution"}
+                </span>
+                {data?.peak_hour && data.peak_hour !== "—" && (
+                  <span
+                    style={{
+                      fontSize: 10,
+                      background: "rgba(245, 166, 35, 0.15)",
+                      border: "1px solid rgba(245, 166, 35, 0.4)",
+                      color: "#fbb034",
+                      padding: "2px 8px",
+                      borderRadius: 4,
+                      fontFamily: "var(--cc-font-mono)",
+                      fontWeight: 700,
+                    }}
+                  >
+                    Peak: {data.peak_hour}
+                  </span>
+                )}
+              </div>
+              <div style={{ fontSize: 11, color: "#718294", marginTop: 2 }}>
+                Real-time camera gate visitor entries and flow analytics
+              </div>
+            </div>
           </div>
 
-          <div style={{ display: "flex", gap: 4 }}>
-            {DATE_RANGE_OPTIONS.map((opt) => (
-              <button
-                key={opt.id}
-                onClick={() => handleDateRangeChange(opt.id)}
-                style={{
-                  padding: "3px 8px",
-                  fontSize: 10,
-                  fontFamily: "var(--cc-font-mono)",
-                  fontWeight: dateRange === opt.id.toUpperCase() ? 700 : 500,
-                  background: dateRange === opt.id.toUpperCase() ? "var(--cc-blue)" : "rgba(255,255,255,0.04)",
-                  color: dateRange === opt.id.toUpperCase() ? "#fff" : "var(--cc-text-secondary)",
-                  border: "1px solid var(--cc-border)",
-                  borderRadius: 4,
-                  cursor: "pointer",
-                }}
-              >
-                {opt.label}
-              </button>
-            ))}
+          {/* Right: Date Range Buttons + Reference-Style Legend */}
+          <div style={{ display: "flex", alignItems: "center", gap: 16 }}>
+            {/* Filter Buttons */}
+            <div
+              style={{
+                display: "flex",
+                gap: 4,
+                background: "rgba(0, 0, 0, 0.35)",
+                padding: "3px 4px",
+                borderRadius: 6,
+                border: "1px solid rgba(255, 255, 255, 0.08)",
+              }}
+            >
+              {DATE_RANGE_OPTIONS.map((opt) => {
+                const active = dateRange === opt.id.toUpperCase();
+                return (
+                  <button
+                    key={opt.id}
+                    onClick={() => handleDateRangeChange(opt.id)}
+                    style={{
+                      padding: "4px 10px",
+                      fontSize: 10,
+                      fontFamily: "var(--cc-font-mono)",
+                      fontWeight: active ? 800 : 500,
+                      background: active ? "#2085c7" : "transparent",
+                      color: active ? "#fff" : "#8b949e",
+                      border: "none",
+                      borderRadius: 4,
+                      cursor: "pointer",
+                      boxShadow: active ? "0 0 10px rgba(32, 133, 199, 0.5)" : "none",
+                      transition: "all 0.15s ease",
+                    }}
+                  >
+                    {opt.label}
+                  </button>
+                );
+              })}
+            </div>
+
+            {/* Custom Legend Matching Screenshot */}
+            <div style={{ display: "flex", alignItems: "center", gap: 14, fontSize: 12, fontWeight: 700 }}>
+              <div style={{ display: "flex", alignItems: "center", gap: 7 }}>
+                <span
+                  style={{
+                    width: 12,
+                    height: 12,
+                    borderRadius: 3,
+                    background: "#2085c7",
+                    display: "inline-block",
+                  }}
+                />
+                <span style={{ color: "#2da8e8" }}>
+                  {dateRange === "7DAYS" || dateRange === "FESTIVAL" ? "Past Days" : "Past Hours"}
+                </span>
+              </div>
+              <div style={{ display: "flex", alignItems: "center", gap: 7 }}>
+                <span
+                  style={{
+                    width: 12,
+                    height: 12,
+                    borderRadius: 3,
+                    background: "#f5a623",
+                    border: "1px solid #fbbf24",
+                    boxShadow: "0 0 6px rgba(245, 166, 35, 0.5)",
+                    display: "inline-block",
+                  }}
+                />
+                <span style={{ color: "#fbb034" }}>
+                  {dateRange === "7DAYS" || dateRange === "FESTIVAL" ? "Today" : "Current Hour"}
+                </span>
+              </div>
+            </div>
           </div>
         </div>
 
-        <div style={{ padding: "0 10px 6px 10px" }}>
+        <div style={{ padding: "12px 16px 14px 16px" }}>
           {loading && !data ? (
-            <div style={{ height: 200, display: "flex", alignItems: "center", justifyContent: "center", color: "var(--cc-text-muted)" }}>
-              Loading Hourly Visitor Flow...
+            <div style={{ height: 250, display: "flex", alignItems: "center", justifyContent: "center", color: "var(--cc-text-muted)" }}>
+              Loading Person Count Distribution...
             </div>
           ) : hourlyChartOption ? (
-            <ReactECharts option={hourlyChartOption} style={{ height: 210, width: "100%" }} notMerge={true} lazyUpdate={true} />
+            <ReactECharts option={hourlyChartOption} style={{ height: 260, width: "100%" }} notMerge={true} lazyUpdate={true} />
           ) : (
-            <div style={{ height: 200, display: "flex", alignItems: "center", justifyContent: "center", color: "var(--cc-text-muted)" }}>
+            <div style={{ height: 250, display: "flex", alignItems: "center", justifyContent: "center", color: "var(--cc-text-muted)" }}>
               NO DATA FOR SELECTED PERIOD
             </div>
           )}
@@ -551,7 +756,7 @@ export default function Dashboard() {
                     <div style={{ display: "flex", alignItems: "center", gap: 14 }}>
                       <div style={{ textAlign: "right" }}>
                         <div style={{ fontSize: 13, fontWeight: 700, fontFamily: "var(--cc-font-mono)", color: "var(--cc-text-primary)" }}>
-                          {q.current_people.toLocaleString()} <span style={{ fontSize: 10, color: "var(--cc-text-muted)" }}>pax</span>
+                          {q.current_people.toLocaleString()}
                         </div>
                         <div style={{ fontSize: 10, color: "var(--cc-text-muted)" }}>
                           {q.estimated_wait_minutes ? `~${q.estimated_wait_minutes} min wait` : "Minimal wait"}
@@ -613,21 +818,24 @@ export default function Dashboard() {
           <div style={{ padding: "8px 12px", flex: 1, display: "flex", flexDirection: "column", gap: 6 }}>
             {loading && !data ? (
               <div style={{ padding: 20, textAlign: "center", color: "var(--cc-text-muted)" }}>Loading Zone Density...</div>
-            ) : !data?.zones || data.zones.length === 0 ? (
-              <div style={{ padding: 24, textAlign: "center", color: "var(--cc-text-muted)", fontSize: 12 }}>
-                <i className="bi bi-geo-alt" style={{ fontSize: 24, display: "block", marginBottom: 6 }} />
-                NO ACTIVE ZONES FOUND
-              </div>
-            ) : (
-              data.zones
-                .slice(0, 4)
-                .filter((z) => selectedZoneCode === "all" || (z.zone_code || z.zone_name?.replace("Zone ", "ZONE-")) === selectedZoneCode)
-                .map((z, idx) => {
-                const statusStyle = {
-                  GREEN: { color: "#3fb950", bg: "rgba(63, 185, 80, 0.15)", border: "#3fb950" },
-                  ORANGE: { color: "#f0883e", bg: "rgba(240, 136, 62, 0.15)", border: "#f0883e" },
-                  RED: { color: "#f85149", bg: "rgba(248, 81, 73, 0.15)", border: "#f85149" },
-                }[z.status] || { color: "#3fb950", bg: "rgba(63, 185, 80, 0.15)", border: "#3fb950" };
+            ) : (() => {
+                const visibleZones = (data?.zones || []).filter(
+                  (z) => selectedZoneCode === "all" || (z.zone_code || z.zone_name?.replace("Zone ", "ZONE-")) === selectedZoneCode
+                );
+                if (visibleZones.length === 0) {
+                  return (
+                    <div style={{ padding: 24, textAlign: "center", color: "var(--cc-text-muted)", fontSize: 12 }}>
+                      <i className="bi bi-geo-alt" style={{ fontSize: 24, display: "block", marginBottom: 6 }} />
+                      NO ACTIVE ZONES MONITORED
+                    </div>
+                  );
+                }
+                return visibleZones.map((z, idx) => {
+                  const statusStyle = {
+                    GREEN: { color: "#3fb950", bg: "rgba(63, 185, 80, 0.15)", border: "#3fb950" },
+                    ORANGE: { color: "#f0883e", bg: "rgba(240, 136, 62, 0.15)", border: "#f0883e" },
+                    RED: { color: "#f85149", bg: "rgba(248, 81, 73, 0.15)", border: "#f85149" },
+                  }[z.status] || { color: "#3fb950", bg: "rgba(63, 185, 80, 0.15)", border: "#3fb950" };
 
                 return (
                   <div
@@ -684,8 +892,8 @@ export default function Dashboard() {
                     </div>
                   </div>
                 );
-              })
-            )}
+              });
+            })()}
           </div>
         </div>
       </div>
@@ -694,13 +902,13 @@ export default function Dashboard() {
       {/* SECTION 4 & 10: DAILY VISITOR TREND + TOP RISK AREAS */}
       {/* ========================================================================= */}
       <div style={{ display: "grid", gridTemplateColumns: "1.3fr 1fr", gap: 10 }}>
-        {/* 10-DAY FESTIVAL DAY-WISE FOOTFALL & AUDIT */}
+        {/* FESTIVAL DAY-WISE FOOTFALL & AUDIT */}
         <div className="cc-card" style={{ padding: 0, overflow: "hidden" }}>
           <div className="cc-section-header" style={{ padding: "10px 14px", display: "flex", justifyContent: "space-between", alignItems: "center" }}>
             <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
               <i className="bi bi-calendar3" style={{ color: "var(--cc-accent)" }} />
               <span style={{ fontWeight: 700, fontSize: 13, color: "var(--cc-text-primary)", letterSpacing: "0.04em" }}>
-                10-DAY FESTIVAL DAY-WISE REPORT
+                {fest10Data?.days ? `${fest10Data.days.length}-DAY FESTIVAL DAY-WISE REPORT` : "FESTIVAL DAY-WISE REPORT"}
               </span>
             </div>
             <div style={{ display: "flex", gap: 6 }}>
@@ -735,14 +943,14 @@ export default function Dashboard() {
                   <th style={{ textAlign: "left" }}>Date</th>
                   <th style={{ textAlign: "right", color: "#3fb950" }}>Entry (4 Gates)</th>
                   <th style={{ textAlign: "right", color: "#f85149" }}>Exit (4 Gates)</th>
-                  <th style={{ textAlign: "right", color: "var(--cc-accent)" }}>Total (Entry+Exit)</th>
+                  <th style={{ textAlign: "right", color: "var(--cc-accent)" }}>Total Visitors</th>
                   <th style={{ textAlign: "center" }}>Peak</th>
                   <th style={{ textAlign: "center" }}>Status</th>
                 </tr>
               </thead>
               <tbody>
                 {!fest10Data?.days || fest10Data.days.length === 0 ? (
-                  <tr><td colSpan={7} style={{ textAlign: "center", padding: 16, color: "var(--cc-text-muted)" }}>Loading 10-Day Festival Report...</td></tr>
+                  <tr><td colSpan={7} style={{ textAlign: "center", padding: 16, color: "var(--cc-text-muted)" }}>Loading Festival Day-Wise Report...</td></tr>
                 ) : (
                   fest10Data.days.map((row) => {
                     const isToday = row.status === "TODAY";
@@ -761,7 +969,7 @@ export default function Dashboard() {
                           {row.exit_count.toLocaleString()}
                         </td>
                         <td style={{ textAlign: "right", fontWeight: 800, color: "var(--cc-accent)", fontFamily: "var(--cc-font-mono)" }}>
-                          {row.total_count.toLocaleString()}
+                          {row.entry_count.toLocaleString()}
                         </td>
                         <td style={{ textAlign: "center", fontSize: 10, color: "var(--cc-text-muted)" }}>
                           {row.peak_hour}

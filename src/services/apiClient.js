@@ -106,15 +106,18 @@ const inFlight = new Map();
 const DEFAULT_CACHE_TTL = 30_000; // 30 seconds
 
 function getCacheKey(url, params) {
-  if (!params) return url;
+  const activeEventId = localStorage.getItem("byc_active_event_id") || "default";
+  const activeSiteId = localStorage.getItem("byc_active_site_id") || "all";
+  const prefix = `[evt:${activeEventId}|site:${activeSiteId}]`;
+  if (!params) return `${prefix}${url}`;
   try {
     const sorted = Object.keys(params).sort().reduce((acc, k) => {
       acc[k] = params[k];
       return acc;
     }, {});
-    return `${url}?${JSON.stringify(sorted)}`;
+    return `${prefix}${url}?${JSON.stringify(sorted)}`;
   } catch {
-    return `${url}?${JSON.stringify(params)}`;
+    return `${prefix}${url}?${JSON.stringify(params)}`;
   }
 }
 

@@ -8,6 +8,7 @@ import { realtimeService } from "../services/realtimeService.js";
 import { LoadingState } from "../components/common/States.jsx";
 import ROIEditor from "../components/ai/ROIEditor.jsx";
 import { getBackendUrl } from "../utils/urlConfig.js";
+import { useEventStore } from "../store/useEventStore.js";
 
 const BACKEND = getBackendUrl();
 
@@ -84,6 +85,7 @@ export const ZONE_PRESETS = [
 
 export default function Cameras() {
   const navigate = useNavigate();
+  const activeEventId = useEventStore((s) => s.activeEventId);
   const [dbCameras, setDbCameras] = useState([]);
   const [engineCameras, setEngineCameras] = useState([]);
   const [stats, setStats] = useState(null);
@@ -181,8 +183,12 @@ export default function Cameras() {
   // Load database cameras — always skip cache to get latest state
   const loadDbCameras = useCallback(async (skipCache = false) => {
     try {
+      const activeEvt = useEventStore.getState().activeEventId;
       const [camsRes, statsRes] = await Promise.allSettled([
-        getCameras({ page_size: 200, enabled_only: true }, skipCache),
+        getCameras(
+          { page_size: 200, enabled_only: true, ...(activeEvt ? { event_id: activeEvt } : {}) },
+          skipCache
+        ),
         getCameraStats(),
       ]);
       if (!isMountedRef.current) return;
@@ -277,6 +283,15 @@ export default function Cameras() {
     };
   }, [loadDbCameras, loadEngineCameras]);
 
+  // Immediately re-fetch cameras whenever active event changes
+  useEffect(() => {
+    if (activeEventId) {
+      setLoading(true);
+      loadDbCameras(true);
+      loadEngineCameras();
+    }
+  }, [activeEventId, loadDbCameras, loadEngineCameras]);
+
   // Build list of active working streams (persisting all DB cameras, overlaying live engine telemetry)
   const activeStreamsMap = new Map();
 
@@ -303,11 +318,12 @@ export default function Cameras() {
     });
   }
 
-  // 2. Overlay live RTSP engine workers actively running
+  // 2. Overlay live RTSP engine workers actively running (scoped to active event's cameras)
   for (const eng of engineCameras) {
     const rawId = eng.camera_id || eng.id;
     const cleanId = (rawId || "").replace("-CROWD", "").replace("-FRS", "");
-    const matchKey = activeStreamsMap.has(rawId) ? rawId : (activeStreamsMap.has(cleanId) ? cleanId : rawId);
+    const matchKey = activeStreamsMap.has(rawId) ? rawId : (activeStreamsMap.has(cleanId) ? cleanId : null);
+    if (!matchKey) continue;
     const existing = activeStreamsMap.get(matchKey) || {};
     const isFrs = Boolean(eng.is_frs || eng.camera_type === "FRS");
     activeStreamsMap.set(matchKey, {
@@ -395,10 +411,17 @@ export default function Cameras() {
     setAddLoading(true);
     setAddError("");
     try {
+      const activeEvt = useEventStore.getState().activeEventId;
       const res = await fetch(`${BACKEND}/api/v1/frs-engine/cameras`, {
         method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify(addForm),
+        headers: {
+          "Content-Type": "application/json",
+          ...(activeEvt ? { "X-Event-ID": activeEvt } : {}),
+        },
+        body: JSON.stringify({
+          ...addForm,
+          event_id: activeEvt || undefined,
+        }),
       });
       if (!res.ok) {
         const err = await res.json();

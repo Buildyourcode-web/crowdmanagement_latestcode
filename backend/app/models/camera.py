@@ -46,6 +46,11 @@ class Camera(Base, UUIDMixin, TimestampMixin):
     stream_stability: Mapped[str] = mapped_column(String(50), default="UNKNOWN", nullable=False)
     enabled: Mapped[bool] = mapped_column(Boolean, default=True, nullable=False)
     
+    # Lifecycle & Soft-Delete (Camera Removal Never Deletes Historical Data)
+    is_active: Mapped[bool] = mapped_column(Boolean, default=True, index=True, nullable=False)
+    active_from: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True), nullable=True)
+    removed_at: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True), nullable=True)
+    
     # Capabilities & Metrics
     is_frs_camera: Mapped[bool] = mapped_column(Boolean, default=False, index=True, nullable=False)
     is_ptz: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)

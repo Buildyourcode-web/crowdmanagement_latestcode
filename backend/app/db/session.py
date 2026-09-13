@@ -4,19 +4,26 @@ from sqlalchemy import create_engine
 from sqlalchemy.orm import sessionmaker
 from app.config import settings
 
-# ---------------------------------------------------------------------------
-# Async engine (used by FastAPI endpoints)
-# ---------------------------------------------------------------------------
+# Safeguard: Supabase pooler on 5432 is Session mode (capped at 15 clients).
+# Ensure port 6543 (Transaction mode) is used for high concurrency.
+_db_url = settings.DATABASE_URL
+if "pooler.supabase.com:5432" in _db_url:
+    _db_url = _db_url.replace("pooler.supabase.com:5432", "pooler.supabase.com:6543")
+
 async_engine = create_async_engine(
-    settings.DATABASE_URL,
+    _db_url,
     echo=False,
     future=True,
-    pool_size=10,
-    max_overflow=5,
-    pool_timeout=20,
-    pool_recycle=300,
+    pool_size=getattr(settings, "DB_POOL_SIZE", 5),
+    max_overflow=getattr(settings, "DB_MAX_OVERFLOW", 5),
+    pool_timeout=getattr(settings, "DB_POOL_TIMEOUT", 10),
+    pool_recycle=180,
     pool_pre_ping=True,   # validates connections before use — prevents stale-connection errors on AWS/Supabase
-    connect_args={"statement_cache_size": 0, "prepared_statement_cache_size": 0},
+    connect_args={
+        "statement_cache_size": 0,
+        "prepared_statement_cache_size": 0,
+        "command_timeout": 15,
+    },
 )
 
 AsyncSessionLocal = async_sessionmaker(
@@ -44,7 +51,7 @@ async def get_db() -> AsyncGenerator[AsyncSession, None]:
 # ---------------------------------------------------------------------------
 # Synchronous engine (used by background worker threads like Crowd AI)
 # ---------------------------------------------------------------------------
-_sync_db_url = settings.DATABASE_URL.replace("postgresql+asyncpg://", "postgresql+psycopg2://")
+_sync_db_url = _db_url.replace("postgresql+asyncpg://", "postgresql+psycopg2://")
 
 try:
     sync_engine = create_engine(

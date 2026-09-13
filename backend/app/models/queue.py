@@ -1,7 +1,7 @@
 import uuid
 from datetime import datetime, timezone
 from typing import Optional
-from sqlalchemy import DateTime, Float, ForeignKey, Integer, String
+from sqlalchemy import DateTime, Float, ForeignKey, Index, Integer, String
 from sqlalchemy.dialects.postgresql import UUID
 from sqlalchemy.orm import Mapped, mapped_column
 from app.models.base import Base, TimestampMixin, UUIDMixin
@@ -45,3 +45,8 @@ class QueueSnapshot(Base, UUIDMixin, TimestampMixin):
 
     risk_score: Mapped[Optional[float]] = mapped_column(Float, default=0.0, nullable=True)
     risk_level: Mapped[str] = mapped_column(String(50), default="LOW", nullable=False)
+
+    __table_args__ = (
+        Index("idx_queue_event_time", "event_id", "timestamp"),
+        Index("idx_queue_event_cam_time", "event_id", "camera_id", "timestamp"),
+    )

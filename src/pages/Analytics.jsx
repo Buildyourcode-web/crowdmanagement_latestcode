@@ -16,12 +16,14 @@ import ZoneFlowMatrix from "../components/analytics/ZoneFlowMatrix.jsx";
 import { useNavigate } from "react-router-dom";
 
 import { useAppStore } from "../store/useAppStore.js";
+import { useEventStore } from "../store/useEventStore.js";
 import { getChartTheme } from "../utils/chartTheme.js";
 
 export default function Analytics() {
   const navigate = useNavigate();
   const theme = useAppStore((s) => s.theme);
   const ct = getChartTheme(theme);
+  const activeEventId = useEventStore((s) => s.activeEventId);
   const [attendance, setAttendance] = useState(null);
   const [camera, setCamera] = useState(null);
   const [incident, setIncident] = useState(null);
@@ -59,7 +61,14 @@ export default function Analytics() {
       if (isMountedRef.current) setLoading(false);
       inFlightRef.current = false;
     }
-  }, []);
+  }, [activeEventId]);
+
+  // Immediately reload when the user switches to a different event
+  useEffect(() => {
+    if (!isMountedRef.current) return;
+    inFlightRef.current = false; // reset in-flight guard so new event fetch isn't blocked
+    loadAllAnalytics(false);
+  }, [activeEventId]); // eslint-disable-line react-hooks/exhaustive-deps
 
   useEffect(() => {
     isMountedRef.current = true;
@@ -109,6 +118,14 @@ export default function Analytics() {
     };
   }, [loadAllAnalytics]);
 
+  // Immediately re-fetch all analytics when active event changes
+  useEffect(() => {
+    if (activeEventId) {
+      setLoading(true);
+      loadAllAnalytics(false);
+    }
+  }, [activeEventId, loadAllAnalytics]);
+
   if (loading) return <LoadingState />;
 
   const safeAttendance = attendance || { totalVisitorsToday: 0, peakHour: "—", peakCount: 0, avgPerHour: 0, hourly: [], daily: [] };
@@ -129,7 +146,7 @@ export default function Analytics() {
       formatter: (params) => {
         const p = params[0];
         return `<div style="font-weight:700;margin-bottom:2px">${p?.name || ""} IST</div>
-                <div style="color:${ct.primaryColor}">Visitors: <b>${p?.value?.toLocaleString() || 0} pax</b></div>`;
+                <div style="color:${ct.primaryColor}">Visitors: <b>${p?.value?.toLocaleString() || 0}</b></div>`;
       },
     },
     xAxis: {
@@ -250,7 +267,7 @@ export default function Analytics() {
             color: "#f85149",
           },
           { label: "Peak Hour", value: safeAttendance.peak_hour ?? safeAttendance.peakHour ?? "—" },
-          { label: "Fleet Uptime (8 Cams)", value: safeCamera.uptime ?? "—" },
+          { label: `Fleet Uptime (${camera?.cameras?.length ?? camera?.total_cameras ?? 0} Cams)`, value: safeCamera.uptime ?? "—" },
           { label: "Total Detections", value: (safeCamera.total_detections ?? safeCamera.totalDetections ?? 0).toLocaleString() },
           { label: "Avg FPS", value: safeCamera.avg_fps ?? safeCamera.avgFps ?? 0 },
           { label: "Incidents Total", value: safeIncident.total ?? 0 },
@@ -305,7 +322,7 @@ export default function Analytics() {
           <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
             <i className="bi bi-calendar-week" style={{ color: "var(--cc-accent)" }} />
             <span style={{ fontWeight: 700, fontSize: 13, color: "var(--cc-text-primary)", letterSpacing: "0.04em" }}>
-              10-DAY FESTIVAL DAY-WISE ATTENDANCE AUDIT
+              {fest10Data?.days ? `${fest10Data.days.length}-DAY FESTIVAL DAY-WISE ATTENDANCE AUDIT` : "FESTIVAL DAY-WISE ATTENDANCE AUDIT"}
             </span>
           </div>
           <div style={{ display: "flex", gap: 8, alignItems: "center" }}>
@@ -350,7 +367,7 @@ export default function Analytics() {
             </thead>
             <tbody>
               {!fest10Data?.days || fest10Data.days.length === 0 ? (
-                <tr><td colSpan={9} style={{ textAlign: "center", padding: 16, color: "var(--cc-text-muted)" }}>Loading 10-Day Festival Attendance...</td></tr>
+                <tr><td colSpan={9} style={{ textAlign: "center", padding: 16, color: "var(--cc-text-muted)" }}>Loading Festival Day-Wise Attendance...</td></tr>
               ) : (
                 fest10Data.days.map((row) => {
                   const isToday = row.status === "TODAY";

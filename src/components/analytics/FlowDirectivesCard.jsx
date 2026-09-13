@@ -95,7 +95,7 @@ export default function FlowDirectivesCard({ flowData, loading }) {
           >
             <div style={{ fontSize: 10, color: "var(--cc-text-muted)", textTransform: "uppercase", fontWeight: 700 }}>Inside Complex</div>
             <div style={{ fontSize: 16, fontWeight: 700, color: "var(--cc-text-primary)", fontFamily: "var(--cc-font-mono)" }}>
-              {totalInside} <span style={{ fontSize: 11, color: "var(--cc-text-muted)" }}>pax</span>
+              {totalInside}
             </div>
           </div>
 

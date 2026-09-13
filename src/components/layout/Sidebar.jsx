@@ -3,18 +3,21 @@ import { NavLink, useLocation, useNavigate } from "react-router-dom";
 import { useAppStore } from "../../store/useAppStore.js";
 import { useAlertStore } from "../../store/useAlertStore.js";
 import { EVENT_CONFIG } from "../../config/eventConfig.js";
+import policeLogo from "../../assets/police-logo.png";
 
 const NAV_GROUPS = [
   {
     label: "Overview",
     items: [
       { path: "/dashboard", icon: "bi-grid-fill", label: "Dashboard" },
+      { path: "/events", icon: "bi-calendar-event-fill", label: "Festivals & Events" },
     ],
   },
   {
     label: "Cameras & AI",
     items: [
       { path: "/cameras", icon: "bi-camera-video-fill", label: "Cameras" },
+      { path: "/crowd-management", icon: "bi-people-fill", label: "Crowd & Zones" },
     ],
   },
   {
@@ -86,6 +89,56 @@ export default function Sidebar() {
       <div className="cc-sidebar-footer" style={{ display: "flex", flexDirection: "column", gap: 10, padding: collapsed ? "10px 4px" : "12px 14px" }}>
         {!collapsed ? (
           <>
+            <div
+              style={{
+                display: "flex",
+                alignItems: "center",
+                gap: 12,
+                padding: "10px 10px",
+                background: "rgba(255, 255, 255, 0.04)",
+                borderRadius: "var(--cc-radius-md)",
+                border: "1px solid var(--cc-border)",
+                marginBottom: 4,
+              }}
+            >
+              <img
+                src={policeLogo}
+                alt="Hyderabad City Police"
+                style={{
+                  width: 56,
+                  height: 56,
+                  objectFit: "contain",
+                  flexShrink: 0,
+                  display: "block",
+                }}
+              />
+              <div style={{ display: "flex", flexDirection: "column", minWidth: 0 }}>
+                <span
+                  style={{
+                    fontSize: 11.5,
+                    fontWeight: 800,
+                    color: "var(--cc-text-primary)",
+                    letterSpacing: "0.03em",
+                    lineHeight: 1.25,
+                    textTransform: "uppercase",
+                  }}
+                >
+                  HYDERABAD CITY POLICE
+                </span>
+                <span
+                  style={{
+                    fontSize: 9,
+                    color: "var(--cc-text-muted)",
+                    letterSpacing: "0.05em",
+                    textTransform: "uppercase",
+                    marginTop: 3,
+                  }}
+                >
+                  Command & Control
+                </span>
+              </div>
+            </div>
+
             <div className="cc-sys-status">
               <span className="cc-live-dot" />
               <span>System Online</span>
@@ -117,6 +170,18 @@ export default function Sidebar() {
           </>
         ) : (
           <div style={{ display: "flex", flexDirection: "column", alignItems: "center", gap: 8 }}>
+            <img
+              src={policeLogo}
+              alt="Hyderabad City Police"
+              style={{
+                width: 44,
+                height: 44,
+                objectFit: "contain",
+                marginBottom: 2,
+                display: "block",
+              }}
+              title="Hyderabad City Police"
+            />
             <span className="cc-live-dot" title="System Online" />
             <button
               onClick={handleLogout}

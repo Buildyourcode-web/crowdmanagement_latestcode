@@ -37,6 +37,11 @@ class CameraRead(BaseSchema):
     stream_status: str = Field(default="NOT_TESTED", example="ONLINE")
     stream_stability: str = Field(default="UNKNOWN", example="STABLE")
     enabled: bool = True
+    is_active: bool = True
+    active_from: Optional[datetime] = None
+    removed_at: Optional[datetime] = None
+    event_id: Optional[uuid.UUID] = None
+    site_id: Optional[uuid.UUID] = None
     
     # Capabilities & Metrics
     is_frs: bool = Field(..., alias="is_frs_camera")
@@ -87,11 +92,14 @@ class CameraCreate(BaseModel):
     longitude: Optional[float] = Field(None, example=78.4635)
     coordinates: Optional[List[float]] = Field(None, example=[78.4635, 17.4175])
     
-    # Flags
+    # Flags & Scoping
     is_frs_camera: bool = False
     is_ptz: bool = False
     resolution: str = "1080p"
     fps: int = 25
+    event_id: Optional[uuid.UUID] = None
+    site_id: Optional[uuid.UUID] = None
+    is_active: bool = True
 
 
 class CameraUpdate(BaseModel):
@@ -106,6 +114,8 @@ class CameraUpdate(BaseModel):
     password: Optional[str] = None
     zone_code: Optional[str] = None
     zone_id: Optional[uuid.UUID] = None
+    event_id: Optional[uuid.UUID] = None
+    site_id: Optional[uuid.UUID] = None
     location_name: Optional[str] = None
     latitude: Optional[float] = None
     longitude: Optional[float] = None
@@ -113,6 +123,7 @@ class CameraUpdate(BaseModel):
     status: Optional[str] = None
     ai_status: Optional[str] = None
     enabled: Optional[bool] = None
+    is_active: Optional[bool] = None
     fps: Optional[int] = None
     resolution: Optional[str] = None
     is_frs_camera: Optional[bool] = None

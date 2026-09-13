@@ -103,7 +103,7 @@ class DashboardSummaryResponse(BaseModel):
     date_range_selected: str = "TODAY"
 
     # Hero KPI
-    total_visitors_festival: int = Field(0, description="Cumulative entry+exit across all festival days")
+    total_visitors_festival: int = Field(0, description="Cumulative entry across all festival days")
     festival_total_entries: int = Field(0, description="Cumulative entries across all festival days (14-24 Sept)")
     festival_total_exits: int = Field(0, description="Cumulative exits across all festival days (14-24 Sept)")
     festival_day_current: int = 1
@@ -111,6 +111,9 @@ class DashboardSummaryResponse(BaseModel):
     festival_day_label: str = "Day 1 of 10"
     today_entries: int = 0
     today_exits: int = 0
+    selected_range_entries: int = 0
+    selected_range_exits: int = 0
+    selected_range_label: str = "Today"
 
     # People Movement Panel
     current_occupancy: int = 0

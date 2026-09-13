@@ -33,7 +33,7 @@ async def list_reports(
         func.coalesce(func.sum(CrowdSnapshot.outflow_rate), 0).label("outflow"),
     )
     if ctx.event_id:
-        stmt_crowd = stmt_crowd.where(or_(CrowdSnapshot.event_id == ctx.event_id, CrowdSnapshot.event_id.is_(None)))
+        stmt_crowd = stmt_crowd.where(CrowdSnapshot.event_id == ctx.event_id)
     res_crowd = await db.execute(stmt_crowd)
     crowd_row = res_crowd.first()
     tot_in = int(crowd_row.inflow if crowd_row else 0)
@@ -54,7 +54,7 @@ async def list_reports(
     # 3. Incidents count
     stmt_inc = select(func.count(Incident.id))
     if ctx.event_id:
-        stmt_inc = stmt_inc.where(or_(Incident.event_id == ctx.event_id, Incident.event_id.is_(None)))
+        stmt_inc = stmt_inc.where(Incident.event_id == ctx.event_id)
     res_inc = await db.execute(stmt_inc)
     tot_inc = int(res_inc.scalar() or 0)
 
@@ -141,12 +141,13 @@ async def export_festival_10days_csv(
     writer = csv.writer(output)
 
     # Metadata headers
-    writer.writerow(["# Khairatabad Ganesh Festival 2026 - Official 10-Day Attendance & Footfall Audit Report"])
+    event_title = fest_data.event_name or "Festival Event"
+    writer.writerow([f"# {event_title} - Official Operational Attendance & Footfall Audit Report"])
     writer.writerow(["# Generated At", datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S UTC")])
-    writer.writerow(["# Festival Dates", f"{fest_data.start_date} to {fest_data.end_date}"])
-    writer.writerow(["# Total Entries (4 Entry Gates)", fest_data.total_entries_10days])
-    writer.writerow(["# Total Exits (4 Exit Gates)", fest_data.total_exits_10days])
-    writer.writerow(["# Grand Total Traffic (Entry + Exit)", fest_data.grand_total_footfall])
+    writer.writerow(["# Operational Dates", f"{fest_data.start_date} to {fest_data.end_date}"])
+    writer.writerow(["# Total Entries", fest_data.total_entries_10days])
+    writer.writerow(["# Total Exits", fest_data.total_exits_10days])
+    writer.writerow(["# Total Footfall", fest_data.grand_total_footfall])
     writer.writerow([])
 
     # Table columns
@@ -154,9 +155,9 @@ async def export_festival_10days_csv(
         "Day Number",
         "Date",
         "Day Name",
-        "Entry Count (4 Gates)",
-        "Exit Count (4 Gates)",
-        "Total Count (Entry + Exit)",
+        "Entry Count",
+        "Exit Count",
+        "Total Footfall",
         "Net Inside",
         "Peak Hour",
         "Status",
@@ -176,7 +177,8 @@ async def export_festival_10days_csv(
         ])
 
     output.seek(0)
-    filename = f"Khairatabad_Ganesh_10Days_Attendance_{datetime.now().strftime('%Y%m%d_%H%M%S')}.csv"
+    clean_name = "".join(c if c.isalnum() or c in ("-", "_") else "_" for c in event_title)
+    filename = f"{clean_name}_Attendance_{datetime.now().strftime('%Y%m%d_%H%M%S')}.csv"
     return StreamingResponse(
         io.BytesIO(output.getvalue().encode("utf-8")),
         media_type="text/csv",
