@@ -1,57 +1,11 @@
 import React from "react";
 
 export default function FlowDirectivesCard({ flowData, loading }) {
-  if (loading && !flowData) {
-    return (
-      <div className="cc-card cc-skeleton-card" style={{ minHeight: 180, marginBottom: 20 }}>
-        <div className="cc-skeleton-line" style={{ width: "40%", height: 20, marginBottom: 12 }} />
-        <div className="cc-skeleton-line" style={{ width: "90%", height: 16, marginBottom: 8 }} />
-        <div className="cc-skeleton-line" style={{ width: "70%", height: 16 }} />
-      </div>
-    );
-  }
+  if (loading && !flowData) return null;
 
-  const defaultDirectives = [
-    {
-      id: "DIR-01",
-      priority: "INFO",
-      category: "ZONE_CLEARANCE",
-      title: "Sanctum Sanctorum Operating Safely",
-      action: "Sanctum darshan lane continuous ga moving undali. Pilgrims aagakunda marshals guide cheyandi.",
-      target_area: "Zone A - Sanctum Sanctorum",
-      impact: "Maintains uninterrupted 45-50 pax/min darshan circulation.",
-    },
-    {
-      id: "DIR-02",
-      priority: "INFO",
-      category: "GATE_CONTROL",
-      title: "Entry / Exit Gate Balanced Flow",
-      action: "4 Entry Gates lo batch entry orderly ga nadavali. 4 Exit Gates corridors clear ga undali.",
-      target_area: "Gates 1-4 Entry & Gates 1-4 Exit",
-      impact: "Zero bottleneck buildup across transit corridors.",
-    },
-    {
-      id: "DIR-03",
-      priority: "INFO",
-      category: "QUEUE_DIVERSION",
-      title: "Main Darshan Queue Clearance",
-      action: "Zigzag barricade corridors lo crowd stoppage lekunda volunteers steady ga move cheyali.",
-      target_area: "Main Darshan Queue (Gate 1)",
-      impact: "Reduces wait time and eliminates crowd stagnation.",
-    },
-    {
-      id: "DIR-04",
-      priority: "INFO",
-      category: "POLICE_ACTION",
-      title: "Marshal Deployment at Key Chokepoints",
-      action: "Sanctum exit turn daggara 4 marshals, prasadam counter daggara 2 marshals active ga undali.",
-      target_area: "Sanctum Exit Turn & East Plaza",
-      impact: "Prevents counter-flow collisions and sudden bottlenecks.",
-    },
-  ];
+  const directives = flowData?.top_directives || [];
+  if (directives.length === 0) return null;
 
-  const rawDirectives = flowData?.top_directives || [];
-  const directives = rawDirectives.length > 0 ? rawDirectives : defaultDirectives;
   const festStatus = flowData?.festival_status || "OPTIMAL";
   const netRate = flowData?.net_flow_rate_pax_min ?? 0;
   const totalInside = flowData?.total_inside_festival ?? 0;
@@ -106,7 +60,7 @@ export default function FlowDirectivesCard({ flowData, loading }) {
           </div>
           <div>
             <div style={{ fontSize: 16, fontWeight: 700, display: "flex", alignItems: "center", gap: 8 }}>
-              <span style={{ color: "var(--cc-text-primary)" }}>AI Crowd Flow & Clearance Directives</span>
+              <span style={{ color: "var(--cc-text-primary)" }}>AI Crowd Flow &amp; Clearance Directives</span>
               <span
                 style={{
                   fontSize: 11,
@@ -123,7 +77,7 @@ export default function FlowDirectivesCard({ flowData, loading }) {
               </span>
             </div>
             <div style={{ fontSize: 12, color: "var(--cc-text-muted)", marginTop: 2 }}>
-              Ground Directives for Police, Temple Marshals & Security In-Charges
+              Ground Directives for Police, Temple Marshals &amp; Security In-Charges
             </div>
           </div>
         </div>
