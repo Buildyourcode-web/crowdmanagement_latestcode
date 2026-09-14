@@ -433,8 +433,8 @@ class CanonicalCountingService:
                     loc_dt = raw_ts.astimezone(tz)
                     h = loc_dt.hour
                     c_delta = int(r.count_delta or 0)
-                    inf = c_delta if (r.direction == "IN" and c_delta == 1) else 0
-                    outf = c_delta if (r.direction == "OUT" and c_delta == 1) else 0
+                    inf = c_delta if (r.direction == "IN" and c_delta > 0) else 0
+                    outf = c_delta if (r.direction == "OUT" and c_delta > 0) else 0
                     if inf > 0 or outf > 0:
                         has_ledger_data = True
                     cur_in, cur_out = hourly_map.get(h, (0, 0))
@@ -533,8 +533,8 @@ class CanonicalCountingService:
                     d_str = str(loc_dt.date())
                     h = loc_dt.hour
                     c_delta = int(r.count_delta or 0)
-                    inf = c_delta if (r.direction == "IN" and c_delta == 1) else 0
-                    outf = c_delta if (r.direction == "OUT" and c_delta == 1) else 0
+                    inf = c_delta if (r.direction == "IN" and c_delta > 0) else 0
+                    outf = c_delta if (r.direction == "OUT" and c_delta > 0) else 0
 
                     if inf > 0 or outf > 0:
                         has_ledger = True

@@ -17,6 +17,7 @@ from app.db.session import AsyncSessionLocal, async_engine
 from app.models.camera import Camera
 from app.models.crowd import CrowdSnapshot
 from app.models.event import Event
+from app.services.counting_service import CanonicalCountingService
 from sqlalchemy import select, or_, func
 
 
@@ -137,16 +138,13 @@ async def insert_manual_count(
             h_start_utc = h_start_local.astimezone(ZoneInfo("UTC"))
             h_end_utc = h_end_local.astimezone(ZoneInfo("UTC"))
 
-            q = select(func.coalesce(func.sum(CrowdSnapshot.inflow_rate), 0)).where(
-                CrowdSnapshot.event_id == event.id,
-                CrowdSnapshot.timestamp >= h_start_utc,
-                CrowdSnapshot.timestamp < h_end_utc,
+            counting_srv = CanonicalCountingService(db)
+            existing_inflow, _ = await counting_srv.get_durable_counts(
+                event_id=event.id,
+                camera_id=target_cam.id if target_cam else None,
+                start_time=h_start_utc,
+                end_time=h_end_utc,
             )
-            if target_cam:
-                q = q.where(CrowdSnapshot.camera_id == target_cam.id)
-
-            cur_res = await db.execute(q)
-            existing_inflow = int(cur_res.scalar() or 0)
 
             delta = set_total_inflow - existing_inflow
             print(f"\n🔍 Target Mode (--set-total {set_total_inflow}):")
