@@ -143,6 +143,9 @@ export default function ROIEditor({
   }, [cameraPurposes, initialTool]);
 
   const [activeTool, setActiveTool] = useState(initialTool || availableTools[0] || "ENTRY_LINE");
+  const isZoneTool = useMemo(() => {
+    return ["CROWD_ROI", "ZONE_BOUNDARY"].includes(activeTool) || isZoneCamera;
+  }, [activeTool, isZoneCamera]);
 
   useEffect(() => {
     setObjective(assignedObjective);
@@ -370,7 +373,7 @@ export default function ROIEditor({
       }
       geom = {
         points: currentPoints,
-        ...(isZoneCamera ? {
+        ...(isZoneTool ? {
           warning_threshold: parseInt(warningThreshold, 10) || 50,
           danger_threshold: parseInt(dangerThreshold, 10) || 80,
           capacity: parseInt(capacity, 10) || 100,
@@ -424,8 +427,8 @@ export default function ROIEditor({
         console.warn("Auto-start Crowd AI notice:", e);
       }
 
-      // If configuring dedicated Zone Density camera, sync camera zone assignment
-      if (isZoneCamera) {
+      // If configuring Zone Density polygon, sync camera zone assignment
+      if (isZoneTool) {
         try {
           await fetch(`${BACKEND}/api/v1/frs-engine/cameras/${camCode}/assign-zone?zone_code=${selectedZone}`, {
             method: "PATCH",
@@ -707,8 +710,8 @@ export default function ROIEditor({
 
           {/* Geometry Properties */}
           <div style={{ display: "flex", flexDirection: "column", gap: 10 }}>
-            {/* Zone Selector — ONLY for dedicated Zone Density camera */}
-            {isZoneCamera && (
+            {/* Zone Selector — For Zone Density polygons */}
+            {isZoneTool && (
               <div style={{ background: "var(--cc-bg-root)", padding: "10px 12px", borderRadius: 6, border: "1px solid var(--cc-border)" }}>
                 <label style={{ fontSize: 11, fontWeight: 700, color: "var(--cc-accent)", display: "flex", alignItems: "center", gap: 6, marginBottom: 8, textTransform: "uppercase" }}>
                   <i className="bi bi-geo-alt-fill" style={{ color: "#58a6ff" }} /> Select Zone (A, B, C, D):
@@ -771,8 +774,8 @@ export default function ROIEditor({
                 className="cc-input"
                 style={{ width: "100%", padding: "6px 8px", fontSize: 12 }}
                 placeholder={
-                  isZoneCamera
-                    ? "e.g. Zone A Main Courtyard Density Area"
+                  isZoneTool
+                    ? `e.g. ${selectedZone} Main Courtyard Density Area`
                     : assignedObjective === "EXIT"
                     ? "e.g. Exit Gate Passage Corridor"
                     : "e.g. Entry Gate Passage Corridor"
@@ -796,7 +799,7 @@ export default function ROIEditor({
                   <option value="BOTH">BOTH (Bi-directional)</option>
                 </select>
               </div>
-            ) : isZoneCamera ? (
+            ) : isZoneTool ? (
               <div style={{ display: "flex", flexDirection: "column", gap: 8, background: "var(--cc-bg-root)", padding: 10, borderRadius: 6, border: "1px solid var(--cc-border)" }}>
                 <div style={{ fontSize: 11, fontWeight: 700, color: "var(--cc-accent)", textTransform: "uppercase" }}>
                   Density Alert Thresholds
