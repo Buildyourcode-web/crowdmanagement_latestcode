@@ -192,6 +192,22 @@ async def insert_manual_count(
                 risk_score=0.0,
             )
             db.add(snap)
+
+            # Update Camera record if applicable
+            if cam:
+                cam.people_count = max(0, c_in - c_out)
+                cam.last_seen_at = dt_utc
+                db.add(cam)
+
+            # Update Zone record if applicable
+            if z_id:
+                from app.models.zone import Zone
+                z_res = await db.execute(select(Zone).where(Zone.id == z_id))
+                zone_obj = z_res.scalars().first()
+                if zone_obj:
+                    zone_obj.current_people = max(0, c_in - c_out)
+                    db.add(zone_obj)
+
             print(f" • Camera {c_code:<12} (Zone: {z_code}): +{c_in} Entries, +{c_out} Exits")
 
         await db.commit()
