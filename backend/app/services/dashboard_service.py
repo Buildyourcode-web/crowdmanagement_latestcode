@@ -322,9 +322,9 @@ class DashboardService:
 
         # Live worker fallback: if DB counts are still 0 (new deployment / line_crossing_events empty),
         # aggregate in-memory in_count / out_count from active crowd workers so dashboard is never blank.
+        live_in = 0
+        live_out = 0
         if fest_total_in == 0 and fest_total_out == 0:
-            live_in = 0
-            live_out = 0
             workers_pool = list(live_frs_workers.values())
             if not workers_pool:
                 try:
@@ -554,20 +554,34 @@ class DashboardService:
                 # Specific day (Day 1..Day N or Yesterday/Today)
                 h_items, peak_h = await self.counting_service.get_hourly_breakdown(target_event_id, target_d)
                 hourly_flow = [HourlyFlowPoint(hour=i.hour, entry=i.entry, exit=i.exit, net_flow=i.net_flow) for i in h_items]
+                if target_d == today_date and live_in > 0 and sum(p.entry for p in hourly_flow) == 0:
+                    cur_h_str = f"{now_local.hour:02d}:00"
+                    for p in hourly_flow:
+                        if p.hour == cur_h_str:
+                            p.entry = live_in
+                            p.exit = live_out
+                            p.net_flow = live_in - live_out
+                    if peak_h in ("—", "No data"):
+                        peak_h = f"{now_local.hour:02d}:00 - {(now_local.hour+1):02d}:00"
             else:
                 # Festival Total -> Show Day-by-Day comparison bars
                 daily_items, _, _, _ = await self.counting_service.get_festival_daily_breakdown(target_event_id)
                 max_f_ent = 0
                 for d_item in daily_items:
-                    if d_item.entry_count > max_f_ent:
-                        max_f_ent = d_item.entry_count
+                    ent_val = d_item.entry_count
+                    ext_val = d_item.exit_count
+                    if d_item.day_number == cur_day_num and ent_val == 0 and live_in > 0:
+                        ent_val = live_in
+                        ext_val = live_out
+                    if ent_val > max_f_ent:
+                        max_f_ent = ent_val
                         peak_h = f"{d_item.label} (Peak Day)"
                     hourly_flow.append(
                         HourlyFlowPoint(
                             hour=d_item.label,
-                            entry=d_item.entry_count,
-                            exit=d_item.exit_count,
-                            net_flow=d_item.entry_count - d_item.exit_count,
+                            entry=ent_val,
+                            exit=ext_val,
+                            net_flow=ent_val - ext_val,
                         )
                     )
 
@@ -582,12 +596,17 @@ class DashboardService:
         if target_event_id:
             days_breakdown, _, _, _ = await self.counting_service.get_festival_daily_breakdown(target_event_id)
             for d_item in days_breakdown:
+                ent_val = d_item.entry_count
+                ext_val = d_item.exit_count
+                if d_item.day_number == cur_day_num and ent_val == 0 and live_in > 0:
+                    ent_val = live_in
+                    ext_val = live_out
                 daily_trend.append(
                     DailyTrendPoint(
                         date=d_item.date,
-                        entries=d_item.entry_count,
-                        exits=d_item.exit_count,
-                        net_flow=d_item.entry_count - d_item.exit_count,
+                        entries=ent_val,
+                        exits=ext_val,
+                        net_flow=ent_val - ext_val,
                     )
                 )
         _step("11-daily-query")
