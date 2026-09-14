@@ -48,7 +48,6 @@ async def get_current_user(
     auth: Optional[HTTPAuthorizationCredentials] = Security(security),
     db: AsyncSession = Depends(get_db),
 ) -> User:
-    global _cached_dev_user, _cached_users
     if not auth or not auth.credentials:
         if settings.APP_ENV == "development" and os.getenv("ENABLE_DEV_AUTH_BYPASS", "").lower() in ("true", "1"):
             stmt = (
