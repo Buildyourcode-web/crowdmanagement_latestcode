@@ -299,12 +299,12 @@ export default function Cameras() {
     });
   }
 
-  // 2. Overlay live RTSP engine workers actively running (scoped to active event's cameras)
+  // 2. Overlay live RTSP engine workers actively running
   for (const eng of engineCameras) {
     const rawId = eng.camera_id || eng.id;
+    if (!rawId) continue;
     const cleanId = (rawId || "").replace("-CROWD", "").replace("-FRS", "");
-    const matchKey = activeStreamsMap.has(rawId) ? rawId : (activeStreamsMap.has(cleanId) ? cleanId : null);
-    if (!matchKey) continue;
+    const matchKey = activeStreamsMap.has(rawId) ? rawId : (activeStreamsMap.has(cleanId) ? cleanId : rawId);
     const existing = activeStreamsMap.get(matchKey) || {};
     const isFrs = Boolean(eng.is_frs || eng.camera_type === "FRS");
     activeStreamsMap.set(matchKey, {
