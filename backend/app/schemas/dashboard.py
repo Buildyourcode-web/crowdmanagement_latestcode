@@ -104,11 +104,13 @@ class DashboardSummaryResponse(BaseModel):
 
     # Hero KPI
     total_visitors_festival: int = Field(0, description="Cumulative entry across all festival days")
-    festival_total_entries: int = Field(0, description="Cumulative entries across all festival days (14-24 Sept)")
-    festival_total_exits: int = Field(0, description="Cumulative exits across all festival days (14-24 Sept)")
+    festival_total_entries: int = Field(0, description="Cumulative entries across all festival days")
+    festival_total_exits: int = Field(0, description="Cumulative exits across all festival days")
     festival_day_current: int = 1
     festival_day_total: int = 10
     festival_day_label: str = "Day 1 of 10"
+    selected_day_number: Optional[int] = None
+    event_days: List[Dict[str, Any]] = Field(default_factory=list)
     today_entries: int = 0
     today_exits: int = 0
     selected_range_entries: int = 0

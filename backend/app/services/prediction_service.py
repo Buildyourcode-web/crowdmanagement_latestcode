@@ -49,7 +49,7 @@ class PredictionService:
             from app.frs_engine.frs_service import _camera_workers, _workers_lock
             with _workers_lock:
                 for cid, w in _camera_workers.items():
-                    if getattr(w, "running", False) and getattr(w, "crowd_ai_active", False) and "QUEUE" in getattr(w, "ai_purposes", []):
+                    if getattr(w, "running", False) and getattr(w, "crowd_ai_active", False) and any(p in getattr(w, "ai_purposes", []) for p in ("QUEUE", "ENTRY", "ENTRY_EXIT")):
                         cnt = getattr(w, "occupancy_count", 0)
                         mov = getattr(w, "queue_movement_status", "STOPPED")
                         cur_wait = round((cnt * 1.5) / 60) if cnt > 0 else 0

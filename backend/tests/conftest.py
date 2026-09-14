@@ -25,7 +25,7 @@ from app.security.permissions import DEFAULT_ROLE_PERMISSIONS
 
 # SQLite async in-memory with StaticPool so all connections share the same memory database
 test_engine = create_async_engine(
-    "sqlite+aiosqlite:///:memory:",
+    "sqlite+aiosqlite:///file:testdb_mem?mode=memory&cache=shared&uri=true",
     connect_args={"check_same_thread": False},
     poolclass=StaticPool,
 )
@@ -37,6 +37,11 @@ TestSessionLocal = async_sessionmaker(
     autocommit=False,
     autoflush=False,
 )
+
+# Bind app.db.session so background tasks and engine calls use the test db
+from app.db import session as db_session_module
+db_session_module.AsyncSessionLocal = TestSessionLocal
+db_session_module.async_engine = test_engine
 
 
 @pytest_asyncio.fixture(scope="session")

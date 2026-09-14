@@ -1,14 +1,12 @@
 """
-analytics.py — Spatial Geometry Analytics for Crowd AI.
+analytics.py — Production-Grade Spatial Geometry & Boundary State Machine Analytics for Crowd AI.
 
-Handles:
-- Point-in-polygon Ray Casting algorithm for normalized coordinates.
-- Reference point calculation: Bottom-center of bounding box ((x1+x2)/2, y2).
-- Exclusion zone filtering.
-- People count inside Crowd ROI.
-- Relative density vs calibrated physical density (persons/m²).
-- Entry/Exit line crossing detection with vector orientation and duplicate prevention.
-- Rolling window inflow and outflow rate estimation.
+Key Features:
+- Normal Vector & Signed Distance State Machine:
+  Tracks transition through OUTSIDE -> BUFFER_ZONE -> INSIDE.
+- Ray-casting point-in-polygon for normalized geometries.
+- Geometric segment intersection with anti-duplicate debounce and clearance depth.
+- Emission of durable ValidatedCrossing payloads with unique idempotency keys.
 """
 
 from collections import deque
@@ -19,6 +17,28 @@ from pydantic import BaseModel, Field
 
 from app.ai.pipelines.crowd.config import CrowdPipelineConfig
 from app.ai.pipelines.crowd.tracker import TrackedPerson
+
+
+class ValidatedCrossing(BaseModel):
+    """Immutable crossing event payload to be persisted to PostgreSQL."""
+    event_id: Optional[str] = None
+    site_id: Optional[str] = None
+    camera_id: str
+    camera_code: str
+    line_id: str
+    line_name: Optional[str] = None
+    track_session_id: str
+    track_token: str
+    crossing_sequence: int
+    direction: str  # "IN" or "OUT"
+    count_delta: int = 1
+    detection_confidence: float
+    ground_x: float
+    ground_y: float
+    signed_distance: float
+    timestamp: float
+    idempotency_key: str
+    frame_id: int = 0
 
 
 class CrowdMetricsResult(BaseModel):
@@ -97,6 +117,34 @@ def polygon_area_normalized(points: List[Dict[str, float]]) -> float:
     return abs(area) / 2.0
 
 
+def get_line_unit_normal(l1: Tuple[float, float], l2: Tuple[float, float]) -> Tuple[float, float]:
+    """
+    Computes the perpendicular unit normal vector for line segment l1 -> l2.
+    Points to the left of the line vector (the 'inside' convention).
+    """
+    dx = l2[0] - l1[0]
+    dy = l2[1] - l1[1]
+    length = math.hypot(dx, dy)
+    if length < 1e-6:
+        return (0.0, 1.0)
+    return (-dy / length, dx / length)
+
+
+def get_signed_distance_to_line(
+    point: Tuple[float, float],
+    l1: Tuple[float, float],
+    l2: Tuple[float, float],
+    normal: Optional[Tuple[float, float]] = None,
+) -> float:
+    """
+    Calculates signed perpendicular distance from point to line l1 -> l2.
+    """
+    nx, ny = normal if normal is not None else get_line_unit_normal(l1, l2)
+    vx = point[0] - l1[0]
+    vy = point[1] - l1[1]
+    return vx * nx + vy * ny
+
+
 def check_segment_intersection(
     p1: Tuple[float, float],
     p2: Tuple[float, float],
@@ -104,43 +152,31 @@ def check_segment_intersection(
     l2: Tuple[float, float],
 ) -> Optional[str]:
     """
-    Tests if trajectory segment p1 -> p2 crosses line segment l1 -> l2.
-    Returns 'IN' or 'OUT' based on vector orientation (2D cross product),
-    or None if no intersection.
+    Tests if movement segment p1 -> p2 geometrically intersects line segment l1 -> l2.
+    Returns 'IN' if moving towards the positive normal direction, 'OUT' if reversed,
+    or None if segments do not intersect.
     """
     def ccw(A, B, C):
         return (C[1] - A[1]) * (B[0] - A[0]) > (B[1] - A[1]) * (C[0] - A[0])
 
-    # Check bounding-box overlap first
     if max(p1[0], p2[0]) < min(l1[0], l2[0]) or max(l1[0], l2[0]) < min(p1[0], p2[0]):
         return None
     if max(p1[1], p2[1]) < min(l1[1], l2[1]) or max(l1[1], l2[1]) < min(p1[1], p2[1]):
         return None
 
-    # Line intersection test
-    intersect = (ccw(p1, l1, l2) != ccw(p2, l1, l2)) and (ccw(p1, p2, l1) != ccw(p1, p2, l2))
-    if not intersect:
+    intersects = (ccw(p1, l1, l2) != ccw(p2, l1, l2)) and (ccw(p1, p2, l1) != ccw(p1, p2, l2))
+    if not intersects:
         return None
 
-    # Determine crossing direction via 2D cross product:
-    # vector line: l2 - l1
-    # vector movement: p2 - p1
-    vx_line = l2[0] - l1[0]
-    vy_line = l2[1] - l1[1]
-    vx_mov = p2[0] - p1[0]
-    vy_mov = p2[1] - p1[1]
-
-    cross_z = (vx_line * vy_mov) - (vy_line * vx_mov)
-    if cross_z > 0:
-        return "IN"
-    elif cross_z < 0:
-        return "OUT"
-    return "IN"
+    normal = get_line_unit_normal(l1, l2)
+    d1 = get_signed_distance_to_line(p1, l1, l2, normal)
+    d2 = get_signed_distance_to_line(p2, l1, l2, normal)
+    return "IN" if d2 >= d1 else "OUT"
 
 
 class CrowdSpatialAnalytics:
     """
-    Spatial Analytics engine that computes crowd metrics from tracked persons.
+    Production Spatial Analytics engine with boundary state machine and hysteresis.
     """
 
     def __init__(self, config: CrowdPipelineConfig):
@@ -152,15 +188,44 @@ class CrowdSpatialAnalytics:
         # Precompute normalized ROI area
         self.roi_normalized_area = polygon_area_normalized(self.roi_points) if len(self.roi_points) >= 3 else 0.0
 
-        # Rolling window queues for line crossing rates (tuples of timestamp, direction)
+        # Precompute line normals
+        self._line_normals: Dict[str, Tuple[float, float]] = {}
+        for line in self.counting_lines:
+            line_id = line.get("id", line.get("name", "line"))
+            l1 = (float(line["start"]["x"]), float(line["start"]["y"]))
+            l2 = (float(line["end"]["x"]), float(line["end"]["y"]))
+            self._line_normals[line_id] = get_line_unit_normal(l1, l2)
+
+        # Rolling window queues for line crossing rates
         self._inflow_events: Deque[float] = deque()
         self._outflow_events: Deque[float] = deque()
         self.window_seconds = config.counting_window_seconds
 
-    def process_tracks(self, tracks: List[TrackedPerson], timestamp: float) -> CrowdMetricsResult:
-        """Processes current active tracks against spatial geometries."""
+        # Newly validated crossings list
+        self._new_crossings: List[ValidatedCrossing] = []
+
+        # Spatial Hysteresis Parameters (Normalized space)
+        self.buffer_epsilon = 0.015   # 1.5% buffer zone around line
+        self.clearance_depth = 0.02   # 2% clearance depth into inside zone
+
+    def get_and_clear_crossings(self) -> List[ValidatedCrossing]:
+        """Returns and flushes newly validated crossing events."""
+        crossings = list(self._new_crossings)
+        self._new_crossings.clear()
+        return crossings
+
+    def process_tracks(
+        self,
+        tracks: List[TrackedPerson],
+        timestamp: float,
+        frame_id: int = 0,
+    ) -> CrowdMetricsResult:
+        """
+        Processes active tracks against spatial geometries and boundary state machine.
+        Returns calculated metrics. Newly validated crossings can be retrieved via get_and_clear_crossings().
+        """
         has_valid_roi = len(self.roi_points) >= 3
-        if not has_valid_roi:
+        if not has_valid_roi and len(self.counting_lines) == 0:
             return CrowdMetricsResult(
                 camera_id=self.config.camera_id,
                 camera_code=self.config.camera_code,
@@ -200,38 +265,134 @@ class CrowdSpatialAnalytics:
                 continue
 
             # Check Crowd ROI
-            in_roi = is_point_in_polygon(pt, self.roi_points)
-            trk.inside_roi = in_roi
-            if in_roi:
-                current_roi_count += 1
-                active_roi_ids.append(trk.track_id)
+            if has_valid_roi:
+                in_roi = is_point_in_polygon(pt, self.roi_points)
+                trk.inside_roi = in_roi
+                if in_roi:
+                    current_roi_count += 1
+                    active_roi_ids.append(trk.track_id)
+            else:
+                trk.inside_roi = False
 
-        # 2. Line Crossing Analytics
+        # 2. Boundary State Machine & Line Crossing Analytics
         has_lines = len(self.counting_lines) > 0
         if has_lines:
             for trk in tracks:
-                prev_pt = trk.previous_point
                 curr_pt = trk.current_point
-                if not prev_pt or prev_pt == curr_pt:
-                    continue
+                prev_pt = trk.previous_point
 
                 for line in self.counting_lines:
                     line_id = line.get("id", line.get("name", "line"))
-                    line_start = (float(line["start"]["x"]), float(line["start"]["y"]))
-                    line_end = (float(line["end"]["x"]), float(line["end"]["y"]))
+                    line_name = line.get("name")
+                    l1 = (float(line["start"]["x"]), float(line["start"]["y"]))
+                    l2 = (float(line["end"]["x"]), float(line["end"]["y"]))
                     allowed_direction = (line.get("direction") or "BOTH").upper()
 
-                    crossing_dir = check_segment_intersection(prev_pt, curr_pt, line_start, line_end)
+                    normal = self._line_normals.get(line_id) or get_line_unit_normal(l1, l2)
+                    dist_curr = get_signed_distance_to_line(curr_pt, l1, l2, normal)
+
+                    # Update track state based on signed distance
+                    if dist_curr < -self.buffer_epsilon:
+                        trk.boundary_state = "OUTSIDE"
+                        trk.confirmed_outside = True
+                    elif dist_curr > self.buffer_epsilon:
+                        trk.boundary_state = "INSIDE"
+                        trk.confirmed_inside = True
+                    else:
+                        trk.boundary_state = "BUFFER_ZONE"
+
+                    if not prev_pt or prev_pt == curr_pt:
+                        continue
+
+                    dist_prev = get_signed_distance_to_line(prev_pt, l1, l2, normal)
+
+                    # Check for segment intersection and side transition
+                    intersects = check_segment_intersection(prev_pt, curr_pt, l1, l2)
+
+                    # IN Crossing Condition:
+                    # Traversed from negative to positive side across the line
+                    is_in_crossing = (
+                        (dist_prev < -self.buffer_epsilon and dist_curr > self.buffer_epsilon) or
+                        (dist_prev < 0.0 and dist_curr > 0.0 and intersects) or
+                        (trk.confirmed_outside and intersects and dist_curr > self.clearance_depth)
+                    )
+
+                    # OUT Crossing Condition:
+                    is_out_crossing = (
+                        (dist_prev > self.buffer_epsilon and dist_curr < -self.buffer_epsilon) or
+                        (dist_prev > 0.0 and dist_curr < 0.0 and intersects) or
+                        (trk.confirmed_inside and intersects and dist_curr < -self.clearance_depth)
+                    )
+
+                    purpose = getattr(self.config, "camera_purpose", "ENTRY").upper()
+                    crossing_dir: Optional[str] = None
+                    count_delta: int = 1
+
+                    if is_in_crossing:
+                        crossing_dir = "IN"
+                        if purpose == "EXIT":
+                            count_delta = 0
+                    elif is_out_crossing:
+                        crossing_dir = "OUT"
+                        if purpose == "ENTRY":
+                            count_delta = 0
+
+                    # Filter by line allowed_direction if configured
+                    if crossing_dir:
+                        if allowed_direction == "IN" and crossing_dir != "IN":
+                            if purpose == "ENTRY":
+                                count_delta = 0
+                            else:
+                                crossing_dir = None
+                        elif allowed_direction == "OUT" and crossing_dir != "OUT":
+                            if purpose == "EXIT":
+                                count_delta = 0
+                            else:
+                                crossing_dir = None
+
                     if crossing_dir:
                         # Prevent duplicate counts while lingering near the line
                         crossing_key = f"{line_id}_{crossing_dir}"
+                        opposite_key = f"{line_id}_{'OUT' if crossing_dir == 'IN' else 'IN'}"
+
                         if crossing_key not in trk.crossed_lines:
                             trk.crossed_lines.add(crossing_key)
+                            trk.crossed_lines.discard(opposite_key)  # Reset opposite side to allow legitimate returns
+                            trk.crossing_sequence += 1
 
-                            if allowed_direction in ("IN", "BOTH") and crossing_dir == "IN":
+                            if crossing_dir == "IN" and count_delta > 0:
                                 self._inflow_events.append(timestamp)
-                            elif allowed_direction in ("OUT", "BOTH") and crossing_dir == "OUT":
+                            elif crossing_dir == "OUT" and count_delta > 0:
                                 self._outflow_events.append(timestamp)
+
+                            evt_id_str = self.config.event_id or "event"
+                            cam_id_str = self.config.camera_id
+                            idempotency_key = (
+                                f"{evt_id_str}_{cam_id_str}_{line_id}_{trk.track_session_id}_"
+                                f"CROSSING-{trk.crossing_sequence:03d}"
+                            )
+
+                            crossing_record = ValidatedCrossing(
+                                event_id=self.config.event_id,
+                                site_id=self.config.site_id,
+                                camera_id=self.config.camera_id,
+                                camera_code=self.config.camera_code,
+                                line_id=line_id,
+                                line_name=line_name,
+                                track_session_id=trk.track_session_id,
+                                track_token=trk.track_code,
+                                crossing_sequence=trk.crossing_sequence,
+                                direction=crossing_dir,
+                                count_delta=count_delta,
+                                detection_confidence=round(trk.confidence, 4),
+                                ground_x=round(curr_pt[0], 4),
+                                ground_y=round(curr_pt[1], 4),
+                                signed_distance=round(dist_curr, 4),
+                                timestamp=timestamp,
+                                idempotency_key=idempotency_key,
+                                frame_id=frame_id,
+                            )
+                            self._new_crossings.append(crossing_record)
 
             # Prune events older than rolling window
             cutoff = timestamp - self.window_seconds
@@ -240,7 +401,6 @@ class CrowdSpatialAnalytics:
             while self._outflow_events and self._outflow_events[0] < cutoff:
                 self._outflow_events.popleft()
 
-            # Extrapolate to rate per minute
             factor = 60.0 / max(float(self.window_seconds), 1.0)
             inflow_rate = int(round(len(self._inflow_events) * factor))
             outflow_rate = int(round(len(self._outflow_events) * factor))
@@ -251,42 +411,45 @@ class CrowdSpatialAnalytics:
             flow_delta = None
 
         # 3. Density Calculation
-        if self.config.physical_area_m2 and self.config.physical_area_m2 > 0:
-            density_val = round(current_roi_count / self.config.physical_area_m2, 2)
-            density_type = "CALIBRATED"
-            density_unit = "persons/m²"
-            # Calibrated density levels (persons/m²)
-            if density_val < 2.0:
-                density_level = "LOW"
-            elif density_val < 3.5:
-                density_level = "MODERATE"
-            elif density_val < 5.0:
-                density_level = "HIGH"
+        if has_valid_roi:
+            if self.config.physical_area_m2 and self.config.physical_area_m2 > 0:
+                density_val = round(current_roi_count / self.config.physical_area_m2, 2)
+                density_type = "CALIBRATED"
+                density_unit = "persons/m²"
+                if density_val < 2.0:
+                    density_level = "LOW"
+                elif density_val < 3.5:
+                    density_level = "MODERATE"
+                elif density_val < 5.0:
+                    density_level = "HIGH"
+                else:
+                    density_level = "CRITICAL"
             else:
-                density_level = "CRITICAL"
-        else:
-            # Relative density based on normalized ROI area
-            norm_area = max(self.roi_normalized_area, 0.01)
-            density_val = round(current_roi_count / norm_area, 1)
-            density_type = "RELATIVE_DENSITY"
-            density_unit = "RELATIVE_DENSITY"
+                norm_area = max(self.roi_normalized_area, 0.01)
+                density_val = round(current_roi_count / norm_area, 1)
+                density_type = "RELATIVE_DENSITY"
+                density_unit = "RELATIVE_DENSITY"
 
-            # Categorize relative density against configured thresholds
-            if current_roi_count <= self.config.density_low_max:
-                density_level = "LOW"
-            elif current_roi_count <= self.config.density_moderate_max:
-                density_level = "MODERATE"
-            elif current_roi_count <= self.config.density_high_max:
-                density_level = "HIGH"
-            else:
-                density_level = "CRITICAL"
+                if current_roi_count <= self.config.density_low_max:
+                    density_level = "LOW"
+                elif current_roi_count <= self.config.density_moderate_max:
+                    density_level = "MODERATE"
+                elif current_roi_count <= self.config.density_high_max:
+                    density_level = "HIGH"
+                else:
+                    density_level = "CRITICAL"
+        else:
+            density_val = 0.0
+            density_type = "NOT_CONFIGURED"
+            density_unit = "NOT_CONFIGURED"
+            density_level = "LOW"
 
         return CrowdMetricsResult(
             camera_id=self.config.camera_id,
             camera_code=self.config.camera_code,
             profile_id=self.config.profile_id,
             timestamp=timestamp,
-            is_roi_configured=True,
+            is_roi_configured=has_valid_roi,
             crowd_roi_name=self.config.crowd_roi_name,
             current_count=current_roi_count,
             total_tracked_in_frame=len(tracks),

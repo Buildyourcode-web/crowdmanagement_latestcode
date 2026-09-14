@@ -36,63 +36,83 @@ class AnalyticsService:
         self.counting_service = CanonicalCountingService(db)
 
     async def get_attendance_analytics(
-        self, event_id: Optional[uuid.UUID] = None
+        self,
+        event_id: Optional[uuid.UUID] = None,
+        day_number: Optional[int] = None,
+        date_range: Optional[str] = None,
     ) -> AttendanceAnalyticsResponse:
-        evt = await self.counting_service.get_event(event_id)
+        evt, days_template, cur_day_num, tz = await self.counting_service.resolve_event_days(event_id)
         target_event_id = evt.id if evt else event_id
-        tz = self.counting_service.get_event_timezone(evt)
-        now_local = datetime.now(timezone.utc).astimezone(tz)
-        today_date = now_local.date()
 
-        # Today's hourly inflow from canonical counting service
+        # Resolve selected target day boundary
+        target_d, start_utc, end_utc, sel_day_num, range_label = await self.counting_service.resolve_day_boundary(
+            target_event_id, day_number=day_number, date_range=date_range or "today"
+        )
+
+        event_days_serialized = [
+            {
+                "day_number": d.day_number,
+                "date": d.date,
+                "day_name": d.day_name,
+                "label": d.label,
+                "status": d.status,
+            }
+            for d in days_template
+        ]
+
+        # Calculate counts for selected day or festival
+        if date_range and date_range.lower() == "festival" and target_event_id:
+            days_breakdown, fest_entries, fest_exits, _ = await self.counting_service.get_festival_daily_breakdown(target_event_id)
+            total_entries = fest_entries
+            total_exits = fest_exits
+            total_footfall = fest_entries
+        elif target_event_id:
+            d_in, d_out, occ, footfall, day_info = await self.counting_service.get_event_day_counts(
+                target_event_id, day_number=sel_day_num, date_range=date_range
+            )
+            total_entries = d_in
+            total_exits = d_out
+            total_footfall = footfall
+            days_breakdown, _, _, _ = await self.counting_service.get_festival_daily_breakdown(target_event_id)
+        else:
+            total_entries = 0
+            total_exits = 0
+            total_footfall = 0
+            days_breakdown = []
+
+        # Target day's hourly breakdown
         if target_event_id:
-            hourly_raw, peak_hour = await self.counting_service.get_hourly_breakdown(target_event_id, today_date)
+            hourly_raw, peak_hour = await self.counting_service.get_hourly_breakdown(target_event_id, target_d)
             hourly_items = [HourlyAttendanceItem(hour=h.hour, visitors=h.entry) for h in hourly_raw]
         else:
             hourly_items = [HourlyAttendanceItem(hour=f"{h:02d}:00", visitors=0) for h in range(24)]
             peak_hour = "—"
 
-        total_visitors_today = sum(h.visitors for h in hourly_items)
         peak_count = max((h.visitors for h in hourly_items), default=0)
+        if peak_count == 0:
+            peak_hour = "—"
 
-        # Query daily historical inflow for past 7 days (Event-scoped)
-        daily_items: List[DailyAttendanceItem] = []
-        if target_event_id:
-            cutoff_7d = datetime.combine((today_date - timedelta(days=6)), time.min, tzinfo=tz).astimezone(timezone.utc)
-            tz_name = (evt.timezone if evt and evt.timezone else "Asia/Kolkata").strip()
-            kolkata_ts = func.timezone(tz_name, CrowdSnapshot.timestamp)
-
-            stmt_daily = (
-                select(
-                    func.date(kolkata_ts).label("d"),
-                    func.sum(CrowdSnapshot.inflow_rate).label("inflow"),
-                )
-                .where(
-                    CrowdSnapshot.event_id == target_event_id,
-                    CrowdSnapshot.timestamp >= cutoff_7d,
-                )
-                .group_by(func.date(kolkata_ts))
-                .order_by(func.date(kolkata_ts).asc())
+        daily_items = [
+            DailyAttendanceItem(
+                day=d.label if d.label else f"Day {d.day_number}",
+                visitors=d.entry_count,
             )
-            res_daily = await self.db.execute(stmt_daily)
-            d_map = {str(r.d): int(r.inflow or 0) for r in res_daily.all() if r.d is not None}
+            for d in days_breakdown
+        ]
 
-            for idx in range(7):
-                d_val = today_date - timedelta(days=6 - idx)
-                d_str = str(d_val)
-                v_cnt = d_map.get(d_str, 0)
-                if d_val == today_date:
-                    v_cnt = total_visitors_today
-                d_label = f"Day {idx + 1}"
-                daily_items.append(DailyAttendanceItem(day=d_label, visitors=v_cnt))
-
-        avg_per_hour = total_visitors_today // max(1, len(hourly_items))
+        avg_per_hour = total_entries // max(1, len(hourly_items))
 
         return AttendanceAnalyticsResponse(
-            totalVisitorsToday=total_visitors_today,
+            totalVisitorsToday=total_entries,
+            totalEntries=total_entries,
+            totalExits=total_exits,
+            totalFootfall=total_footfall,
             peakHour=peak_hour,
             peakCount=peak_count,
             avgPerHour=avg_per_hour,
+            dayNumber=sel_day_num,
+            selectedDayLabel=range_label,
+            eventDays=event_days_serialized,
             hourly=hourly_items,
             daily=daily_items,
         )

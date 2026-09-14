@@ -3,10 +3,8 @@ import { useEffect, useState, useRef, useCallback } from "react";
 import ReactECharts from "echarts-for-react";
 import {
   getAttendanceAnalytics,
-  getCameraAnalytics,
   getFestival10DaysAnalytics,
   downloadFestival10DaysCsv,
-  getIncidentAnalytics,
   getOperationalFlowAnalytics,
 } from "../services/analyticsService.js";
 import { realtimeService } from "../services/realtimeService.js";
@@ -24,9 +22,9 @@ export default function Analytics() {
   const theme = useAppStore((s) => s.theme);
   const ct = getChartTheme(theme);
   const activeEventId = useEventStore((s) => s.activeEventId);
+  const [selectedDayNumber, setSelectedDayNumber] = useState(null);
+  const [selectedDateRange, setSelectedDateRange] = useState(null);
   const [attendance, setAttendance] = useState(null);
-  const [camera, setCamera] = useState(null);
-  const [incident, setIncident] = useState(null);
   const [flowData, setFlowData] = useState(null);
   const [fest10Data, setFest10Data] = useState(null);
   const [downloading, setDownloading] = useState(false);
@@ -36,23 +34,19 @@ export default function Analytics() {
   const inFlightRef = useRef(false);
   const timerRef = useRef(null);
 
-  const loadAllAnalytics = useCallback(async (silent = false) => {
+  const loadAllAnalytics = useCallback(async (silent = false, dayNum = selectedDayNumber, dRange = selectedDateRange) => {
     if (inFlightRef.current) return;
     inFlightRef.current = true;
     if (!silent) setLoading(true);
 
     try {
-      const [a, c, i, f, fest] = await Promise.allSettled([
-        getAttendanceAnalytics(),
-        getCameraAnalytics(),
-        getIncidentAnalytics(),
+      const [a, f, fest] = await Promise.allSettled([
+        getAttendanceAnalytics(dayNum, dRange),
         getOperationalFlowAnalytics(),
         getFestival10DaysAnalytics(),
       ]);
       if (!isMountedRef.current) return;
       if (a.status === "fulfilled" && a.value) setAttendance(a.value?.data || a.value);
-      if (c.status === "fulfilled" && c.value) setCamera(c.value?.data || c.value);
-      if (i.status === "fulfilled" && i.value) setIncident(i.value?.data || i.value);
       if (f.status === "fulfilled" && f.value) setFlowData(f.value?.data || f.value);
       if (fest.status === "fulfilled" && fest.value) setFest10Data(fest.value?.data || fest.value);
     } catch (e) {
@@ -61,7 +55,7 @@ export default function Analytics() {
       if (isMountedRef.current) setLoading(false);
       inFlightRef.current = false;
     }
-  }, [activeEventId]);
+  }, [activeEventId, selectedDayNumber, selectedDateRange]);
 
   // Immediately reload when the user switches to a different event
   useEffect(() => {
@@ -72,14 +66,14 @@ export default function Analytics() {
 
   useEffect(() => {
     isMountedRef.current = true;
-    loadAllAnalytics();
+    loadAllAnalytics(false, selectedDayNumber, selectedDateRange);
 
     const scheduleNext = () => {
       clearTimeout(timerRef.current);
       if (typeof document !== "undefined" && document.visibilityState === "hidden") return;
       timerRef.current = setTimeout(async () => {
         if (isMountedRef.current && document.visibilityState === "visible") {
-          await loadAllAnalytics(true);
+          await loadAllAnalytics(true, selectedDayNumber, selectedDateRange);
           scheduleNext();
         }
       }, 5000);
@@ -89,7 +83,7 @@ export default function Analytics() {
 
     const handleVis = () => {
       if (document.visibilityState === "visible") {
-        loadAllAnalytics(true);
+        loadAllAnalytics(true, selectedDayNumber, selectedDateRange);
         scheduleNext();
       } else {
         clearTimeout(timerRef.current);
@@ -106,7 +100,7 @@ export default function Analytics() {
         norm === "line_crossing" ||
         norm === "queue_update"
       ) {
-        loadAllAnalytics(true);
+        loadAllAnalytics(true, selectedDayNumber, selectedDateRange);
       }
     });
 
@@ -116,7 +110,23 @@ export default function Analytics() {
       document.removeEventListener("visibilitychange", handleVis);
       unsub();
     };
-  }, [loadAllAnalytics]);
+  }, [loadAllAnalytics, selectedDayNumber, selectedDateRange]);
+
+  const handleDaySelect = (dayNum, rangeStr = null) => {
+    if (rangeStr === "festival") {
+      setSelectedDayNumber(null);
+      setSelectedDateRange("festival");
+      loadAllAnalytics(false, null, "festival");
+    } else if (dayNum !== null && dayNum !== undefined) {
+      setSelectedDayNumber(dayNum);
+      setSelectedDateRange(null);
+      loadAllAnalytics(false, dayNum, null);
+    } else {
+      setSelectedDayNumber(null);
+      setSelectedDateRange("today");
+      loadAllAnalytics(false, null, "today");
+    }
+  };
 
   // Immediately re-fetch all analytics when active event changes
   useEffect(() => {
@@ -129,8 +139,6 @@ export default function Analytics() {
   if (loading) return <LoadingState />;
 
   const safeAttendance = attendance || { totalVisitorsToday: 0, peakHour: "—", peakCount: 0, avgPerHour: 0, hourly: [], daily: [] };
-  const safeIncident = incident || { total: 0, resolved: 0, active: 0, avgResolutionMin: 0, byType: [] };
-  const safeCamera = camera || { uptime: "—", totalDetections: 0, avgFps: 0, avgLatencyMs: 0 };
 
   const hourlyChart = {
     backgroundColor: "transparent",
@@ -183,23 +191,6 @@ export default function Analytics() {
     ],
   };
 
-  const incidentPieChart = {
-    backgroundColor: "transparent",
-    textStyle: ct.textStyle,
-    legend: { bottom: 5, textStyle: ct.legendText },
-    series: [{
-      type: "pie",
-      radius: ["40%", "65%"],
-      center: ["50%", "45%"],
-      data: (safeIncident.byType || []).map((t, i) => ({
-        name: t.type, value: t.count,
-        itemStyle: { color: [ct.primaryColor, ct.dangerColor, ct.secondaryColor, ct.successColor, "#f0883e"][i % 5] },
-      })),
-      label: { show: false },
-      labelLine: { show: false },
-    }],
-  };
-
   const dailyChart = {
     backgroundColor: "transparent",
     textStyle: ct.textStyle,
@@ -233,12 +224,74 @@ export default function Analytics() {
     }],
   };
 
+  const eventDaysList = (safeAttendance?.eventDays || safeAttendance?.event_days || fest10Data?.days || [
+    { day_number: 1, date: "14 Sep", label: "Day 1 (14 Sep)", status: "TODAY" },
+  ]);
+
+  const currentDayLabel = safeAttendance?.selectedDayLabel || safeAttendance?.selected_day_label || (selectedDateRange === "festival" ? "Festival Total" : selectedDayNumber ? `Day ${selectedDayNumber}` : "Today");
+
   return (
     <div className="cc-page">
-      <div className="cc-page-header">
+      <div className="cc-page-header" style={{ display: "flex", justifyContent: "space-between", alignItems: "center", flexWrap: "wrap", gap: 12 }}>
         <div>
           <div className="cc-page-title">Advanced Operational Analytics & Flow Control</div>
           <div className="cc-page-subtitle">Actionable crowd intelligence, tactical directives & zone clearance priority</div>
+        </div>
+        <div style={{ display: "flex", alignItems: "center", gap: 10 }}>
+          <div
+            style={{
+              display: "flex",
+              alignItems: "center",
+              gap: 8,
+              background: "rgba(0, 0, 0, 0.4)",
+              padding: "4px 10px",
+              borderRadius: 6,
+              border: "1px solid rgba(255, 255, 255, 0.12)",
+            }}
+          >
+            <label style={{ fontSize: 10, fontFamily: "var(--cc-font-mono)", fontWeight: 700, color: "var(--cc-text-muted)", textTransform: "uppercase" }}>
+              Analytics Day:
+            </label>
+            <select
+              value={
+                selectedDayNumber
+                  ? `day_${selectedDayNumber}`
+                  : selectedDateRange === "festival"
+                  ? "festival"
+                  : "today"
+              }
+              onChange={(e) => {
+                const val = e.target.value;
+                if (val === "festival") {
+                  handleDaySelect(null, "festival");
+                } else if (val.startsWith("day_")) {
+                  const dNum = parseInt(val.replace("day_", ""), 10);
+                  handleDaySelect(dNum, null);
+                } else {
+                  handleDaySelect(null, "today");
+                }
+              }}
+              style={{
+                background: "rgba(13, 17, 23, 0.95)",
+                color: "#58a6ff",
+                border: "1px solid rgba(45, 168, 232, 0.35)",
+                borderRadius: 4,
+                padding: "4px 8px",
+                fontSize: 11,
+                fontFamily: "var(--cc-font-mono)",
+                fontWeight: 700,
+                cursor: "pointer",
+                outline: "none",
+              }}
+            >
+              {eventDaysList.map((d) => (
+                <option key={d.day_number} value={`day_${d.day_number}`}>
+                  {d.label || `Day ${d.day_number}: ${d.date}`} {d.status === "TODAY" ? "★ TODAY" : ""}
+                </option>
+              ))}
+              <option value="festival">Festival Total (All Days)</option>
+            </select>
+          </div>
         </div>
       </div>
 
@@ -248,69 +301,51 @@ export default function Analytics() {
       {/* ── 2. Zone Clearance & Queue Diversion Matrix ("Ee place clear cheyali? Ee entry ee exit?") ── */}
       <ZoneFlowMatrix flowData={flowData} loading={loading} />
 
-      {/* ── 3. Attendance & Fleet Overview KPIs ── */}
-      <div style={{ display: "flex", gap: 8, marginBottom: 14 }}>
+      {/* ── 3. Attendance Overview KPIs ── */}
+      <div style={{ display: "grid", gridTemplateColumns: "repeat(4, 1fr)", gap: 12, marginBottom: 14 }}>
         {[
           {
-            label: "Total Footfall (Entry + Exit)",
-            value: (fest10Data?.grand_total_footfall ?? safeAttendance.total_visitors_today ?? safeAttendance.total_today ?? safeAttendance.totalVisitorsToday ?? 0).toLocaleString(),
+            label: `Total Footfall (${currentDayLabel})`,
+            value: (safeAttendance.totalFootfall ?? safeAttendance.total_footfall ?? safeAttendance.totalVisitorsToday ?? 0).toLocaleString(),
             color: "var(--cc-accent)",
           },
           {
-            label: "Total Entries (4 Gates)",
-            value: (fest10Data?.total_entries_10days ?? safeAttendance.total_visitors_today ?? safeAttendance.total_today ?? safeAttendance.totalVisitorsToday ?? 0).toLocaleString(),
+            label: `Total Entries (${currentDayLabel})`,
+            value: (safeAttendance.totalEntries ?? safeAttendance.total_entries ?? safeAttendance.totalVisitorsToday ?? 0).toLocaleString(),
             color: "#3fb950",
           },
           {
-            label: "Total Exits (4 Gates)",
-            value: (fest10Data?.total_exits_10days ?? 0).toLocaleString(),
+            label: `Total Exits (${currentDayLabel})`,
+            value: (safeAttendance.totalExits ?? safeAttendance.total_exits ?? 0).toLocaleString(),
             color: "#f85149",
           },
-          { label: "Peak Hour", value: safeAttendance.peak_hour ?? safeAttendance.peakHour ?? "—" },
-          { label: `Fleet Uptime (${camera?.cameras?.length ?? camera?.total_cameras ?? 0} Cams)`, value: safeCamera.uptime ?? "—" },
-          { label: "Total Detections", value: (safeCamera.total_detections ?? safeCamera.totalDetections ?? 0).toLocaleString() },
-          { label: "Avg FPS", value: safeCamera.avg_fps ?? safeCamera.avgFps ?? 0 },
-          { label: "Incidents Total", value: safeIncident.total ?? 0 },
+          {
+            label: `Peak Hour (${currentDayLabel})`,
+            value: safeAttendance.peak_hour ?? safeAttendance.peakHour ?? "—",
+            color: "#e3b341",
+          },
         ].map((k) => (
-          <div key={k.label} className="cc-card" style={{ flex: 1, minWidth: 0 }}>
+          <div key={k.label} className="cc-card" style={{ padding: "12px 16px" }}>
             <div className="cc-label" style={{ marginBottom: 4 }}>{k.label}</div>
-            <div style={{ fontFamily: "var(--cc-font-mono)", fontSize: 17, fontWeight: 700, color: k.color || "var(--cc-text-primary)" }}>{k.value}</div>
+            <div style={{ fontFamily: "var(--cc-font-mono)", fontSize: 20, fontWeight: 700, color: k.color || "var(--cc-text-primary)" }}>{k.value}</div>
           </div>
         ))}
       </div>
 
-      <div style={{ display: "grid", gridTemplateColumns: "2fr 1fr", gap: 12, marginBottom: 14 }}>
-        <div className="cc-card cc-chart" style={{ padding: 0 }}>
-          <div className="cc-section-header"><div className="cc-section-title">Hourly Visitor Trend (Today)</div></div>
-          <ReactECharts option={hourlyChart} style={{ height: 220 }} />
+      {/* ── Hourly Visitor Trend ── */}
+      <div className="cc-card cc-chart" style={{ padding: 0, marginBottom: 14 }}>
+        <div className="cc-section-header">
+          <div className="cc-section-title">Hourly Visitor Trend ({currentDayLabel})</div>
         </div>
-        <div className="cc-card cc-chart" style={{ padding: 0 }}>
-          <div className="cc-section-header"><div className="cc-section-title">Incident Types</div></div>
-          <ReactECharts option={incidentPieChart} style={{ height: 220 }} />
-        </div>
+        <ReactECharts option={hourlyChart} style={{ height: 260 }} />
       </div>
 
-      <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 12, marginBottom: 14 }}>
-        <div className="cc-card cc-chart" style={{ padding: 0 }}>
-          <div className="cc-section-header"><div className="cc-section-title">Daily Attendance Trend</div></div>
-          <ReactECharts option={dailyChart} style={{ height: 180 }} />
+      {/* ── Daily Attendance Trend ── */}
+      <div className="cc-card cc-chart" style={{ padding: 0, marginBottom: 14 }}>
+        <div className="cc-section-header">
+          <div className="cc-section-title">Daily Attendance Trend</div>
         </div>
-        <div className="cc-card">
-          <div className="cc-section-title" style={{ marginBottom: 14 }}>Incident Analytics & Resolution</div>
-          <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 12 }}>
-            {[
-              { label: "Total Incidents", value: safeIncident.total },
-              { label: "Resolved", value: safeIncident.resolved, color: "var(--cc-green)" },
-              { label: "Active", value: safeIncident.active, color: "var(--cc-red)" },
-              { label: "Avg Resolution", value: `${safeIncident.avgResolutionMin} min` },
-            ].map((s) => (
-              <div key={s.label}>
-                <div className="cc-label">{s.label}</div>
-                <div style={{ fontFamily: "var(--cc-font-mono)", fontSize: 22, fontWeight: 700, color: s.color || "var(--cc-text-primary)" }}>{s.value}</div>
-              </div>
-            ))}
-          </div>
-        </div>
+        <ReactECharts option={dailyChart} style={{ height: 220 }} />
       </div>
 
       {/* ── 4. 10-Day Festival Day-Wise Attendance & Clearance Audit Table ── */}
@@ -359,7 +394,7 @@ export default function Analytics() {
                 <th style={{ textAlign: "left" }}>Day Name</th>
                 <th style={{ textAlign: "right", color: "#3fb950" }}>Entry (4 Gates)</th>
                 <th style={{ textAlign: "right", color: "#f85149" }}>Exit (4 Gates)</th>
-                <th style={{ textAlign: "right", color: "var(--cc-accent)" }}>Total (Entry + Exit)</th>
+                <th style={{ textAlign: "right", color: "var(--cc-accent)" }}>Total Footfall</th>
                 <th style={{ textAlign: "right" }}>Net Inside</th>
                 <th style={{ textAlign: "center" }}>Peak Hour</th>
                 <th style={{ textAlign: "center" }}>Status</th>

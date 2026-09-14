@@ -73,6 +73,7 @@ class DashboardService:
     async def get_summary(
         self,
         date_range: str = "today",
+        day_number: Optional[int] = None,
         event_id: Optional[uuid.UUID] = None,
         allowed_site_ids: Optional[List[uuid.UUID]] = None,
     ) -> DashboardSummaryResponse:
@@ -81,7 +82,7 @@ class DashboardService:
         and single-flight request coalescing. Delivers instant <5ms responses while refreshing
         the database asynchronously in the background.
         """
-        cache_key = f"dashboard:{event_id}:{date_range.lower()}"
+        cache_key = f"dashboard:{event_id}:{day_number}:{date_range.lower()}"
         now = time.monotonic()
 
         cached = _dashboard_cache.get(cache_key)
@@ -95,7 +96,7 @@ class DashboardService:
             if not cached.is_updating:
                 cached.is_updating = True
                 asyncio.create_task(
-                    self._refresh_in_background(cache_key, date_range, event_id, allowed_site_ids)
+                    self._refresh_in_background(cache_key, date_range, day_number, event_id, allowed_site_ids)
                 )
             return cached.data
 
@@ -111,6 +112,7 @@ class DashboardService:
         try:
             res = await self._build_summary_uncached(
                 date_range=date_range,
+                day_number=day_number,
                 event_id=event_id,
                 allowed_site_ids=allowed_site_ids,
             )
@@ -136,6 +138,7 @@ class DashboardService:
         cls,
         cache_key: str,
         date_range: str,
+        day_number: Optional[int],
         event_id: Optional[uuid.UUID],
         allowed_site_ids: Optional[List[uuid.UUID]],
     ) -> None:
@@ -146,6 +149,7 @@ class DashboardService:
                 svc = cls(session)
                 fresh_res = await svc._build_summary_uncached(
                     date_range=date_range,
+                    day_number=day_number,
                     event_id=event_id,
                     allowed_site_ids=allowed_site_ids,
                 )
@@ -171,6 +175,7 @@ class DashboardService:
     async def _build_summary_uncached(
         self,
         date_range: str = "today",
+        day_number: Optional[int] = None,
         event_id: Optional[uuid.UUID] = None,
         allowed_site_ids: Optional[List[uuid.UUID]] = None,
     ) -> DashboardSummaryResponse:
@@ -185,25 +190,33 @@ class DashboardService:
             _t = time.perf_counter()
 
         # -------------------------------------------------------------------
-        # 1. Festival Event & Days Information
+        # 1. Festival Event & Dynamic Days Information
         # -------------------------------------------------------------------
-        active_event = await self.counting_service.get_event(event_id)
+        active_event, days_template, cur_day_num, tz = await self.counting_service.resolve_event_days(event_id)
         target_event_id = active_event.id if active_event else event_id
-        tz = self.counting_service.get_event_timezone(active_event)
         now_local = now_dt.astimezone(tz)
         today_date = now_local.date()
 
-        festival_day_current = 1
-        festival_day_total = 11
-        if active_event and active_event.start_date and active_event.end_date:
-            s_date = active_event.start_date.astimezone(tz).date()
-            e_date = active_event.end_date.astimezone(tz).date()
-            total_days = max(1, (e_date - s_date).days + 1)
-            cur_day = max(1, min(total_days, (today_date - s_date).days + 1))
-            festival_day_current = cur_day
-            festival_day_total = total_days
-
+        total_days = len(days_template)
+        festival_day_current = cur_day_num
+        festival_day_total = total_days
         festival_day_label = f"Day {festival_day_current} of {festival_day_total}"
+
+        # Resolve exact target day boundary
+        target_d, start_utc, end_utc, sel_day_num, range_label = await self.counting_service.resolve_day_boundary(
+            target_event_id, day_number=day_number, date_range=date_range
+        )
+
+        event_days_serialized = [
+            {
+                "day_number": d.day_number,
+                "date": d.date,
+                "day_name": d.day_name,
+                "label": d.label,
+                "status": d.status,
+            }
+            for d in days_template
+        ]
         _step("1-event-query")
 
         # -------------------------------------------------------------------
@@ -267,7 +280,7 @@ class DashboardService:
         cams_offline = max(0, len(all_cameras) - cams_online)
 
         crowd_ai_running = len(live_crowd_pipes) + sum(1 for s in live_frs_workers.values() if getattr(s, "crowd_ai_active", False))
-        queue_ai_running = len(live_queue_pipes) + sum(1 for s in live_frs_workers.values() if getattr(s, "crowd_ai_active", False) and "QUEUE" in getattr(s, "ai_purposes", []))
+        queue_ai_running = len(live_queue_pipes) + sum(1 for s in live_frs_workers.values() if getattr(s, "crowd_ai_active", False) and any(p in getattr(s, "ai_purposes", []) for p in ("QUEUE", "ENTRY", "ENTRY_EXIT")))
         _step("3-workers-lock")
 
         health = AICameraHealth(
@@ -285,8 +298,12 @@ class DashboardService:
         # -------------------------------------------------------------------
         if target_event_id:
             fest_total_in, fest_total_out, fest_occ = await self.counting_service.get_festival_totals(target_event_id)
-            range_in, range_out, range_occ = await self.counting_service.get_range_counts(target_event_id, date_range)
-            today_in, today_out, today_occ = await self.counting_service.get_range_counts(target_event_id, "today")
+            range_in, range_out, range_occ, _, _ = await self.counting_service.get_event_day_counts(
+                target_event_id, day_number=day_number, date_range=date_range
+            )
+            today_in, today_out, today_occ, _, _ = await self.counting_service.get_event_day_counts(
+                target_event_id, day_number=cur_day_num
+            )
         else:
             fest_total_in, fest_total_out, fest_occ = 0, 0, 0
             range_in, range_out, range_occ = 0, 0, 0
@@ -435,9 +452,9 @@ class DashboardService:
         queue_items: List[QueueStatusItem] = []
         enabled_camera_codes = {c.camera_code for c in all_cameras if c.enabled}
 
-        # 1. From live workers actively monitoring QUEUE
+        # 1. From live workers actively monitoring QUEUE or ENTRY Gate Queues
         for cid, s in live_frs_workers.items():
-            if getattr(s, "running", False) and getattr(s, "crowd_ai_active", False) and "QUEUE" in getattr(s, "ai_purposes", []):
+            if getattr(s, "running", False) and getattr(s, "crowd_ai_active", False) and any(p in getattr(s, "ai_purposes", []) for p in ("QUEUE", "ENTRY", "ENTRY_EXIT")):
                 q_cnt = getattr(s, "occupancy_count", 0)
                 q_mov = getattr(s, "queue_movement_status", "STOPPED")
                 flow_stat = q_mov if q_mov in ("FAST", "NORMAL", "SLOW", "STOPPED") else ("FAST" if q_cnt < 20 else "NORMAL")
@@ -485,68 +502,22 @@ class DashboardService:
             )
 
         # -------------------------------------------------------------------
-        # 6. Hourly / Daily Visitor Flow (Dynamic per date_range)
+        # 6. Hourly / Daily Visitor Flow (Dynamic per selected day)
         # -------------------------------------------------------------------
         hourly_flow: List[HourlyFlowPoint] = []
-        peak_h = "—"
-        range_mode = (date_range or "today").lower().strip()
+        peak_h = "No data"
 
-        if range_mode == "yesterday":
-            range_label = "Yesterday"
-            yesterday_d = today_date - timedelta(days=1)
-            if target_event_id:
-                h_items, peak_h = await self.counting_service.get_hourly_breakdown(target_event_id, yesterday_d)
+        if target_event_id:
+            if target_d is not None:
+                # Specific day (Day 1..Day N or Yesterday/Today)
+                h_items, peak_h = await self.counting_service.get_hourly_breakdown(target_event_id, target_d)
                 hourly_flow = [HourlyFlowPoint(hour=i.hour, entry=i.entry, exit=i.exit, net_flow=i.net_flow) for i in h_items]
-        elif range_mode in ("7days", "7_days", "last7days", "last_7_days"):
-            range_label = "Last 7 Days"
-            seven_days_ago = today_date - timedelta(days=6)
-            s_start_utc = datetime.combine(seven_days_ago, dtime.min, tzinfo=tz).astimezone(timezone.utc)
-            tz_name = (active_event.timezone if active_event and active_event.timezone else "Asia/Kolkata").strip()
-            kolkata_ts = func.timezone(tz_name, CrowdSnapshot.timestamp)
-
-            stmt_7 = (
-                select(
-                    func.date(kolkata_ts).label("d"),
-                    func.sum(CrowdSnapshot.inflow_rate).label("inflow"),
-                    func.sum(CrowdSnapshot.outflow_rate).label("outflow"),
-                )
-                .where(
-                    CrowdSnapshot.event_id == target_event_id,
-                    CrowdSnapshot.timestamp >= s_start_utc,
-                )
-                .group_by(func.date(kolkata_ts))
-            )
-            res_7 = await self.db.execute(stmt_7)
-            d7_map = {}
-            for r in res_7.all():
-                if r.d is not None:
-                    d7_map[str(r.d)] = {"entry": int(r.inflow or 0), "exit": int(r.outflow or 0)}
-
-            max_7_ent = -1
-            for i in range(7):
-                day_d = seven_days_ago + timedelta(days=i)
-                d_str = str(day_d)
-                ent = d7_map.get(d_str, {}).get("entry", 0)
-                ext = d7_map.get(d_str, {}).get("exit", 0)
-                lbl = day_d.strftime("%d %b")
-                if ent > max_7_ent and ent > 0:
-                    max_7_ent = ent
-                    peak_h = f"{lbl} (Peak Day)"
-                hourly_flow.append(
-                    HourlyFlowPoint(
-                        hour=lbl,
-                        entry=ent,
-                        exit=ext,
-                        net_flow=ent - ext,
-                    )
-                )
-        elif range_mode in ("festival", "fest"):
-            range_label = "Festival"
-            if target_event_id:
+            else:
+                # Festival Total -> Show Day-by-Day comparison bars
                 daily_items, _, _, _ = await self.counting_service.get_festival_daily_breakdown(target_event_id)
-                max_f_ent = -1
+                max_f_ent = 0
                 for d_item in daily_items:
-                    if d_item.entry_count > max_f_ent and d_item.entry_count > 0:
+                    if d_item.entry_count > max_f_ent:
                         max_f_ent = d_item.entry_count
                         peak_h = f"{d_item.label} (Peak Day)"
                     hourly_flow.append(
@@ -557,63 +528,27 @@ class DashboardService:
                             net_flow=d_item.entry_count - d_item.exit_count,
                         )
                     )
-        else:
-            range_label = "Today"
-            if target_event_id:
-                h_items, peak_h = await self.counting_service.get_hourly_breakdown(target_event_id, today_date)
-                hourly_flow = [HourlyFlowPoint(hour=i.hour, entry=i.entry, exit=i.exit, net_flow=i.net_flow) for i in h_items]
 
         range_entries = range_in
         range_exits = range_out
         _step("9-hourly-flow-built")
 
         # -------------------------------------------------------------------
-        # 7. Daily Visitor Trend (Last 7–10 days)
+        # 7. Daily Visitor Trend (Canonical from counting service)
         # -------------------------------------------------------------------
         daily_trend: List[DailyTrendPoint] = []
-        cutoff_date = (now_dt - timedelta(days=7)).date()
-        stmt_daily = (
-            select(
-                func.date(CrowdSnapshot.timestamp).label("d"),
-                func.sum(CrowdSnapshot.inflow_rate).label("inflow"),
-                func.sum(CrowdSnapshot.outflow_rate).label("outflow"),
-            )
-            .where(
-                CrowdSnapshot.event_id == target_event_id,
-                func.date(CrowdSnapshot.timestamp) >= cutoff_date,
-            )
-            .group_by(func.date(CrowdSnapshot.timestamp))
-            .order_by(func.date(CrowdSnapshot.timestamp).asc())
-        )
-        try:
-            res_daily = await self.db.execute(stmt_daily)
-            for row in res_daily.all():
-                d_str = str(row.d)
-                ent = int(row.inflow or 0)
-                ext = int(row.outflow or 0)
+        if target_event_id:
+            days_breakdown, _, _, _ = await self.counting_service.get_festival_daily_breakdown(target_event_id)
+            for d_item in days_breakdown:
                 daily_trend.append(
                     DailyTrendPoint(
-                        date=d_str,
-                        entries=ent,
-                        exits=ext,
-                        net_flow=ent - ext,
+                        date=d_item.date,
+                        entries=d_item.entry_count,
+                        exits=d_item.exit_count,
+                        net_flow=d_item.entry_count - d_item.exit_count,
                     )
                 )
-        except Exception:
-            pass
         _step("11-daily-query")
-
-        # If today is missing from daily trend, append it
-        today_str = str(now_dt.date())
-        if not any(d.date == today_str for d in daily_trend):
-            daily_trend.append(
-                DailyTrendPoint(
-                    date=today_str,
-                    entries=today_in,
-                    exits=today_out,
-                    net_flow=today_in - today_out,
-                )
-            )
 
         # -------------------------------------------------------------------
         # 8. Top Risk Areas (Max 3–5)
@@ -758,8 +693,10 @@ class DashboardService:
             festival_day_current=festival_day_current,
             festival_day_total=festival_day_total,
             festival_day_label=festival_day_label,
-            today_entries=today_in,
-            today_exits=today_out,
+            selected_day_number=sel_day_num,
+            event_days=event_days_serialized,
+            today_entries=range_in,
+            today_exits=range_out,
             selected_range_entries=range_entries,
             selected_range_exits=range_exits,
             selected_range_label=range_label,

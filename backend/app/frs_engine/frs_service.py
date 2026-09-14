@@ -75,10 +75,11 @@ def _bbox_center_dist(a, b) -> float:
 
 
 _STREAM_HEADERS = {
-    "Cache-Control": "no-cache, no-store, must-revalidate",
+    "Cache-Control": "no-cache, no-store, must-revalidate, max-age=0",
     "Pragma": "no-cache",
     "Expires": "0",
     "X-Accel-Buffering": "no",
+    "Surrogate-Control": "no-store",
     "Connection": "close",
 }
 
@@ -531,6 +532,90 @@ def _persist_crowd_snapshot_threadsafe(camera_code: str, inflow_delta: int, outf
     global _main_loop
     if _main_loop and _main_loop.is_running():
         asyncio.run_coroutine_threadsafe(_do_persist(), _main_loop)
+
+
+def _persist_line_crossing_event_threadsafe(
+    camera_code: str,
+    line_id: str,
+    line_name: str,
+    direction: str,
+    count_delta: int,
+    track_session_id: str,
+    track_token: str,
+    crossing_sequence: int,
+    confidence: float = 0.85,
+    ground_x: float = 0.5,
+    ground_y: float = 0.5,
+    signed_distance: float = 0.0,
+):
+    """Asynchronously persist durable line-crossing event to PostgreSQL line_crossing_events table."""
+    async def _do_persist():
+        try:
+            from app.db.session import AsyncSessionLocal
+            from app.models.camera import Camera
+            from app.models.line_crossing import LineCrossingEvent
+            from sqlalchemy import select
+
+            async with AsyncSessionLocal() as session:
+                clean_code = camera_code.replace("-FRS", "").replace("-CROWD", "")
+                stmt = select(Camera).where(Camera.camera_code.in_([camera_code, clean_code])).limit(1)
+                res = await session.execute(stmt)
+                cam = res.scalars().first()
+
+                evt_id = cam.event_id if cam else None
+                site_id = cam.site_id if cam else None
+                cam_id = cam.id if cam else uuid.uuid4()
+                evt_str = str(evt_id) if evt_id else "evt_default"
+                cam_str = str(cam_id) if cam_id else camera_code
+                safe_line = str(line_id).replace(" ", "_").replace(":", "_")
+                safe_sess = str(track_session_id).replace(" ", "_")
+                idempotency_key = f"{evt_str}_{cam_str}_{safe_line}_{safe_sess}_CROSSING-{crossing_sequence:03d}"
+
+                now = datetime.now(timezone.utc)
+                bind = session.bind or session.get_bind()
+                if bind and "sqlite" in bind.dialect.name:
+                    from sqlalchemy.dialects.sqlite import insert as dialect_insert
+                else:
+                    from sqlalchemy.dialects.postgresql import insert as dialect_insert
+
+                stmt_insert = dialect_insert(LineCrossingEvent).values(
+                    id=uuid.uuid4(),
+                    event_id=evt_id,
+                    site_id=site_id,
+                    camera_id=cam_id,
+                    camera_code=camera_code,
+                    line_id=str(line_id),
+                    line_name=str(line_name),
+                    track_session_id=str(track_session_id),
+                    track_token=str(track_token),
+                    crossing_sequence=crossing_sequence,
+                    direction=direction.upper(),
+                    count_delta=count_delta,
+                    detection_confidence=confidence,
+                    frame_id=0,
+                    crossing_timestamp=now,
+                    idempotency_key=idempotency_key,
+                    ground_x=ground_x,
+                    ground_y=ground_y,
+                    signed_distance=signed_distance,
+                ).on_conflict_do_nothing(
+                    index_elements=["idempotency_key"]
+                )
+                await session.execute(stmt_insert)
+                await session.commit()
+        except Exception as e:
+            logger.debug(f"[FRS-Engine] Line crossing persist notice: {e}")
+
+    global _main_loop
+    if _main_loop and _main_loop.is_running():
+        asyncio.run_coroutine_threadsafe(_do_persist(), _main_loop)
+    else:
+        try:
+            curr_loop = asyncio.get_running_loop()
+            if curr_loop and curr_loop.is_running():
+                curr_loop.create_task(_do_persist())
+        except RuntimeError:
+            pass
 
 
 def _persist_queue_snapshot_threadsafe(camera_code: str, headcount: int, movement_status: str, zone_code_override: Optional[str] = None):
@@ -1299,6 +1384,34 @@ class RTSPCameraWorker:
                             _emit_frs_event_threadsafe("crowd_telemetry", telemetry_payload)
                             _emit_frs_event_threadsafe("crowd_update", telemetry_payload)
 
+                            crossing_seq = trk.get("crossing_sequence", 0) + 1
+                            trk["crossing_sequence"] = crossing_seq
+                            t_sess = trk.get("track_session_id") or f"sess_{trk['track_id']}_{int(trk.get('last_seen', time.time()))}"
+                            trk["track_session_id"] = t_sess
+
+                            # Canonical count_delta: 1 for valid direction, 0 for reverse audit
+                            if is_pure_entry:
+                                count_d = 1 if crossing_label == "IN" else 0
+                            elif is_pure_exit:
+                                count_d = 1 if crossing_label == "OUT" else 0
+                            else:
+                                count_d = 1
+
+                            _persist_line_crossing_event_threadsafe(
+                                camera_code=self.state.camera_id,
+                                line_id=line.get("id") or "LINE-01",
+                                line_name=line.get("name") or "Gate Counting Line",
+                                direction=crossing_label,
+                                count_delta=count_d,
+                                track_session_id=t_sess,
+                                track_token=f"TRK-{trk['track_id']}",
+                                crossing_sequence=crossing_seq,
+                                confidence=trk.get("confidence", 0.85),
+                                ground_x=trk["bottom_center"][0] / float(w_orig) if w_orig > 0 else 0.5,
+                                ground_y=trk["bottom_center"][1] / float(h_orig) if h_orig > 0 else 0.5,
+                                signed_distance=0.0,
+                            )
+
                             _persist_crowd_snapshot_threadsafe(
                                 camera_code=self.state.camera_id,
                                 inflow_delta=inflow_d,
@@ -1488,10 +1601,10 @@ class RTSPCameraWorker:
                                 trk["movement_state"] = "STOPPED"
 
                 # -----------------------------------------------------------
-                # 3. QUEUE Mode: Ground-truth queue tracking
+                # 3. QUEUE Movement Analysis (Unified for Gate & Queue Cameras)
                 # -----------------------------------------------------------
-                if "QUEUE" in purposes:
-                    queue_polygons = [p for p in self._cached_roi_polygons if p.get("type") in ("QUEUE_ROI", "QUEUE_AREA")]
+                if any(p in purposes for p in ("QUEUE", "ENTRY", "EXIT")):
+                    queue_polygons = [p for p in self._cached_roi_polygons if p.get("type") in ("QUEUE_ROI", "QUEUE_AREA", "CROWD_ROI", "PASSAGE_ROI")]
 
                     q_count = 0
                     for trk in self._crowd_tracks.values():
@@ -2107,12 +2220,16 @@ async def add_frs_camera(req: AddCameraRequest, request: Request):
                     except Exception:
                         pass
                 if not target_event_id:
-                    evt_stmt = select(Event).where((Event.code == "KHB-2026") | (Event.name.ilike("%Khairatabad%"))).limit(1)
+                    evt_stmt = select(Event).where(Event.status.in_(["ACTIVE", "LIVE"])).order_by(Event.created_at.desc()).limit(1)
                     evt_res = await pg_db.execute(evt_stmt)
                     evt = evt_res.scalars().first()
+                    if not evt:
+                        evt_stmt = select(Event).order_by(Event.created_at.desc()).limit(1)
+                        evt_res = await pg_db.execute(evt_stmt)
+                        evt = evt_res.scalars().first()
                     if evt:
                         target_event_id = evt.id
-                        target_site_id = evt.site_id
+                        target_site_id = getattr(evt, "site_id", None)
 
                 clean_id = cam_id.replace("-FRS", "").replace("-CROWD", "")
                 stmt = select(Camera).where(Camera.camera_code.in_([cam_id, clean_id]))

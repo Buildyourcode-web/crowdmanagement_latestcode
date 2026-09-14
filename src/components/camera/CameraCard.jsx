@@ -71,25 +71,52 @@ function CameraPlaceholder({ status, id, isFrs }) {
 export default function CameraCard({ camera, onSelect, onToggleFrs, onFullscreen, onToggleCrowdAI, onConfigureROI, onRequestReassign, onRequestZoneSwitch, onDelete }) {
   const [streamError, setStreamError] = useState(false);
   const [retryCount, setRetryCount] = useState(0);
+  const [isTabVisible, setIsTabVisible] = useState(
+    typeof document !== "undefined" ? document.visibilityState === "visible" : true
+  );
+  const [visibilityTick, setVisibilityTick] = useState(() => Date.now());
 
   if (!camera) return null;
 
   const isFrs = Boolean(camera.is_frs_camera || camera.isFRS || camera.is_frs || camera.camera_type === "FRS");
   const isRunning = (camera.status === "online" || camera.status === "running") && Boolean(camera.stream_url) && !["stopped", "disconnected", "offline"].includes(camera.status);
 
+  const purposes = (Array.isArray(camera.ai_purposes) && camera.ai_purposes.length > 0)
+    ? camera.ai_purposes
+    : [isFrs ? "FRS" : "ENTRY"];
+  const hasExit = purposes.includes("EXIT") && !purposes.includes("ENTRY");
+  const hasZone = purposes.includes("ZONE") && !purposes.includes("ENTRY") && !purposes.includes("EXIT");
+  const hasEntry = !isFrs && !hasExit && !hasZone;
+
+  // Listen for tab switching to prevent background frame accumulation in browser TCP buffer
+  useEffect(() => {
+    const handleVisibility = () => {
+      if (document.visibilityState === "visible") {
+        setIsTabVisible(true);
+        setVisibilityTick(Date.now());
+        setStreamError(false);
+      } else {
+        setIsTabVisible(false);
+      }
+    };
+    document.addEventListener("visibilitychange", handleVisibility);
+    return () => document.removeEventListener("visibilitychange", handleVisibility);
+  }, []);
+
   useEffect(() => {
     setStreamError(false);
   }, [camera?.id, camera?.stream_url, camera?.status]);
 
   useEffect(() => {
-    if (streamError && isRunning) {
+    if (streamError && isRunning && isTabVisible) {
       const timer = setTimeout(() => {
         setStreamError(false);
         setRetryCount((c) => c + 1);
+        setVisibilityTick(Date.now());
       }, 3000);
       return () => clearTimeout(timer);
     }
-  }, [streamError, isRunning]);
+  }, [streamError, isRunning, isTabVisible]);
 
   return (
     <div
@@ -98,20 +125,26 @@ export default function CameraCard({ camera, onSelect, onToggleFrs, onFullscreen
         padding: 0,
         overflow: "hidden",
         cursor: "pointer",
-        border: isFrs ? "1px solid rgba(56, 189, 248, 0.3)" : "1px solid rgba(63, 185, 80, 0.25)",
+        border: isFrs
+          ? "1px solid rgba(56, 189, 248, 0.3)"
+          : hasExit
+          ? "1px solid rgba(248, 81, 73, 0.25)"
+          : hasZone
+          ? "1px solid rgba(88, 166, 255, 0.25)"
+          : "1px solid rgba(63, 185, 80, 0.25)",
       }}
       onClick={() => onFullscreen ? onFullscreen(camera) : onSelect?.(camera)}
     >
-      {isRunning && !streamError ? (
+      {isRunning && !streamError && isTabVisible ? (
         <div className="cc-camera-placeholder" style={{ position: "relative", overflow: "hidden", background: "#000", height: 180 }}>
           <img
-            key={retryCount}
-            src={camera.stream_url.startsWith("http") ? `${camera.stream_url}?t=${retryCount}` : `${BACKEND}${camera.stream_url}?t=${retryCount}`}
+            key={`${retryCount}_${visibilityTick}`}
+            src={camera.stream_url.startsWith("http") ? `${camera.stream_url}?t=${visibilityTick}` : `${BACKEND}${camera.stream_url}?t=${visibilityTick}`}
             alt={`Stream ${camera.id}`}
             style={{ width: "100%", height: "100%", objectFit: "cover", display: "block" }}
             onError={() => setStreamError(true)}
           />
-          <div style={{ position: "absolute", top: 6, left: 8, fontFamily: "var(--cc-font-mono)", fontSize: 8, color: isFrs ? "rgba(56,189,248,0.95)" : "rgba(63,185,80,0.95)", background: "rgba(0,0,0,0.65)", padding: "2px 6px", borderRadius: 2 }}>
+          <div style={{ position: "absolute", top: 6, left: 8, fontFamily: "var(--cc-font-mono)", fontSize: 8, color: isFrs ? "rgba(56,189,248,0.95)" : (hasExit ? "rgba(248,81,73,0.95)" : (hasZone ? "rgba(88,166,255,0.95)" : "rgba(63,185,80,0.95)")), background: "rgba(0,0,0,0.65)", padding: "2px 6px", borderRadius: 2 }}>
             {camera.id}
           </div>
           <div style={{ position: "absolute", top: 6, right: 8, display: "flex", gap: 4, alignItems: "center" }}>
@@ -167,16 +200,22 @@ export default function CameraCard({ camera, onSelect, onToggleFrs, onFullscreen
               bottom: 6,
               right: 8,
               fontSize: 9,
-              color: isFrs ? "var(--cc-accent)" : "var(--cc-green)",
+              color: isFrs ? "var(--cc-accent)" : (hasExit ? "#f85149" : (hasZone ? "#58a6ff" : "var(--cc-green)")),
               fontWeight: 800,
               letterSpacing: "0.08em",
               background: "rgba(0,0,0,0.75)",
               padding: "2px 6px",
               borderRadius: 2,
-              border: isFrs ? "1px solid rgba(56,189,248,0.4)" : "1px solid rgba(63,185,80,0.4)",
+              border: isFrs
+                ? "1px solid rgba(56,189,248,0.4)"
+                : hasExit
+                ? "1px solid rgba(248,81,73,0.4)"
+                : hasZone
+                ? "1px solid rgba(88,166,255,0.4)"
+                : "1px solid rgba(63,185,80,0.4)",
             }}
           >
-            {isFrs ? "FRS BIOMETRIC AI" : "CROWD SURVEILLANCE"}
+            {isFrs ? "FRS BIOMETRIC AI" : (hasExit ? "EXIT CORRIDOR AI" : (hasZone ? "ZONE DENSITY AI" : "ENTRY GATE AI"))}
           </div>
         </div>
       ) : isRunning && streamError ? (
@@ -249,9 +288,9 @@ export default function CameraCard({ camera, onSelect, onToggleFrs, onFullscreen
         <CameraPlaceholder status={camera.status || "stopped"} id={camera.id} isFrs={isFrs} />
       )}
 
-      <div style={{ padding: "8px 10px" }}>
+      <div style={{ padding: "10px 12px" }}>
         <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", marginBottom: 4 }}>
-          <span style={{ fontFamily: "var(--cc-font-mono)", fontSize: 11, fontWeight: 700, color: isFrs ? "var(--cc-accent)" : "var(--cc-text-primary)" }}>
+          <span style={{ fontFamily: "var(--cc-font-mono)", fontSize: 12, fontWeight: 700, color: isFrs ? "var(--cc-accent)" : (hasExit ? "#f85149" : (hasZone ? "#58a6ff" : "#3fb950")) }}>
             {camera.id}
           </span>
           <div style={{ display: "flex", gap: 4, alignItems: "center" }}>
@@ -259,14 +298,14 @@ export default function CameraCard({ camera, onSelect, onToggleFrs, onFullscreen
               style={{
                 fontSize: 9,
                 fontWeight: 800,
-                padding: "1px 6px",
-                background: isFrs ? "var(--cc-blue-dim)" : "rgba(63, 185, 80, 0.15)",
-                border: isFrs ? "1px solid var(--cc-blue-border)" : "1px solid rgba(63, 185, 80, 0.3)",
+                padding: "2px 7px",
+                background: isFrs ? "var(--cc-blue-dim)" : (hasExit ? "rgba(248,81,73,0.15)" : (hasZone ? "rgba(88,166,255,0.15)" : "rgba(63,185,80,0.15)")),
+                border: isFrs ? "1px solid var(--cc-blue-border)" : (hasExit ? "1px solid rgba(248,81,73,0.3)" : (hasZone ? "1px solid rgba(88,166,255,0.3)" : "1px solid rgba(63,185,80,0.3)")),
                 borderRadius: "var(--cc-radius-sm)",
-                color: isFrs ? "var(--cc-accent)" : "var(--cc-green)",
+                color: isFrs ? "var(--cc-accent)" : (hasExit ? "#f85149" : (hasZone ? "#58a6ff" : "#3fb950")),
               }}
             >
-              {isFrs ? "FRS" : "CROWD"}
+              {isFrs ? "FRS BIOMETRIC" : (hasExit ? "EXIT GATE" : (hasZone ? `ZONE DENSITY (${camera.zone_code || 'ZONE-A'})` : "ENTRY GATE"))}
             </span>
             <StatusBadge
               status={isRunning ? "online" : "stopped"}
@@ -274,107 +313,139 @@ export default function CameraCard({ camera, onSelect, onToggleFrs, onFullscreen
             />
           </div>
         </div>
-        <div style={{ fontSize: 11, color: "var(--cc-text-secondary)", marginBottom: 4, whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" }}>
+        <div style={{ fontSize: 11, color: "var(--cc-text-secondary)", marginBottom: 8, whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" }}>
           {camera.label || camera.name}
         </div>
 
-        {!isFrs && (() => {
-          const purposes = (Array.isArray(camera.ai_purposes) && camera.ai_purposes.length > 0)
-            ? camera.ai_purposes
-            : ["ENTRY_EXIT"];
-          const metaMap = {
-            ENTRY: { label: "Entry Gate (IN Only)", color: "#3fb950", bg: "rgba(63, 185, 80, 0.12)", icon: "bi-box-arrow-in-right" },
-            EXIT: { label: "Exit Gate (OUT Only)", color: "#f85149", bg: "rgba(248, 81, 73, 0.12)", icon: "bi-box-arrow-right" },
-            ENTRY_EXIT: { label: "Two-Way Gate (IN & OUT)", color: "#bc8cff", bg: "rgba(188, 140, 255, 0.12)", icon: "bi-arrow-left-right" },
-            ZONE: { label: "Zone Density", color: "#58a6ff", bg: "rgba(88, 166, 255, 0.12)", icon: "bi-bounding-box" },
-            QUEUE: { label: "Queue Management", color: "#d29922", bg: "rgba(210, 153, 34, 0.12)", icon: "bi-people" },
-          };
-          return (
-            <div style={{ display: "flex", flexWrap: "wrap", gap: 4, marginBottom: 6 }}>
-              {purposes.map((purp) => {
-                const meta = metaMap[purp] || { label: purp, color: "var(--cc-green)", bg: "rgba(63, 185, 80, 0.12)", icon: "bi-people-fill" };
-                return (
-                  <span
-                    key={purp}
-                    style={{
-                      fontSize: 9,
-                      fontWeight: 700,
-                      padding: "2px 7px",
-                      borderRadius: 3,
-                      color: meta.color,
-                      background: meta.bg,
-                      border: `1px solid ${meta.color}40`,
-                      display: "inline-flex",
-                      alignItems: "center",
-                      gap: 4,
-                    }}
-                  >
-                    <i className={`bi ${meta.icon}`} /> {meta.label}
-                  </span>
-                );
-              })}
-            </div>
-          );
-        })()}
-
-        <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr 1fr", gap: 4, fontSize: 10 }}>
-          <div>
-            <div className="cc-label">FPS</div>
-            <div style={{ fontFamily: "var(--cc-font-mono)", color: isRunning ? (camera.fps < 15 ? "var(--cc-yellow)" : "var(--cc-text-primary)") : "var(--cc-text-muted)" }}>
-              {isRunning ? (camera.fps ?? "25") : "0"}
-            </div>
-          </div>
-          <div>
-            <div className="cc-label">{isFrs ? "Scans" : "Latency"}</div>
-            <div style={{ fontFamily: "var(--cc-font-mono)", color: isRunning ? (isFrs ? "var(--cc-accent)" : "var(--cc-text-primary)") : "var(--cc-text-muted)" }}>
-              {isRunning
-                ? (isFrs ? (camera.detections_count ?? 0) : ((camera.latency_ms ?? camera.latency) ? `${camera.latency_ms ?? camera.latency}ms` : "—"))
-                : "—"}
-            </div>
-          </div>
-          <div>
-            <div className="cc-label">People</div>
-            <div style={{ fontFamily: "var(--cc-font-mono)", color: isRunning ? "var(--cc-blue)" : "var(--cc-text-muted)" }}>
-              {isRunning ? (camera.people_count ?? camera.peopleCount ?? 0).toLocaleString() : "0"}
-            </div>
-          </div>
-        </div>
-
-        {/* Entry / Exit / Occupancy counts for Crowd cameras */}
-        {!isFrs && isRunning && (
-          <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr 1fr", gap: 4, fontSize: 10, marginTop: 6 }}>
+        {/* Clean, Purpose-Tailored Metrics Display */}
+        {isFrs ? (
+          <div style={{ display: "grid", gridTemplateColumns: "1.2fr 1fr", gap: 8, padding: "8px 0", borderTop: "1px solid rgba(255,255,255,0.06)", alignItems: "center" }}>
             <div>
-              <div className="cc-label" style={{ color: "#3fb950" }}>↑ Entry</div>
-              <div style={{ fontFamily: "var(--cc-font-mono)", color: "#3fb950", fontWeight: 700 }}>
-                {(camera.in_count ?? 0).toLocaleString()}
+              <div className="cc-label" style={{ color: "var(--cc-accent)", fontSize: 11, fontWeight: 700 }}>Face Detections / Scans</div>
+              <div style={{ fontFamily: "var(--cc-font-mono)", fontSize: 20, fontWeight: 800, color: "#fff" }}>
+                {(camera.detections_count ?? 0).toLocaleString()}
               </div>
             </div>
             <div>
-              <div className="cc-label" style={{ color: "#f85149" }}>↓ Exit</div>
-              <div style={{ fontFamily: "var(--cc-font-mono)", color: "#f85149", fontWeight: 700 }}>
+              <div className="cc-label" style={{ fontSize: 10 }}>Engine Mode</div>
+              <div style={{ fontFamily: "var(--cc-font-mono)", fontSize: 11, fontWeight: 700, color: isRunning ? "var(--cc-green)" : "var(--cc-text-muted)", marginTop: 2 }}>
+                {isRunning ? "● MATCHING ACTIVE" : "OFFLINE"}
+              </div>
+            </div>
+          </div>
+        ) : hasExit ? (
+          <div style={{ display: "grid", gridTemplateColumns: "1.2fr 1fr", gap: 8, padding: "8px 0", borderTop: "1px solid rgba(255,255,255,0.06)", alignItems: "center" }}>
+            <div>
+              <div className="cc-label" style={{ color: "#f85149", fontSize: 11, fontWeight: 700 }}>↓ Exit Count (Today)</div>
+              <div style={{ fontFamily: "var(--cc-font-mono)", fontSize: 20, fontWeight: 800, color: "#f85149" }}>
                 {(camera.out_count ?? 0).toLocaleString()}
               </div>
             </div>
             <div>
-              <div className="cc-label" style={{ color: "#bc8cff" }}>≈ Inside</div>
-              <div style={{ fontFamily: "var(--cc-font-mono)", color: "#bc8cff", fontWeight: 700 }}>
-                {(camera.occupancy ?? 0).toLocaleString()}
-              </div>
+              <div className="cc-label" style={{ fontSize: 10 }}>Queue Status</div>
+              {(() => {
+                const qStatus = camera.queue_movement_status || "MOVING";
+                const qConfig = {
+                  STOPPED: { label: "● STOPPED", color: "#f85149", bg: "rgba(248,81,73,0.15)", border: "#f85149" },
+                  SLOW: { label: "● SLOW", color: "#d29922", bg: "rgba(210,153,34,0.15)", border: "#d29922" },
+                  EMPTY: { label: "● EMPTY", color: "var(--cc-text-muted)", bg: "rgba(255,255,255,0.05)", border: "var(--cc-border)" },
+                  MOVING: { label: "● MOVING", color: "#3fb950", bg: "rgba(63,185,80,0.15)", border: "#3fb950" },
+                }[qStatus] || { label: "● MOVING", color: "#3fb950", bg: "rgba(63,185,80,0.15)", border: "#3fb950" };
+                return (
+                  <div style={{
+                    display: "inline-block",
+                    fontSize: 10.5,
+                    fontWeight: 800,
+                    fontFamily: "var(--cc-font-mono)",
+                    padding: "3px 8px",
+                    borderRadius: 4,
+                    background: qConfig.bg,
+                    color: qConfig.color,
+                    border: `1px solid ${qConfig.border}`,
+                    marginTop: 2,
+                  }}>
+                    {qConfig.label}
+                  </div>
+                );
+              })()}
             </div>
           </div>
-        )}
-
-        {/* Queue status badge for QUEUE cameras */}
-        {!isFrs && isRunning && camera.ai_purposes?.includes("QUEUE") && (
-          <div style={{ marginTop: 5 }}>
-            <span style={{
-              fontSize: 9, fontWeight: 700, padding: "2px 8px", borderRadius: 3,
-              background: camera.queue_movement_status === "STOPPED" ? "rgba(248,81,73,0.15)" : camera.queue_movement_status === "SLOW" ? "rgba(210,153,34,0.15)" : "rgba(63,185,80,0.12)",
-              color: camera.queue_movement_status === "STOPPED" ? "#f85149" : camera.queue_movement_status === "SLOW" ? "#d29922" : "#3fb950",
-              border: `1px solid ${camera.queue_movement_status === "STOPPED" ? "#f8514940" : camera.queue_movement_status === "SLOW" ? "#d2992240" : "#3fb95040"}`,
-            }}>
-              {camera.queue_movement_status === "STOPPED" ? "🚨 QUEUE STOPPED" : camera.queue_movement_status === "SLOW" ? "⚠️ QUEUE SLOW" : camera.queue_movement_status === "EMPTY" ? "⬜ QUEUE EMPTY" : "✅ QUEUE MOVING"}
-            </span>
+        ) : hasZone ? (
+          <div style={{ display: "grid", gridTemplateColumns: "1.2fr 1fr", gap: 8, padding: "8px 0", borderTop: "1px solid rgba(255,255,255,0.06)", alignItems: "center" }}>
+            <div>
+              <div className="cc-label" style={{ color: "#58a6ff", fontSize: 11, fontWeight: 700 }}>
+                People in {camera.zone_code || "Zone"}
+              </div>
+              <div style={{ fontFamily: "var(--cc-font-mono)", fontSize: 20, fontWeight: 800, color: "var(--cc-text-primary)" }}>
+                {(camera.people_count ?? 0).toLocaleString()} <span style={{ fontSize: 11, color: "var(--cc-text-muted)", fontWeight: 400 }}>people</span>
+              </div>
+            </div>
+            <div>
+              <div className="cc-label" style={{ fontSize: 10 }}>Zone Status</div>
+              {(() => {
+                const count = camera.people_count ?? 0;
+                const cap = camera.capacity || 100;
+                const ratio = cap > 0 ? (count / cap) : 0;
+                const zConfig = ratio >= 0.8
+                  ? { label: "● CRITICAL", color: "#f85149", bg: "rgba(248,81,73,0.15)", border: "#f85149" }
+                  : ratio >= 0.5
+                  ? { label: "● MODERATE", color: "#d29922", bg: "rgba(210,153,34,0.15)", border: "#d29922" }
+                  : { label: "● NORMAL", color: "#3fb950", bg: "rgba(63,185,80,0.15)", border: "#3fb950" };
+                return (
+                  <div style={{
+                    display: "inline-block",
+                    fontSize: 10.5,
+                    fontWeight: 800,
+                    fontFamily: "var(--cc-font-mono)",
+                    padding: "3px 8px",
+                    borderRadius: 4,
+                    background: zConfig.bg,
+                    color: zConfig.color,
+                    border: `1px solid ${zConfig.border}`,
+                    marginTop: 2,
+                  }}>
+                    {zConfig.label}
+                  </div>
+                );
+              })()}
+            </div>
+          </div>
+        ) : (
+          <div style={{ display: "grid", gridTemplateColumns: "1.2fr 1fr", gap: 8, padding: "8px 0", borderTop: "1px solid rgba(255,255,255,0.06)", alignItems: "center" }}>
+            <div>
+              <div className="cc-label" style={{ color: "#3fb950", fontSize: 11, fontWeight: 700 }}>↑ Entry Count (Today)</div>
+              <div style={{ fontFamily: "var(--cc-font-mono)", fontSize: 20, fontWeight: 800, color: "#3fb950" }}>
+                {(camera.in_count ?? 0).toLocaleString()}
+              </div>
+            </div>
+            <div>
+              <div className="cc-label" style={{ fontSize: 10 }}>Queue Status</div>
+              {(() => {
+                const qStatus = camera.queue_movement_status || "MOVING";
+                const qConfig = {
+                  STOPPED: { label: "● STOPPED", color: "#f85149", bg: "rgba(248,81,73,0.15)", border: "#f85149" },
+                  SLOW: { label: "● SLOW", color: "#d29922", bg: "rgba(210,153,34,0.15)", border: "#d29922" },
+                  EMPTY: { label: "● EMPTY", color: "var(--cc-text-muted)", bg: "rgba(255,255,255,0.05)", border: "var(--cc-border)" },
+                  MOVING: { label: "● MOVING", color: "#3fb950", bg: "rgba(63,185,80,0.15)", border: "#3fb950" },
+                }[qStatus] || { label: "● MOVING", color: "#3fb950", bg: "rgba(63,185,80,0.15)", border: "#3fb950" };
+                return (
+                  <div style={{
+                    display: "inline-block",
+                    fontSize: 10.5,
+                    fontWeight: 800,
+                    fontFamily: "var(--cc-font-mono)",
+                    padding: "3px 8px",
+                    borderRadius: 4,
+                    background: qConfig.bg,
+                    color: qConfig.color,
+                    border: `1px solid ${qConfig.border}`,
+                    marginTop: 2,
+                  }}>
+                    {qConfig.label}
+                  </div>
+                );
+              })()}
+            </div>
           </div>
         )}
 

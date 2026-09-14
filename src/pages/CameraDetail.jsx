@@ -12,11 +12,9 @@ const BACKEND = getBackendUrl();
 
 // Purpose meta: colors + labels + icons + ROI tool mapping
 const PURPOSE_META = {
-  ENTRY:      { label: "Entry Gate (IN Only)",  color: "#3fb950", icon: "bi-box-arrow-in-right", bg: "rgba(63,185,80,0.12)",  border: "rgba(63,185,80,0.3)",  roiTool: "ENTRY_LINE",   roiLabel: "Configure Entry Gate Line" },
-  EXIT:       { label: "Exit Gate (OUT Only)",  color: "#f85149", icon: "bi-box-arrow-right",    bg: "rgba(248,81,73,0.12)", border: "rgba(248,81,73,0.3)", roiTool: "EXIT_LINE",    roiLabel: "Configure Exit Gate Line" },
-  ENTRY_EXIT: { label: "Two-Way Gate (IN & OUT)", color: "#bc8cff", icon: "bi-arrow-left-right", bg: "rgba(188,140,255,0.12)", border: "rgba(188,140,255,0.3)", roiTool: "COUNTING_LINE", roiLabel: "Configure Two-Way Line" },
+  ENTRY:      { label: "Entry Gate",  color: "#3fb950", icon: "bi-box-arrow-in-right", bg: "rgba(63,185,80,0.12)",  border: "rgba(63,185,80,0.3)",  roiTool: "ENTRY_LINE",   roiLabel: "Configure Entry Gate & Queue Corridor" },
+  EXIT:       { label: "Exit Gate",   color: "#f85149", icon: "bi-box-arrow-right",    bg: "rgba(248,81,73,0.12)", border: "rgba(248,81,73,0.3)", roiTool: "EXIT_LINE",    roiLabel: "Configure Exit Gate & Queue Corridor" },
   ZONE:       { label: "Zone Density",          color: "#58a6ff", icon: "bi-bounding-box",       bg: "rgba(88,166,255,0.12)", border: "rgba(88,166,255,0.3)", roiTool: "CROWD_ROI", roiLabel: "Configure Zone Area" },
-  QUEUE:      { label: "Queue Management",      color: "#d29922", icon: "bi-people",             bg: "rgba(210,153,34,0.12)", border: "rgba(210,153,34,0.3)", roiTool: "QUEUE_ROI",    roiLabel: "Configure Queue Area" },
   FRS:        { label: "Face Recognition",      color: "#58a6ff", icon: "bi-person-bounding-box", bg: "rgba(88,166,255,0.12)", border: "rgba(88,166,255,0.3)", roiTool: null, roiLabel: null },
 };
 
@@ -188,11 +186,30 @@ function CameraFeed({ camera }) {
   const containerRef = useRef(null);
   const [streamError, setStreamError] = useState(false);
   const [retryCount, setRetryCount] = useState(0);
+  const [isTabVisible, setIsTabVisible] = useState(
+    typeof document !== "undefined" ? document.visibilityState === "visible" : true
+  );
+  const [visibilityTick, setVisibilityTick] = useState(() => Date.now());
+
+  useEffect(() => {
+    const handleVis = () => {
+      if (document.visibilityState === "visible") {
+        setIsTabVisible(true);
+        setVisibilityTick(Date.now());
+        setStreamError(false);
+      } else {
+        setIsTabVisible(false);
+      }
+    };
+    document.addEventListener("visibilitychange", handleVis);
+    return () => document.removeEventListener("visibilitychange", handleVis);
+  }, []);
 
   const camCode = camera?.camera_code || camera?.id;
-  const streamSrc = camera?.stream_url
+  const baseSrc = camera?.stream_url
     ? (camera.stream_url.startsWith("http") ? camera.stream_url : `${BACKEND}${camera.stream_url}`)
     : (camCode ? `${BACKEND}/api/v1/frs-engine/cameras/${camCode}/stream` : "");
+  const streamSrc = baseSrc ? `${baseSrc}${baseSrc.includes("?") ? "&" : "?"}t=${visibilityTick}` : "";
 
   if (camera?.status === "offline" || camera?.enabled === false) {
     return (
@@ -211,7 +228,7 @@ function CameraFeed({ camera }) {
         <i className="bi bi-broadcast" style={{ fontSize: 32, color: "#58a6ff" }} />
         <div style={{ fontSize: 12, color: "#8b949e" }}>Stream unavailable — camera may be reconnecting</div>
         <button className="cc-btn cc-btn-primary" style={{ fontSize: 11 }}
-          onClick={() => { setStreamError(false); setRetryCount(c => c + 1); }}>
+          onClick={() => { setStreamError(false); setRetryCount(c => c + 1); setVisibilityTick(Date.now()); }}>
           <i className="bi bi-arrow-clockwise" /> Reconnect
         </button>
       </div>
@@ -220,13 +237,17 @@ function CameraFeed({ camera }) {
 
   return (
     <div ref={containerRef} style={{ position: "relative" }}>
-      <img
-        key={retryCount}
-        src={streamSrc}
-        alt="Live RTSP Stream"
-        style={{ width: "100%", display: "block", background: "#050810" }}
-        onError={() => setStreamError(true)}
-      />
+      {isTabVisible ? (
+        <img
+          key={`${retryCount}_${visibilityTick}`}
+          src={streamSrc}
+          alt="Live RTSP Stream"
+          style={{ width: "100%", display: "block", background: "#050810" }}
+          onError={() => setStreamError(true)}
+        />
+      ) : (
+        <div style={{ aspectRatio: "16/9", background: "#050810" }} />
+      )}
     </div>
   );
 }

@@ -25,6 +25,7 @@ export default function Dashboard() {
 
   // Zustand State Selectors (fine-grained to prevent redundant renders)
   const dateRange = useDashboardStore((s) => s.dateRange);
+  const selectedDayNumber = useDashboardStore((s) => s.selectedDayNumber);
   const data = useDashboardStore((s) => s.data);
   const loading = useDashboardStore((s) => s.loading);
   const isRefreshing = useDashboardStore((s) => s.isRefreshing);
@@ -32,6 +33,7 @@ export default function Dashboard() {
   const error = useDashboardStore((s) => s.error);
   const dataStatus = useDashboardStore((s) => s.dataStatus);
   const setDateRange = useDashboardStore((s) => s.setDateRange);
+  const setSelectedDay = useDashboardStore((s) => s.setSelectedDay);
 
   const [selectedZoneCode, setSelectedZoneCode] = useState("all");
   const [clockStr, setClockStr] = useState("");
@@ -67,12 +69,26 @@ export default function Dashboard() {
     return ist.getHours();
   }, [clockStr]);
 
-  // 2. Fetch authoritative dashboard summary with stable callback
-  const loadData = useCallback(async (silent = false, overrideRange = null) => {
-    const store = useDashboardStore.getState();
-    const range = (overrideRange || store.dateRange || "today").toLowerCase();
+  // Dynamic Event Days derived from active event template
+  const eventDaysList = useMemo(() => {
+    if (data?.event_days && Array.isArray(data.event_days) && data.event_days.length > 0) {
+      return data.event_days;
+    }
+    if (fest10Data?.days && Array.isArray(fest10Data.days) && fest10Data.days.length > 0) {
+      return fest10Data.days;
+    }
+    return [
+      { day_number: 1, date: "14 Sep", label: "Day 1 (14 Sep)", status: "TODAY" },
+    ];
+  }, [data?.event_days, fest10Data?.days]);
 
-    if (inFlightRef.current && !overrideRange) {
+  // 2. Fetch authoritative dashboard summary with stable callback
+  const loadData = useCallback(async (silent = false, overrideRange = null, overrideDayNumber = undefined) => {
+    const store = useDashboardStore.getState();
+    const range = (overrideRange !== null ? overrideRange : (store.dateRange || "today")).toLowerCase();
+    const dayNum = overrideDayNumber !== undefined ? overrideDayNumber : store.selectedDayNumber;
+
+    if (inFlightRef.current && overrideRange === null && overrideDayNumber === undefined) {
       pendingRef.current = true;
       return;
     }
@@ -82,12 +98,12 @@ export default function Dashboard() {
 
     try {
       const [res, festRes] = await Promise.allSettled([
-        getDashboardSummary(range, true),
+        getDashboardSummary(range, true, dayNum),
         getFestival10DaysAnalytics(),
       ]);
       if (!isMountedRef.current) return;
       if (res.status === "fulfilled" && res.value) {
-        store.setDashboardData(res.value, range);
+        store.setDashboardData(res.value, range, dayNum);
       }
       if (festRes.status === "fulfilled" && festRes.value) {
         setFest10Data(festRes.value?.data || festRes.value);
@@ -109,7 +125,8 @@ export default function Dashboard() {
         setTimeout(() => {
           if (isMountedRef.current) {
             const curRange = useDashboardStore.getState().dateRange || "today";
-            loadData(true, curRange);
+            const curDay = useDashboardStore.getState().selectedDayNumber;
+            loadData(true, curRange, curDay);
           }
         }, 1000);
       }
@@ -120,7 +137,8 @@ export default function Dashboard() {
   useEffect(() => {
     isMountedRef.current = true;
     const initialRange = useDashboardStore.getState().dateRange || "today";
-    loadData(false, initialRange);
+    const initialDay = useDashboardStore.getState().selectedDayNumber;
+    loadData(false, initialRange, initialDay);
 
     const scheduleNext = () => {
       clearTimeout(timerRef.current);
@@ -128,7 +146,8 @@ export default function Dashboard() {
       timerRef.current = setTimeout(async () => {
         if (isMountedRef.current && document.visibilityState === "visible") {
           const curRange = useDashboardStore.getState().dateRange || "today";
-          await loadData(true, curRange);
+          const curDay = useDashboardStore.getState().selectedDayNumber;
+          await loadData(true, curRange, curDay);
           scheduleNext();
         }
       }, 5000);
@@ -139,7 +158,8 @@ export default function Dashboard() {
     const handleVisibilityChange = () => {
       if (document.visibilityState === "visible") {
         const curRange = useDashboardStore.getState().dateRange || "today";
-        loadData(true, curRange);
+        const curDay = useDashboardStore.getState().selectedDayNumber;
+        loadData(true, curRange, curDay);
         scheduleNext();
       } else {
         clearTimeout(timerRef.current);
@@ -148,7 +168,8 @@ export default function Dashboard() {
 
     document.addEventListener("visibilitychange", handleVisibilityChange);
 
-    // 4. WebSocket Real-time event listener (Instant 0ms count reflection)
+    // 4. WebSocket Real-time event listener (Strict canonical consistency)
+    let wsDebounceTimer = null;
     const unsubWs = realtimeService.subscribe((msg, eventType, payload) => {
       const type = String(eventType || msg?.type || "").toLowerCase();
       const dataPayload = payload || msg?.payload || msg;
@@ -160,18 +181,16 @@ export default function Dashboard() {
         type === "crowd_metrics_updated" ||
         type === "line_crossing"
       ) {
-        // ONLY patch live numbers when viewing TODAY — never overwrite historical ranges (e.g. YESTERDAY)
-        const curRange = (useDashboardStore.getState().dateRange || "TODAY").toUpperCase();
-        if (curRange === "TODAY") {
+        if (dataPayload?.today_entries !== undefined && dataPayload?.today_exits !== undefined) {
           useDashboardStore.getState().patchDashboardCrossing(dataPayload);
-          if (dataPayload?.total_visitors_festival !== undefined) {
-            useDashboardStore.getState().patchDashboardMetrics({
-              total_visitors_festival: dataPayload.total_visitors_festival,
-              today_entries: dataPayload.today_entries,
-              today_exits: dataPayload.today_exits,
-              current_occupancy: dataPayload.current_occupancy,
-            });
-          }
+        } else {
+          // Debounce fetch from PostgreSQL canonical ledger
+          if (wsDebounceTimer) clearTimeout(wsDebounceTimer);
+          wsDebounceTimer = setTimeout(() => {
+            const curRange = useDashboardStore.getState().dateRange || "today";
+            const curDay = useDashboardStore.getState().selectedDayNumber;
+            loadData(true, curRange, curDay);
+          }, 600);
         }
       } else if (type === "zone_update") {
         if (dataPayload?.zone_code) {
@@ -201,6 +220,7 @@ export default function Dashboard() {
     return () => {
       isMountedRef.current = false;
       clearTimeout(timerRef.current);
+      if (wsDebounceTimer) clearTimeout(wsDebounceTimer);
       document.removeEventListener("visibilitychange", handleVisibilityChange);
       unsubWs();
       unsubStatus();
@@ -212,15 +232,23 @@ export default function Dashboard() {
     if (activeEventId) {
       useDashboardStore.getState().setLoading(true);
       const curRange = useDashboardStore.getState().dateRange || "today";
-      loadData(false, curRange);
+      const curDay = useDashboardStore.getState().selectedDayNumber;
+      loadData(false, curRange, curDay);
     }
   }, [activeEventId, loadData]);
 
-  // Handle Date Range Change
-  const handleDateRangeChange = (rangeId) => {
-    const upper = rangeId.toUpperCase();
-    setDateRange(upper);
-    loadData(false, rangeId);
+  // Handle Event Day Change
+  const handleEventDaySelect = (dayNum, rangeStr = null) => {
+    if (rangeStr === "festival") {
+      setSelectedDay(null, "festival");
+      loadData(false, "festival", null);
+    } else if (dayNum !== null && dayNum !== undefined) {
+      setSelectedDay(dayNum, null);
+      loadData(false, null, dayNum);
+    } else {
+      setSelectedDay(null, "today");
+      loadData(false, "today", null);
+    }
   };
 
   // Memoized Chart Options (Matching 24-Hour Person Count Distribution aesthetic)
@@ -462,8 +490,8 @@ export default function Dashboard() {
           <div style={{ margin: "6px 0" }}>
             <div style={{ fontSize: 28, fontWeight: 800, fontFamily: "var(--cc-font-mono)", color: "var(--cc-text-primary)", letterSpacing: "0.02em" }}>
               {loading && !data ? "—" : (
-                fest10Data?.total_entries_10days ??
                 data?.festival_total_entries ??
+                fest10Data?.total_entries_10days ??
                 data?.total_visitors_festival ??
                 0
               ).toLocaleString()}
@@ -613,41 +641,60 @@ export default function Dashboard() {
 
           {/* Right: Date Range Buttons + Reference-Style Legend */}
           <div style={{ display: "flex", alignItems: "center", gap: 16 }}>
-            {/* Filter Buttons */}
+            {/* Dynamic Festival Day Selector */}
             <div
               style={{
                 display: "flex",
-                gap: 4,
-                background: "rgba(0, 0, 0, 0.35)",
-                padding: "3px 4px",
+                alignItems: "center",
+                gap: 8,
+                background: "rgba(0, 0, 0, 0.4)",
+                padding: "3px 8px",
                 borderRadius: 6,
-                border: "1px solid rgba(255, 255, 255, 0.08)",
+                border: "1px solid rgba(255, 255, 255, 0.12)",
               }}
             >
-              {DATE_RANGE_OPTIONS.map((opt) => {
-                const active = dateRange === opt.id.toUpperCase();
-                return (
-                  <button
-                    key={opt.id}
-                    onClick={() => handleDateRangeChange(opt.id)}
-                    style={{
-                      padding: "4px 10px",
-                      fontSize: 10,
-                      fontFamily: "var(--cc-font-mono)",
-                      fontWeight: active ? 800 : 500,
-                      background: active ? "#2085c7" : "transparent",
-                      color: active ? "#fff" : "#8b949e",
-                      border: "none",
-                      borderRadius: 4,
-                      cursor: "pointer",
-                      boxShadow: active ? "0 0 10px rgba(32, 133, 199, 0.5)" : "none",
-                      transition: "all 0.15s ease",
-                    }}
-                  >
-                    {opt.label}
-                  </button>
-                );
-              })}
+              <label style={{ fontSize: 10, fontFamily: "var(--cc-font-mono)", fontWeight: 700, color: "var(--cc-text-muted)", textTransform: "uppercase" }}>
+                Festival Day:
+              </label>
+              <select
+                value={
+                  selectedDayNumber
+                    ? `day_${selectedDayNumber}`
+                    : dateRange === "FESTIVAL"
+                    ? "festival"
+                    : "today"
+                }
+                onChange={(e) => {
+                  const val = e.target.value;
+                  if (val === "festival") {
+                    handleEventDaySelect(null, "festival");
+                  } else if (val.startsWith("day_")) {
+                    const dNum = parseInt(val.replace("day_", ""), 10);
+                    handleEventDaySelect(dNum, null);
+                  } else {
+                    handleEventDaySelect(null, "today");
+                  }
+                }}
+                style={{
+                  background: "rgba(13, 17, 23, 0.95)",
+                  color: "#58a6ff",
+                  border: "1px solid rgba(45, 168, 232, 0.35)",
+                  borderRadius: 4,
+                  padding: "4px 8px",
+                  fontSize: 11,
+                  fontFamily: "var(--cc-font-mono)",
+                  fontWeight: 700,
+                  cursor: "pointer",
+                  outline: "none",
+                }}
+              >
+                {eventDaysList.map((d) => (
+                  <option key={d.day_number} value={`day_${d.day_number}`}>
+                    {d.label || `Day ${d.day_number}: ${d.date}`} {d.status === "TODAY" ? "★ TODAY" : ""}
+                  </option>
+                ))}
+                <option value="festival">Festival Total (All Days)</option>
+              </select>
             </div>
 
             {/* Custom Legend Matching Screenshot */}

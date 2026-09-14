@@ -8,6 +8,24 @@ const BACKEND = getBackendUrl();
 export default function FRSCameraGrid({ cameras = [] }) {
   const navigate = useNavigate();
   const [engineCams, setEngineCams] = useState([]);
+  const [isTabVisible, setIsTabVisible] = useState(
+    typeof document !== "undefined" ? document.visibilityState === "visible" : true
+  );
+  const [visibilityTick, setVisibilityTick] = useState(() => Date.now());
+
+  // Listen for tab switching to prevent background frame accumulation in browser buffer
+  useEffect(() => {
+    const handleVis = () => {
+      if (document.visibilityState === "visible") {
+        setIsTabVisible(true);
+        setVisibilityTick(Date.now());
+      } else {
+        setIsTabVisible(false);
+      }
+    };
+    document.addEventListener("visibilitychange", handleVis);
+    return () => document.removeEventListener("visibilitychange", handleVis);
+  }, []);
 
   // Fetch live FRS engine cameras (RTSP workers)
   useEffect(() => {
@@ -76,15 +94,20 @@ export default function FRSCameraGrid({ cameras = [] }) {
             {/* Live stream preview */}
             {cam.stream_url ? (
               <div style={{ position: "relative", background: "#000", height: 160, overflow: "hidden" }}>
-                <img
-                  src={`${BACKEND}${cam.stream_url}`}
-                  alt={`FRS Live: ${displayId}`}
-                  style={{ width: "100%", height: "100%", objectFit: "cover", display: "block" }}
-                  onError={(e) => {
-                    e.target.style.display = "none";
-                    e.target.nextSibling.style.display = "flex";
-                  }}
-                />
+                {isTabVisible ? (
+                  <img
+                    key={visibilityTick}
+                    src={`${BACKEND}${cam.stream_url}${cam.stream_url.includes("?") ? "&" : "?"}t=${visibilityTick}`}
+                    alt={`FRS Live: ${displayId}`}
+                    style={{ width: "100%", height: "100%", objectFit: "cover", display: "block" }}
+                    onError={(e) => {
+                      e.target.style.display = "none";
+                      e.target.nextSibling.style.display = "flex";
+                    }}
+                  />
+                ) : (
+                  <div style={{ width: "100%", height: "100%", background: "#000" }} />
+                )}
                 {/* Fallback if stream not ready */}
                 <div style={{ display: "none", position: "absolute", inset: 0, alignItems: "center", justifyContent: "center", flexDirection: "column", gap: 6, background: "#111" }}>
                   <i className="bi bi-camera-video" style={{ fontSize: 28, color: "var(--cc-text-muted)" }} />

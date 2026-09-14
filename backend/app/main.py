@@ -101,11 +101,13 @@ async def lifespan(app: FastAPI):
                 dash_svc = DashboardService(session)
                 try:
                     from app.models.event import Event
-                    from sqlalchemy import select
                     evt_res = await session.execute(
-                        select(Event).where((Event.code == "KHB-2026") | (Event.name.ilike("%Khairatabad%"))).limit(1)
+                        select(Event).where(Event.status.in_(["ACTIVE", "LIVE"])).order_by(Event.created_at.desc()).limit(1)
                     )
                     evt = evt_res.scalars().first()
+                    if not evt:
+                        evt_res = await session.execute(select(Event).order_by(Event.created_at.desc()).limit(1))
+                        evt = evt_res.scalars().first()
                     evt_id = evt.id if evt else None
                     await dash_svc.get_summary(date_range="today", event_id=evt_id)
                     await dash_svc.get_summary(date_range="yesterday", event_id=evt_id)

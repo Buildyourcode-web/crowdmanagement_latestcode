@@ -11,50 +11,50 @@ import { getBackendUrl } from "../../utils/urlConfig.js";
 
 const ROI_TYPE_META = {
   ENTRY_LINE: {
-    label: "Entry Gate Line (IN Only)",
+    label: "Entry Gate Boundary Line",
     color: "#3fb950",
     isLine: true,
     direction: "IN",
-    hint: "Click 2 points across the entry gate to draw a line. Counts visitors entering (+1 IN footfall).",
+    hint: "Draw a line across the entry threshold. Devotees moving Outside -> Inside increment +1 Entry count.",
   },
   EXIT_LINE: {
-    label: "Exit Gate Line (OUT Only)",
+    label: "Exit Gate Boundary Line",
     color: "#f85149",
     isLine: true,
     direction: "OUT",
-    hint: "Click 2 points across the exit gate to draw a line. Counts visitors leaving (+1 OUT footfall).",
+    hint: "Draw a line across the exit threshold. Devotees moving Inside -> Outside increment +1 Exit count.",
   },
   COUNTING_LINE: {
-    label: "Two-Way Gate Line (IN & OUT)",
+    label: "Gate Counting Line",
     color: "#bc8cff",
     isLine: true,
     direction: "BOTH",
-    hint: "Click 2 points across the gate to draw a line. Counts both entering (+1 IN) and exiting (+1 OUT) footfall.",
+    hint: "Draw a line across the boundary threshold for crossing validation.",
   },
   CROWD_ROI: {
-    label: "Zone / Crowd Area Polygon",
+    label: "Passage Corridor / Zone Polygon",
     color: "#58a6ff",
     isLine: false,
-    hint: "Click 3+ points around the hall or zone area to draw a polygon. Monitors crowd density and occupancy.",
+    hint: "Draw a polygon around the barricaded walking passage or zone area to track devotee movement and queue flow.",
   },
   QUEUE_ROI: {
-    label: "Queue Waiting Area Polygon",
+    label: "Queue Corridor Polygon",
     color: "#d29922",
     isLine: false,
-    hint: "Click points around the queue barricades to draw a polygon. Tracks queue headcount and waiting times.",
+    hint: "Draw a polygon around the barricade passage corridor to analyze queue movement.",
   },
   DIRECTION_LINE: {
-    label: "Queue Flow Direction Line",
+    label: "Queue Flow Direction Vector",
     color: "#388bfd",
     isLine: true,
     direction: "IN",
-    hint: "Draw a line from entry to exit indicating the flow direction of the queue.",
+    hint: "Draw a vector indicating forward queue progression direction along the barricades.",
   },
   EXCLUSION_ZONE: {
     label: "Exclusion Zone (Ignore Area)",
     color: "#8b949e",
     isLine: false,
-    hint: "Draw a box around pillars, walls, or trees to exclude them from AI detection.",
+    hint: "Draw a box around pillars, barricade poles, or walls to exclude them from AI detection.",
   },
 };
 
@@ -85,26 +85,24 @@ export default function ROIEditor({
   const [rois, setRois] = useState([]);
   const [readiness, setReadiness] = useState(null);
 
-  // Assigned purpose locked to camera profile: ENTRY | EXIT | ZONE | QUEUE
+  // Assigned purpose locked to camera profile: ENTRY | EXIT | ZONE
   const assignedObjective = useMemo(() => {
     if (initialObjective && initialObjective !== "ALL") return initialObjective;
     if (camera?.ai_purposes && camera.ai_purposes.length > 0) {
       const p = String(camera.ai_purposes[0]).toUpperCase();
       if (p === "ENTRY" || (p.includes("ENTRY") && !p.includes("EXIT"))) return "ENTRY";
       if (p === "EXIT" || (p.includes("EXIT") && !p.includes("ENTRY"))) return "EXIT";
-      if (p.includes("QUEUE")) return "QUEUE";
       if (p.includes("ZONE")) return "ZONE";
-      return "ENTRY_EXIT";
+      return "ENTRY";
     }
-    if (profileId?.includes("QUEUE")) return "QUEUE";
     if (profileId?.includes("ZONE")) return "ZONE";
     if (profileId?.includes("EXIT")) return "EXIT";
-    return "ENTRY_EXIT";
+    return "ENTRY";
   }, [initialObjective, camera?.ai_purposes, profileId]);
 
   const [objective, setObjective] = useState(assignedObjective);
 
-  // Collect all active camera purposes (supports dual functionalities)
+  // Collect all active camera purposes
   const cameraPurposes = useMemo(() => {
     if (camera?.ai_purposes && Array.isArray(camera.ai_purposes) && camera.ai_purposes.length > 0) {
       return camera.ai_purposes.map((p) => String(p).toUpperCase());
@@ -112,18 +110,35 @@ export default function ROIEditor({
     return [assignedObjective];
   }, [camera?.ai_purposes, assignedObjective]);
 
+  // Dedicated zone camera flag (e.g. Zone A/B/C/D density camera vs Entry/Exit gate camera)
+  const isZoneCamera = useMemo(() => {
+    return assignedObjective === "ZONE" || (cameraPurposes.includes("ZONE") && !cameraPurposes.includes("ENTRY") && !cameraPurposes.includes("EXIT"));
+  }, [assignedObjective, cameraPurposes]);
+
   // Available tools: include tools for ALL active purposes on this camera
   const availableTools = useMemo(() => {
     const tools = new Set();
     for (const p of cameraPurposes) {
-      if (p === "ENTRY_EXIT") tools.add("COUNTING_LINE");
-      else if (p === "ENTRY") tools.add("ENTRY_LINE");
-      else if (p === "EXIT") tools.add("EXIT_LINE");
-      else if (p === "ZONE") tools.add("CROWD_ROI");
-      else if (p === "QUEUE") tools.add("QUEUE_ROI");
+      if (p === "ENTRY") {
+        tools.add("ENTRY_LINE");
+        tools.add("CROWD_ROI");
+        tools.add("DIRECTION_LINE");
+      } else if (p === "EXIT") {
+        tools.add("EXIT_LINE");
+        tools.add("CROWD_ROI");
+        tools.add("DIRECTION_LINE");
+      } else if (p === "ZONE") {
+        tools.add("CROWD_ROI");
+      } else if (p === "QUEUE") {
+        tools.add("QUEUE_ROI");
+        tools.add("DIRECTION_LINE");
+      } else {
+        tools.add("ENTRY_LINE");
+        tools.add("CROWD_ROI");
+      }
     }
+    tools.add("EXCLUSION_ZONE");
     if (initialTool) tools.add(initialTool);
-    if (tools.size === 0) tools.add("ENTRY_LINE");
     return Array.from(tools);
   }, [cameraPurposes, initialTool]);
 
@@ -355,11 +370,16 @@ export default function ROIEditor({
       }
       geom = {
         points: currentPoints,
-        warning_threshold: parseInt(warningThreshold, 10) || 50,
-        danger_threshold: parseInt(dangerThreshold, 10) || 80,
-        capacity: parseInt(capacity, 10) || 100,
-        zone_name: roiName || `${selectedZone} Density Area`,
-        zone_code: (objective === "ZONE" || activeTool === "CROWD_ROI") ? selectedZone : (camera?.zone_code || "ZONE-A"),
+        ...(isZoneCamera ? {
+          warning_threshold: parseInt(warningThreshold, 10) || 50,
+          danger_threshold: parseInt(dangerThreshold, 10) || 80,
+          capacity: parseInt(capacity, 10) || 100,
+          zone_name: roiName || `${selectedZone} Density Area`,
+          zone_code: selectedZone,
+        } : {
+          corridor_name: roiName || (assignedObjective === "EXIT" ? "Exit Gate Passage Corridor" : "Entry Gate Passage Corridor"),
+          zone_code: camera?.zone_code || "ZONE-A",
+        }),
       };
     }
 
@@ -404,8 +424,8 @@ export default function ROIEditor({
         console.warn("Auto-start Crowd AI notice:", e);
       }
 
-      // If configuring Zone Density, sync camera zone assignment
-      if (objective === "ZONE" || activeTool === "CROWD_ROI") {
+      // If configuring dedicated Zone Density camera, sync camera zone assignment
+      if (isZoneCamera) {
         try {
           await fetch(`${BACKEND}/api/v1/frs-engine/cameras/${camCode}/assign-zone?zone_code=${selectedZone}`, {
             method: "PATCH",
@@ -633,7 +653,10 @@ export default function ROIEditor({
                       if (tool === "COUNTING_LINE") setObjective("ENTRY_EXIT");
                       else if (tool === "ENTRY_LINE") setObjective("ENTRY");
                       else if (tool === "EXIT_LINE") setObjective("EXIT");
-                      else if (tool === "CROWD_ROI") setObjective("ZONE");
+                      else if (tool === "CROWD_ROI") {
+                        if (isZoneCamera) setObjective("ZONE");
+                        else setObjective(assignedObjective);
+                      }
                       else if (tool === "QUEUE_ROI") setObjective("QUEUE");
                       handleReset();
                     }}
@@ -684,8 +707,8 @@ export default function ROIEditor({
 
           {/* Geometry Properties */}
           <div style={{ display: "flex", flexDirection: "column", gap: 10 }}>
-            {/* Zone Selector — ONLY for Zone Density camera */}
-            {(objective === "ZONE" || activeTool === "CROWD_ROI") && (
+            {/* Zone Selector — ONLY for dedicated Zone Density camera */}
+            {isZoneCamera && (
               <div style={{ background: "var(--cc-bg-root)", padding: "10px 12px", borderRadius: 6, border: "1px solid var(--cc-border)" }}>
                 <label style={{ fontSize: 11, fontWeight: 700, color: "var(--cc-accent)", display: "flex", alignItems: "center", gap: 6, marginBottom: 8, textTransform: "uppercase" }}>
                   <i className="bi bi-geo-alt-fill" style={{ color: "#58a6ff" }} /> Select Zone (A, B, C, D):
@@ -747,7 +770,13 @@ export default function ROIEditor({
                 onChange={(e) => setRoiName(e.target.value)}
                 className="cc-input"
                 style={{ width: "100%", padding: "6px 8px", fontSize: 12 }}
-                placeholder="e.g. Main Courtyard Polygon"
+                placeholder={
+                  isZoneCamera
+                    ? "e.g. Zone A Main Courtyard Density Area"
+                    : assignedObjective === "EXIT"
+                    ? "e.g. Exit Gate Passage Corridor"
+                    : "e.g. Entry Gate Passage Corridor"
+                }
               />
             </div>
 
@@ -767,7 +796,7 @@ export default function ROIEditor({
                   <option value="BOTH">BOTH (Bi-directional)</option>
                 </select>
               </div>
-            ) : (
+            ) : isZoneCamera ? (
               <div style={{ display: "flex", flexDirection: "column", gap: 8, background: "var(--cc-bg-root)", padding: 10, borderRadius: 6, border: "1px solid var(--cc-border)" }}>
                 <div style={{ fontSize: 11, fontWeight: 700, color: "var(--cc-accent)", textTransform: "uppercase" }}>
                   Density Alert Thresholds
@@ -833,7 +862,7 @@ export default function ROIEditor({
                   />
                 </div>
               </div>
-            )}
+            ) : null}
           </div>
 
           {/* Drawing Status & Actions */}

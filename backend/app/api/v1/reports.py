@@ -1,7 +1,7 @@
 import csv
 from datetime import datetime, timezone
 import io
-from typing import List
+from typing import List, Optional, Dict, Any
 from fastapi import APIRouter, Depends, status
 from fastapi.responses import StreamingResponse
 from sqlalchemy import func, or_, select
@@ -15,6 +15,7 @@ from app.schemas.analytics import Festival10DaysResponse
 from app.schemas.common import StandardResponse
 from app.security.permissions import Permissions
 from app.services.analytics_service import AnalyticsService
+from app.services.counting_service import CanonicalCountingService
 from app.utils.response import success_response
 
 router = APIRouter(prefix="/reports", tags=["Reports"])
@@ -22,36 +23,27 @@ router = APIRouter(prefix="/reports", tags=["Reports"])
 
 @router.get("", response_model=StandardResponse[List[dict]])
 async def list_reports(
+    day_number: Optional[int] = None,
+    date_range: Optional[str] = None,
     ctx: EventContext = Depends(get_event_context),
     db: AsyncSession = Depends(get_db),
     current_user: User = Depends(require_permission(Permissions.REPORTS_READ)),
 ):
-    """Retrieve generated operational reports with live telemetry totals."""
-    # 1. Total visitors and flow from crowd_snapshots
-    stmt_crowd = select(
-        func.coalesce(func.sum(CrowdSnapshot.inflow_rate), 0).label("inflow"),
-        func.coalesce(func.sum(CrowdSnapshot.outflow_rate), 0).label("outflow"),
+    """Retrieve generated operational reports with canonical crossing totals for the selected event day."""
+    counting_service = CanonicalCountingService(db)
+    target_d, start_utc, end_utc, sel_day_num, range_label = await counting_service.resolve_day_boundary(
+        ctx.event_id, day_number=day_number, date_range=date_range
     )
-    if ctx.event_id:
-        stmt_crowd = stmt_crowd.where(CrowdSnapshot.event_id == ctx.event_id)
-    res_crowd = await db.execute(stmt_crowd)
-    crowd_row = res_crowd.first()
-    tot_in = int(crowd_row.inflow if crowd_row else 0)
-    tot_out = int(crowd_row.outflow if crowd_row else 0)
 
-    # 2. Check live in-memory worker counts
-    live_in = 0
-    try:
-        from app.frs_engine.frs_service import _camera_workers, _workers_lock
-        with _workers_lock:
-            for w in _camera_workers.values():
-                if getattr(w, "running", False) and getattr(w, "crowd_ai_active", False):
-                    live_in += getattr(w, "in_count", 0)
-    except Exception:
-        pass
-    tot_in += live_in
+    # 1. Total visitors and flow from CanonicalCountingService respecting selected day
+    if target_d is not None:
+        tot_in, tot_out = await counting_service.get_durable_counts(
+            ctx.event_id, start_time=start_utc, end_time=end_utc
+        )
+    else:
+        tot_in, tot_out = await counting_service.get_durable_counts(ctx.event_id)
 
-    # 3. Incidents count
+    # 2. Incidents count
     stmt_inc = select(func.count(Incident.id))
     if ctx.event_id:
         stmt_inc = stmt_inc.where(Incident.event_id == ctx.event_id)
@@ -60,24 +52,36 @@ async def list_reports(
 
     now_iso = datetime.now(timezone.utc).strftime("%d %b %Y, %H:%M UTC")
 
+    scope_title = f"{range_label}" if range_label else "Festival Total"
+
     reports = [
         {
             "id": "REP-2026-001",
-            "title": "Executive Daily Footfall & Attendance Briefing",
+            "title": f"Executive Footfall & Attendance Briefing ({scope_title})",
             "type": "DAILY_SUMMARY",
             "generated_at": now_iso,
             "format": "PDF",
-            "summary": f"Total festival footfall: {tot_in:,} visitors | Exits: {tot_out:,}",
+            "summary": f"{scope_title} footfall: {tot_in:,} visitors | Exits: {tot_out:,}",
             "records": tot_in,
+            "total_entries": tot_in,
+            "total_exits": tot_out,
+            "total_footfall": tot_in,
+            "day_number": sel_day_num,
+            "selected_range_label": range_label,
         },
         {
             "id": "REP-2026-002",
-            "title": "Crowd Density, Entry/Exit & Queue Flow Analysis",
+            "title": f"Crowd Density, Entry/Exit & Queue Flow Analysis ({scope_title})",
             "type": "CROWD_ANALYTICS",
             "generated_at": now_iso,
             "format": "CSV",
             "summary": f"Line crossing telemetry active across configured ROI gates (Net: {max(0, tot_in - tot_out):,})",
             "records": tot_in,
+            "total_entries": tot_in,
+            "total_exits": tot_out,
+            "total_footfall": tot_in,
+            "day_number": sel_day_num,
+            "selected_range_label": range_label,
         },
         {
             "id": "REP-2026-003",

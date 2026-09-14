@@ -24,6 +24,7 @@ from app.models.ai_capacity import AICapacitySnapshot
 from app.models.ai_deployment import AIPipelineDeployment
 from app.models.camera_ai_assignment import CameraAIProfileAssignment
 from app.models.camera_roi import CameraROIConfiguration
+from app.models.line_crossing import LineCrossingEvent
 import app.models.settings
 
 __all__ = [
@@ -35,6 +36,7 @@ __all__ = [
     "Camera",
     "CameraAIProfileAssignment",
     "CameraROIConfiguration",
+    "LineCrossingEvent",
     "AICapacitySnapshot",
     "AIPipelineDeployment",
     "User",

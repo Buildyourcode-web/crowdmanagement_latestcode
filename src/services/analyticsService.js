@@ -1,8 +1,15 @@
 import apiClient from "./apiClient.js";
 import { getBackendUrl } from "../utils/urlConfig.js";
 
-export async function getAttendanceAnalytics() {
-  const res = await apiClient.get("/api/v1/analytics/attendance");
+export async function getAttendanceAnalytics(dayNumber = null, dateRange = null) {
+  const params = {};
+  if (dayNumber !== null && dayNumber !== undefined) {
+    params.day_number = dayNumber;
+  }
+  if (dateRange) {
+    params.date_range = dateRange;
+  }
+  const res = await apiClient.get("/api/v1/analytics/attendance", { params });
   return res.data;
 }
 

@@ -16,6 +16,7 @@ router = APIRouter(prefix="/dashboard", tags=["Command Center Dashboard"])
 @router.get("/summary", response_model=StandardResponse[DashboardSummaryResponse])
 async def get_dashboard_summary(
     date_range: str = Query("today", description="today, yesterday, 7days, festival, custom"),
+    day_number: Optional[int] = Query(None, description="Optional festival day number (1..N)"),
     ctx: EventContext = Depends(get_event_context),
     db: AsyncSession = Depends(get_db),
     current_user: User = Depends(require_permission(Permissions.CROWD_READ)),
@@ -28,6 +29,7 @@ async def get_dashboard_summary(
     service = DashboardService(db)
     summary = await service.get_summary(
         date_range=date_range,
+        day_number=day_number,
         event_id=ctx.event_id,
         allowed_site_ids=ctx.allowed_site_ids,
     )

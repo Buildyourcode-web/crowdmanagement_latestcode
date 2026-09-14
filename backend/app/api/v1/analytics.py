@@ -1,4 +1,5 @@
-from fastapi import APIRouter, Depends, status
+from typing import Optional
+from fastapi import APIRouter, Depends, Query, status
 from sqlalchemy.ext.asyncio import AsyncSession
 from app.dependencies import get_current_user, get_db, get_event_context, require_permission, EventContext
 from app.models.user import User
@@ -19,13 +20,19 @@ router = APIRouter(prefix="/analytics", tags=["Analytics"])
 
 @router.get("/attendance", response_model=StandardResponse[AttendanceAnalyticsResponse])
 async def get_attendance_analytics(
+    day_number: Optional[int] = Query(None, description="Optional festival day number (1..N)"),
+    date_range: Optional[str] = Query(None, description="today, yesterday, 7days, festival, custom"),
     ctx: EventContext = Depends(get_event_context),
     db: AsyncSession = Depends(get_db),
     current_user: User = Depends(require_permission(Permissions.ANALYTICS_READ)),
 ):
     """Retrieve historical daily and hourly attendance metrics."""
     service = AnalyticsService(db)
-    data = await service.get_attendance_analytics(event_id=ctx.event_id)
+    data = await service.get_attendance_analytics(
+        event_id=ctx.event_id,
+        day_number=day_number,
+        date_range=date_range,
+    )
     return success_response(data)
 
 

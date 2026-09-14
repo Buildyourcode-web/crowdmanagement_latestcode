@@ -24,6 +24,7 @@ try {
 
 export const useDashboardStore = create((set, get) => ({
   dateRange: "TODAY",
+  selectedDayNumber: null,
   data: initialCachedData,
   rangeCache: initialRangeCache,
   loading: initialCachedData ? false : true,
@@ -33,23 +34,45 @@ export const useDashboardStore = create((set, get) => ({
   dataStatus: "LIVE DATA",
   lastUpdated: initialCachedData ? new Date().toISOString() : null,
 
-  setDateRange: (range) => {
-    const upper = (range || "TODAY").toUpperCase();
+  setSelectedDay: (dayNumber = null, range = "today") => {
     const current = get();
-    if (current.dateRange === upper) return;
+    const rangeKey = dayNumber ? `DAY_${dayNumber}` : (range || "TODAY").toUpperCase();
+    
+    set({
+      selectedDayNumber: dayNumber,
+      dateRange: (range || "today").toUpperCase(),
+    });
 
-    const cachedForRange = current.rangeCache?.[upper];
+    const cachedForRange = current.rangeCache?.[rangeKey];
     if (cachedForRange) {
-      // Instant 0ms switch to cached range data!
       set({
-        dateRange: upper,
         data: cachedForRange,
         isRangeLoading: false,
       });
     } else {
-      // Range not cached yet — mark range as loading so stale counts aren't shown
+      set({
+        isRangeLoading: true,
+      });
+    }
+  },
+
+  setDateRange: (range) => {
+    const upper = (range || "TODAY").toUpperCase();
+    const current = get();
+    if (current.dateRange === upper && current.selectedDayNumber === null) return;
+
+    const cachedForRange = current.rangeCache?.[upper];
+    if (cachedForRange) {
       set({
         dateRange: upper,
+        selectedDayNumber: null,
+        data: cachedForRange,
+        isRangeLoading: false,
+      });
+    } else {
+      set({
+        dateRange: upper,
+        selectedDayNumber: null,
         isRangeLoading: true,
       });
     }
@@ -65,6 +88,7 @@ export const useDashboardStore = create((set, get) => ({
     set({
       data: null,
       rangeCache: {},
+      selectedDayNumber: null,
       loading: true,
       isRefreshing: false,
       isRangeLoading: false,
@@ -84,9 +108,10 @@ export const useDashboardStore = create((set, get) => ({
   setError: (error) =>
     set((s) => (s.error === error ? s : { error })),
 
-  setDashboardData: (payload, forRange = null) => {
+  setDashboardData: (payload, forRange = null, forDayNumber = null) => {
     const current = get();
-    const rangeKey = (
+    const dayNum = forDayNumber ?? payload?.selected_day_number ?? current.selectedDayNumber;
+    const rangeKey = dayNum ? `DAY_${dayNum}` : (
       forRange ||
       payload?.date_range_selected ||
       current.dateRange ||
@@ -108,6 +133,7 @@ export const useDashboardStore = create((set, get) => ({
     set({
       data: payload,
       rangeCache: updatedCache,
+      selectedDayNumber: dayNum,
       loading: false,
       isRefreshing: false,
       isRangeLoading: false,
@@ -116,48 +142,28 @@ export const useDashboardStore = create((set, get) => ({
     });
   },
 
-  // Instant 0ms real-time count updates from line-crossing events
+  // Authoritative real-time count updates
   patchDashboardCrossing: (payload) =>
     set((state) => {
       if (!state.data) return state;
-      const crossing = (payload?.crossing || "").toUpperCase();
-      const currentEntries = Number(state.data.today_entries) || 0;
-      const currentExits = Number(state.data.today_exits) || 0;
-
-      let newEntries = currentEntries;
-      let newExits = currentExits;
-
-      if (crossing === "IN") {
-        newEntries += 1;
-      } else if (crossing === "OUT") {
-        newExits += 1;
-      } else if (payload?.inflow_delta) {
-        newEntries += Number(payload.inflow_delta) || 0;
-      } else if (payload?.outflow_delta) {
-        newExits += Number(payload.outflow_delta) || 0;
+      // If payload includes authoritative totals from backend, update directly
+      if (payload?.today_entries !== undefined && payload?.today_exits !== undefined) {
+        return {
+          data: {
+            ...state.data,
+            today_entries: payload.today_entries,
+            today_exits: payload.today_exits,
+            current_occupancy: Math.max(0, payload.today_entries - payload.today_exits),
+            net_flow: payload.today_entries - payload.today_exits,
+            ...(payload.total_visitors_festival !== undefined ? {
+              total_visitors_festival: payload.total_visitors_festival,
+              festival_total_entries: payload.total_visitors_festival,
+            } : {}),
+          },
+          lastUpdated: new Date().toISOString(),
+        };
       }
-
-      // Reconcile with absolute camera numbers if higher
-      if (payload?.in_count !== undefined && Number(payload.in_count) > newEntries) {
-        newEntries = Number(payload.in_count);
-      }
-      if (payload?.out_count !== undefined && Number(payload.out_count) > newExits) {
-        newExits = Number(payload.out_count);
-      }
-
-      const newOccupancy = Math.max(0, newEntries - newExits);
-      const newNetFlow = newEntries - newExits;
-
-      return {
-        data: {
-          ...state.data,
-          today_entries: newEntries,
-          today_exits: newExits,
-          current_occupancy: newOccupancy,
-          net_flow: newNetFlow,
-        },
-        lastUpdated: new Date().toISOString(),
-      };
+      return state;
     }),
 
   // Partial real-time patch from WebSocket events

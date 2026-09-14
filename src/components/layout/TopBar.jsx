@@ -248,18 +248,6 @@ export default function TopBar() {
         <span style={{ color: "var(--cc-text-muted)", fontSize: 11 }}>
           {new Date().toLocaleDateString("en-IN", { day: "2-digit", month: "short", year: "numeric" })}
         </span>
-
-        {/* System health mini pills */}
-        <div style={{ display: "flex", gap: 6, marginLeft: 8 }}>
-          <span style={{ fontSize: 10, color: "var(--cc-text-muted)" }}>CPU</span>
-          <span style={{ fontSize: 10, fontFamily: "var(--cc-font-mono)", color: cpu > 80 ? "var(--cc-red)" : cpu > 65 ? "var(--cc-yellow)" : "var(--cc-green)" }}>
-            {cpu}%
-          </span>
-          <span style={{ fontSize: 10, color: "var(--cc-text-muted)", marginLeft: 6 }}>GPU</span>
-          <span style={{ fontSize: 10, fontFamily: "var(--cc-font-mono)", color: gpu > 90 ? "var(--cc-red)" : gpu > 75 ? "var(--cc-yellow)" : "var(--cc-green)" }}>
-            {gpu}%
-          </span>
-        </div>
       </div>
 
 

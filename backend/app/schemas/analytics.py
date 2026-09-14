@@ -14,9 +14,15 @@ class DailyAttendanceItem(BaseModel):
 
 class AttendanceAnalyticsResponse(BaseModel):
     total_visitors_today: int = Field(..., alias="totalVisitorsToday")
+    total_entries: int = Field(0, alias="totalEntries")
+    total_exits: int = Field(0, alias="totalExits")
+    total_footfall: int = Field(0, alias="totalFootfall")
     peak_hour: str = Field(..., alias="peakHour")
     peak_count: int = Field(..., alias="peakCount")
     avg_per_hour: int = Field(..., alias="avgPerHour")
+    day_number: Optional[int] = Field(None, alias="dayNumber")
+    selected_day_label: Optional[str] = Field(None, alias="selectedDayLabel")
+    event_days: List[dict] = Field(default_factory=list, alias="eventDays")
     hourly: List[HourlyAttendanceItem]
     daily: List[DailyAttendanceItem]
 

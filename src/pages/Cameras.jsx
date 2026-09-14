@@ -20,40 +20,29 @@ const GRID_SIZES = [
 ];
 
 const PURPOSE_NAMES = {
-  ENTRY: "Entry Gate (IN)",
-  EXIT: "Exit Gate (OUT)",
-  QUEUE: "Queue Management",
-  ZONE: "Zone Management",
-  ENTRY_EXIT: "Entry/Exit Counting",
+  ENTRY: "Entry Gate",
+  EXIT: "Exit Gate",
+  ZONE: "Zone Density Monitoring",
 };
 
 const PURPOSE_META = {
   ENTRY: {
-    label: "Entry Gate (IN Only)",
+    label: "Entry Gate",
     icon: "bi-box-arrow-in-right",
     color: "#3fb950",
     profile_id: "CROWD_STANDARD",
-    profile_name: "Entry Gate Line",
+    profile_name: "Entry Gate Corridor",
     initial_tool: "ENTRY_LINE",
-    description: "Counts visitors entering (+1 IN count)",
+    description: "Counts people entering the temple and analyzes queue movement inside the barricaded passage.",
   },
   EXIT: {
-    label: "Exit Gate (OUT Only)",
+    label: "Exit Gate",
     icon: "bi-box-arrow-right",
     color: "#f85149",
     profile_id: "CROWD_STANDARD",
-    profile_name: "Exit Gate Line",
+    profile_name: "Exit Gate Corridor",
     initial_tool: "EXIT_LINE",
-    description: "Counts visitors leaving (+1 OUT count)",
-  },
-  ENTRY_EXIT: {
-    label: "Two-Way Gate (IN & OUT)",
-    icon: "bi-arrow-left-right",
-    color: "#bc8cff",
-    profile_id: "CROWD_STANDARD",
-    profile_name: "Two-Way Counting Line",
-    initial_tool: "COUNTING_LINE",
-    description: "In/Out 2-way gate line crossing & counting",
+    description: "Counts people leaving the temple and analyzes queue movement inside the barricaded passage.",
   },
   ZONE: {
     label: "Zone Density Monitoring",
@@ -62,16 +51,7 @@ const PURPOSE_META = {
     profile_id: "CROWD_STANDARD",
     profile_name: "Crowd Density Zone",
     initial_tool: "CROWD_ROI",
-    description: "Overcrowding risk & density monitoring",
-  },
-  QUEUE: {
-    label: "Queue Management",
-    icon: "bi-people",
-    color: "#d29922",
-    profile_id: "QUEUE_STANDARD",
-    profile_name: "Queue Waiting Zone",
-    initial_tool: "QUEUE_ROI",
-    description: "Barricade queue depth & waiting time tracking",
+    description: "Monitors crowd headcount, density, and overcrowding risk within defined zone boundaries.",
   },
 };
 
@@ -227,6 +207,7 @@ export default function Cameras() {
 
     const handleVis = () => {
       if (document.visibilityState === "visible") {
+        setModalRetry((r) => r + 1);
         loadEngineCameras();
         scheduleNext();
       } else {
@@ -382,7 +363,7 @@ export default function Cameras() {
   };
 
   const allUnfilteredCameras = Array.from(activeStreamsMap.values()).filter(filterBySearch);
-  const allWorkingCameras = allUnfilteredCameras.filter(filterByZone);
+  const allWorkingCameras = allUnfilteredCameras;
   const frsCameras = allWorkingCameras.filter((c) => c.is_frs || c.camera_type === "FRS");
   const crowdCameras = allWorkingCameras.filter((c) => !c.is_frs && c.camera_type !== "FRS");
 
@@ -855,93 +836,6 @@ export default function Cameras() {
         </div>
       </div>
 
-      {/* 3.1 Zone Filter Bar — Select Zone A, B, C, or D to view cameras assigned to that zone only */}
-      <div
-        style={{
-          display: "flex",
-          gap: 8,
-          alignItems: "center",
-          flexWrap: "wrap",
-          padding: "8px 12px",
-          background: "var(--cc-bg-secondary)",
-          borderRadius: "var(--cc-radius)",
-          border: "1px solid var(--cc-border)",
-        }}
-      >
-        <div style={{ fontSize: 11, fontWeight: 700, color: "var(--cc-text-muted)", display: "flex", alignItems: "center", gap: 5, marginRight: 4 }}>
-          <i className="bi bi-geo-alt-fill" style={{ color: "#58a6ff" }} />
-          ZONE FILTER:
-        </div>
-        <button
-          type="button"
-          className={`cc-btn${selectedZone === "ALL" ? " cc-btn-primary" : ""}`}
-          style={{ fontSize: 11, padding: "4px 12px", borderRadius: 20 }}
-          onClick={() => setSelectedZone("ALL")}
-        >
-          All Zones ({allUnfilteredCameras.length})
-        </button>
-        {ZONE_PRESETS.map((z) => {
-          const isSel = selectedZone === z.code;
-          const count = getZoneCamCount(z.code);
-          return (
-            <button
-              key={z.code}
-              type="button"
-              className="cc-btn"
-              style={{
-                fontSize: 11,
-                padding: "4px 12px",
-                borderRadius: 20,
-                border: isSel ? `2px solid ${z.color}` : `1px solid ${z.color}40`,
-                background: isSel ? `${z.color}25` : "transparent",
-                color: isSel ? "#fff" : z.color,
-                fontWeight: isSel ? 700 : 500,
-                display: "flex",
-                alignItems: "center",
-                gap: 6,
-                transition: "all 0.15s ease",
-              }}
-              onClick={() => setSelectedZone(z.code)}
-            >
-              <i className={`bi ${z.icon}`} style={{ color: z.color, fontSize: 11 }} />
-              <span>{z.name}</span>
-              <span
-                style={{
-                  fontSize: 9.5,
-                  padding: "1px 6px",
-                  borderRadius: 10,
-                  background: isSel ? z.color : `${z.color}22`,
-                  color: isSel ? "#000" : z.color,
-                  fontWeight: 800,
-                  marginLeft: 2,
-                }}
-              >
-                {count}
-              </span>
-            </button>
-          );
-        })}
-
-        {selectedZone !== "ALL" && (
-          <button
-            type="button"
-            className="cc-btn"
-            style={{
-              marginLeft: "auto",
-              fontSize: 10,
-              padding: "2px 8px",
-              color: "var(--cc-text-muted)",
-              display: "flex",
-              alignItems: "center",
-              gap: 4,
-            }}
-            onClick={() => setSelectedZone("ALL")}
-          >
-            <i className="bi bi-x-circle" /> Reset to All Zones
-          </button>
-        )}
-      </div>
-
       {loading ? (
         <LoadingState message="Loading live operational cameras..." />
       ) : allWorkingCameras.length === 0 ? (
@@ -1370,31 +1264,24 @@ export default function Cameras() {
                     {[
                       {
                         key: "ENTRY",
-                        title: "1. Entry Gate (IN Only)",
+                        title: "1. Entry Gate",
                         icon: "bi-box-arrow-in-right",
                         color: "#3fb950",
-                        desc: "Counts incoming visitors at dedicated entry gates (+1 IN footfall)",
+                        desc: "Counts people entering (+1 IN footfall) and analyzes queue movement in the barricaded passage",
                       },
                       {
                         key: "EXIT",
-                        title: "2. Exit Gate (OUT Only)",
+                        title: "2. Exit Gate",
                         icon: "bi-box-arrow-right",
                         color: "#f85149",
-                        desc: "Counts outgoing visitors at dedicated exit gates (+1 OUT footfall)",
+                        desc: "Counts people leaving (+1 OUT footfall) and analyzes queue movement in the barricaded passage",
                       },
                       {
                         key: "ZONE",
                         title: "3. Zone Density Monitoring",
                         icon: "bi-bounding-box",
                         color: "#58a6ff",
-                        desc: "Calculates crowd density, occupancy count, and capacity % in this zone",
-                      },
-                      {
-                        key: "QUEUE",
-                        title: "4. Queue Management",
-                        icon: "bi-people",
-                        color: "#d29922",
-                        desc: "Tracks queue headcount, waiting times, and movement speed in barricades",
+                        desc: "Monitors crowd headcount, density, and overcrowding risk within defined zone boundaries",
                       },
                     ].map((item) => {
                       const isChecked = (addForm.ai_purposes || []).includes(item.key);
@@ -1420,7 +1307,6 @@ export default function Cameras() {
                                 if (next.includes("ENTRY") && !next.includes("EXIT")) autoName = "North Entry Gate Camera";
                                 else if (next.includes("EXIT") && !next.includes("ENTRY")) autoName = "South Exit Gate Camera";
                                 else if (next.includes("ZONE")) autoName = "Main Pandal Zone Camera";
-                                else if (next.includes("QUEUE")) autoName = "Darshan Queue Camera";
                               }
                               return { ...prev, ai_purposes: next, name: autoName };
                             });
@@ -1460,7 +1346,7 @@ export default function Cameras() {
                   </div>
                   <div style={{ fontSize: 10, color: "var(--cc-text-muted)", marginTop: 8 }}>
                     <i className="bi bi-info-circle" style={{ marginRight: 4 }} />
-                    Single camera can run <strong>up to 2 functionalities</strong> concurrently (e.g. Entry Gate + Zone Density, or Exit Gate + Queue).
+                    Entry Gate and Exit Gate automatically include real-time queue movement analytics in the passage.
                   </div>
                 </div>
               )}
@@ -2133,31 +2019,24 @@ export default function Cameras() {
                 {[
                   {
                     key: "ENTRY",
-                    title: "1. Entry Gate (IN Only)",
+                    title: "1. Entry Gate",
                     icon: "bi-box-arrow-in-right",
                     color: "#3fb950",
-                    desc: "Counts incoming visitors at dedicated entry gates (+1 IN footfall)",
+                    desc: "Counts people entering (+1 IN footfall) and analyzes queue movement in the barricaded passage",
                   },
                   {
                     key: "EXIT",
-                    title: "2. Exit Gate (OUT Only)",
+                    title: "2. Exit Gate",
                     icon: "bi-box-arrow-right",
                     color: "#f85149",
-                    desc: "Counts outgoing visitors at dedicated exit gates (+1 OUT footfall)",
+                    desc: "Counts people leaving (+1 OUT footfall) and analyzes queue movement in the barricaded passage",
                   },
                   {
                     key: "ZONE",
                     title: "3. Zone Density Monitoring",
                     icon: "bi-bounding-box",
                     color: "#58a6ff",
-                    desc: "Calculates crowd density, occupancy count, and capacity % in this zone",
-                  },
-                  {
-                    key: "QUEUE",
-                    title: "4. Queue Management",
-                    icon: "bi-people",
-                    color: "#d29922",
-                    desc: "Tracks queue headcount, waiting times, and movement speed in barricades",
+                    desc: "Monitors crowd headcount, density, and overcrowding risk within defined zone boundaries",
                   },
                 ].map((item) => {
                   const isChecked = (reassignSelectModal.selectedPurposes || []).includes(item.key);

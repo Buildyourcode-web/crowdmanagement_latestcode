@@ -244,16 +244,12 @@ async def get_event_context(
                 except Exception:
                     pass
             else:
-                # Default to primary Khairatabad Ganesh event first, then fallback to active/latest
-                stmt = select(Event).where((Event.code == "KHB-2026") | (Event.name.ilike("%Khairatabad%"))).limit(1)
+                # Resolve active/live event dynamically first, then fallback to latest
+                stmt = select(Event).where(Event.status.in_(["ACTIVE", "LIVE"])).order_by(Event.created_at.desc()).limit(1)
                 res = await db.execute(stmt)
                 target_event = res.scalars().first()
                 if not target_event:
-                    stmt = select(Event).where(Event.status.in_(["ACTIVE", "LIVE"])).order_by(Event.created_at.desc())
-                    res = await db.execute(stmt)
-                    target_event = res.scalars().first()
-                if not target_event:
-                    stmt = select(Event).order_by(Event.created_at.desc())
+                    stmt = select(Event).order_by(Event.created_at.desc()).limit(1)
                     res = await db.execute(stmt)
                     target_event = res.scalars().first()
                 if target_event:

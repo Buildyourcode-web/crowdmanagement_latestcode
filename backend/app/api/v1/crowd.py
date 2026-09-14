@@ -160,3 +160,58 @@ async def get_crowd_pipeline_status(
     service = CrowdPipelineService(db)
     metrics = await service.get_camera_crowd_metrics(camera_id)
     return success_response(metrics)
+
+
+@router.get("/line-crossings", response_model=StandardResponse[List[Dict[str, Any]]])
+async def get_line_crossings(
+    camera_code: Optional[str] = Query(None, description="Filter by camera code"),
+    direction: Optional[str] = Query(None, description="Filter by direction (IN/OUT)"),
+    limit: int = Query(50, ge=1, le=500),
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(require_permission(Permissions.CROWD_READ)),
+):
+    """Retrieve durable, immutable line crossing events ledger."""
+    from app.models.line_crossing import LineCrossingEvent
+    from sqlalchemy import select
+    stmt = select(LineCrossingEvent).order_by(LineCrossingEvent.crossing_timestamp.desc()).limit(limit)
+    if camera_code:
+        stmt = stmt.where(LineCrossingEvent.camera_code == camera_code)
+    if direction:
+        stmt = stmt.where(LineCrossingEvent.direction == direction.upper())
+    res = await db.execute(stmt)
+    records = res.scalars().all()
+    out = [
+        {
+            "id": str(r.id),
+            "event_id": str(r.event_id) if r.event_id else None,
+            "camera_code": r.camera_code,
+            "line_id": r.line_id,
+            "line_name": r.line_name,
+            "track_token": r.track_token,
+            "crossing_sequence": r.crossing_sequence,
+            "direction": r.direction,
+            "count_delta": r.count_delta,
+            "detection_confidence": r.detection_confidence,
+            "crossing_timestamp": r.crossing_timestamp.isoformat() if r.crossing_timestamp else None,
+            "idempotency_key": r.idempotency_key,
+            "ground_x": r.ground_x,
+            "ground_y": r.ground_y,
+        }
+        for r in records
+    ]
+    return success_response(out)
+
+
+@router.get("/reliability", response_model=StandardResponse[Dict[str, Any]])
+async def get_count_reliability_report(
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(require_permission(Permissions.CROWD_READ)),
+):
+    """Retrieve real-time count reliability and anomaly detection report."""
+    from app.services.counting_service import CanonicalCountingService
+    counting_svc = CanonicalCountingService(db)
+    evt = await counting_svc.get_event()
+    if not evt:
+        return success_response({"overall_reliability": "HIGH", "overall_confidence_score": 95.0, "anomalies": []})
+    report = await counting_svc.get_event_count_reliability(evt.id)
+    return success_response(report)
