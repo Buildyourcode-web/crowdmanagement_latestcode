@@ -16,6 +16,7 @@ import uuid
 from typing import Any, Dict, List, Optional, Tuple
 from fastapi import HTTPException, status
 from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy import select
 from loguru import logger
 
 from app.models.audit_log import AuditLog
@@ -530,6 +531,20 @@ class CameraROIService:
             updated_by=username_val,
         )
         saved_roi = await self.repo.create(roi)
+        camera.enabled = True
+        camera.is_active = True
+        camera.status = "online"
+        if not camera.event_id:
+            from app.models.event import Event
+            evt_res = await self.db.execute(select(Event).where(Event.status.in_(["ACTIVE", "LIVE"])).order_by(Event.created_at.desc()).limit(1))
+            evt = evt_res.scalars().first()
+            if not evt:
+                evt_res = await self.db.execute(select(Event).order_by(Event.created_at.desc()).limit(1))
+                evt = evt_res.scalars().first()
+            if evt:
+                camera.event_id = evt.id
+                if not camera.site_id:
+                    camera.site_id = getattr(evt, "site_id", None)
         await self.db.commit()
 
         # For ZONE ROIs, update camera zone_code and DB Zone capacity/thresholds
