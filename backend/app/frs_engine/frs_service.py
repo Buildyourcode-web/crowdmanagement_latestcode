@@ -535,6 +535,11 @@ def _persist_crowd_snapshot_threadsafe(camera_code: str, inflow_delta: int, outf
                     zone_obj.status = "ACTIVE"
 
                 await session.commit()
+                try:
+                    from app.services.dashboard_service import _dashboard_cache
+                    _dashboard_cache.clear()
+                except Exception:
+                    pass
         except Exception as e:
             logger.error(f"[Crowd-AI] Snapshot persist error: {e}")
 

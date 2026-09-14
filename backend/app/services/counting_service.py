@@ -448,7 +448,7 @@ class CanonicalCountingService:
                 CrowdSnapshot.outflow_rate,
             )
             .where(
-                CrowdSnapshot.event_id == event_id,
+                or_(CrowdSnapshot.event_id == event_id, CrowdSnapshot.event_id.is_(None)),
                 CrowdSnapshot.timestamp >= start_utc,
                 CrowdSnapshot.timestamp < end_utc,
             )
@@ -552,7 +552,7 @@ class CanonicalCountingService:
                 CrowdSnapshot.outflow_rate,
             )
             .where(
-                CrowdSnapshot.event_id == event_id,
+                or_(CrowdSnapshot.event_id == event_id, CrowdSnapshot.event_id.is_(None)),
                 CrowdSnapshot.timestamp >= start_fest_utc,
                 CrowdSnapshot.timestamp < end_fest_utc,
             )

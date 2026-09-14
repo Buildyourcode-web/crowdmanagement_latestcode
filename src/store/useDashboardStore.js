@@ -181,7 +181,31 @@ export const useDashboardStore = create((set, get) => ({
       }
 
       const diffIn = nextTodayIn - curTodayIn;
+      const diffOut = nextTodayOut - curTodayOut;
       const nextFestIn = curFestIn + (diffIn > 0 ? diffIn : 0);
+
+      // Real-time patch current hour bucket in 24-hour hourly_flow chart
+      let updatedHourly = state.data.hourly_flow;
+      if (Array.isArray(updatedHourly) && updatedHourly.length > 0 && (diffIn > 0 || diffOut > 0)) {
+        const nowUtc = new Date();
+        const istOffsetMs = 5.5 * 3600 * 1000;
+        const istDate = new Date(nowUtc.getTime() + istOffsetMs);
+        const currentHourStr = `${String(istDate.getUTCHours()).padStart(2, "0")}:00`;
+
+        updatedHourly = updatedHourly.map((bucket) => {
+          if (bucket.hour === currentHourStr) {
+            const bIn = (bucket.entry || 0) + (diffIn > 0 ? diffIn : 0);
+            const bOut = (bucket.exit || 0) + (diffOut > 0 ? diffOut : 0);
+            return {
+              ...bucket,
+              entry: bIn,
+              exit: bOut,
+              net_flow: bIn - bOut,
+            };
+          }
+          return bucket;
+        });
+      }
 
       return {
         data: {
@@ -192,6 +216,7 @@ export const useDashboardStore = create((set, get) => ({
           net_flow: nextTodayIn - nextTodayOut,
           total_visitors_festival: nextFestIn,
           festival_total_entries: nextFestIn,
+          hourly_flow: updatedHourly,
         },
         lastUpdated: new Date().toISOString(),
       };
