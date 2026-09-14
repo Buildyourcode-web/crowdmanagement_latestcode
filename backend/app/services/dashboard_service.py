@@ -320,36 +320,34 @@ class DashboardService:
             range_in, range_out, range_occ = 0, 0, 0
             today_in, today_out, today_occ = 0, 0, 0
 
-        # Live worker fallback: if DB counts are still 0 (new deployment / line_crossing_events empty),
-        # aggregate in-memory in_count / out_count from active crowd workers so dashboard is never blank.
+        # Live worker integration: ensure dashboard never reports counts lower than
+        # what active camera workers have detected in memory.
         live_in = 0
         live_out = 0
-        if fest_total_in == 0 and fest_total_out == 0:
-            workers_pool = list(live_frs_workers.values())
-            if not workers_pool:
-                try:
-                    from app.frs_engine.frs_service import _camera_workers, _workers_lock
-                    with _workers_lock:
-                        workers_pool = list(_camera_workers.values())
-                except Exception:
-                    pass
-            for s in workers_pool:
-                if getattr(s, "crowd_ai_active", False) and getattr(s, "running", False):
-                    live_in += int(getattr(s, "in_count", 0) or 0)
-                    live_out += int(getattr(s, "out_count", 0) or 0)
-            if live_in > 0 or live_out > 0:
-                fest_total_in = live_in
-                fest_total_out = live_out
-                fest_occ = max(0, live_in - live_out)
-                # Also propagate to range/today since DB is empty
-                if range_in == 0:
-                    range_in = live_in
-                    range_out = live_out
-                    range_occ = fest_occ
-                if today_in == 0:
-                    today_in = live_in
-                    today_out = live_out
-                    today_occ = fest_occ
+        workers_pool = list(live_frs_workers.values())
+        if not workers_pool:
+            try:
+                from app.frs_engine.frs_service import _camera_workers, _workers_lock
+                with _workers_lock:
+                    workers_pool = list(_camera_workers.values())
+            except Exception:
+                pass
+        for s in workers_pool:
+            if getattr(s, "crowd_ai_active", False) and getattr(s, "running", False):
+                live_in += int(getattr(s, "in_count", 0) or 0)
+                live_out += int(getattr(s, "out_count", 0) or 0)
+
+        if live_in > 0 or live_out > 0:
+            today_in = max(today_in, live_in)
+            today_out = max(today_out, live_out)
+            today_occ = max(0, today_in - today_out)
+            fest_total_in = max(fest_total_in, today_in)
+            fest_total_out = max(fest_total_out, today_out)
+            fest_occ = max(0, fest_total_in - fest_total_out)
+            if range_in < today_in:
+                range_in = today_in
+                range_out = today_out
+                range_occ = today_occ
 
         _step("4-canonical-totals")
 
@@ -554,13 +552,15 @@ class DashboardService:
                 # Specific day (Day 1..Day N or Yesterday/Today)
                 h_items, peak_h = await self.counting_service.get_hourly_breakdown(target_event_id, target_d)
                 hourly_flow = [HourlyFlowPoint(hour=i.hour, entry=i.entry, exit=i.exit, net_flow=i.net_flow) for i in h_items]
-                if target_d == today_date and live_in > 0 and sum(p.entry for p in hourly_flow) == 0:
-                    cur_h_str = f"{now_local.hour:02d}:00"
-                    for p in hourly_flow:
-                        if p.hour == cur_h_str:
-                            p.entry = live_in
-                            p.exit = live_out
-                            p.net_flow = live_in - live_out
+                if target_d == today_date and live_in > 0:
+                    flow_sum = sum(p.entry for p in hourly_flow)
+                    if live_in > flow_sum:
+                        delta_live = live_in - flow_sum
+                        cur_h_str = f"{now_local.hour:02d}:00"
+                        for p in hourly_flow:
+                            if p.hour == cur_h_str:
+                                p.entry += delta_live
+                                p.net_flow = p.entry - p.exit
                     if peak_h in ("—", "No data"):
                         peak_h = f"{now_local.hour:02d}:00 - {(now_local.hour+1):02d}:00"
             else:

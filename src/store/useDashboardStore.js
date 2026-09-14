@@ -110,6 +110,42 @@ export const useDashboardStore = create((set, get) => ({
 
   setDashboardData: (payload, forRange = null, forDayNumber = null) => {
     const current = get();
+    const curData = current.data;
+
+    // Strict monotonic protection: Today entries and festival totals MUST NEVER DECREASE!
+    if (curData && payload) {
+      const curTodayIn = Number(curData.today_entries || 0);
+      const curFestIn = Number(curData.total_visitors_festival ?? curData.festival_total_entries ?? curTodayIn);
+      const incomingTodayIn = Number(payload.today_entries || 0);
+      const incomingFestIn = Number(payload.total_visitors_festival ?? payload.festival_total_entries ?? incomingTodayIn);
+
+      if (curTodayIn > incomingTodayIn) {
+        payload.today_entries = curTodayIn;
+        payload.current_occupancy = Math.max(0, curTodayIn - Number(payload.today_exits || 0));
+        payload.net_flow = curTodayIn - Number(payload.today_exits || 0);
+      }
+      if (curFestIn > incomingFestIn) {
+        payload.total_visitors_festival = curFestIn;
+        payload.festival_total_entries = curFestIn;
+      }
+
+      // Also protect current hour bucket in hourly_flow from dropping
+      if (Array.isArray(payload.hourly_flow) && Array.isArray(curData.hourly_flow)) {
+        payload.hourly_flow = payload.hourly_flow.map((bucket, idx) => {
+          const curBucket = curData.hourly_flow[idx];
+          if (curBucket && (curBucket.entry || 0) > (bucket.entry || 0)) {
+            return {
+              ...bucket,
+              entry: curBucket.entry,
+              exit: Math.max(bucket.exit || 0, curBucket.exit || 0),
+              net_flow: curBucket.entry - Math.max(bucket.exit || 0, curBucket.exit || 0),
+            };
+          }
+          return bucket;
+        });
+      }
+    }
+
     const dayNum = forDayNumber ?? payload?.selected_day_number ?? current.selectedDayNumber;
     const rangeKey = dayNum ? `DAY_${dayNum}` : (
       forRange ||
