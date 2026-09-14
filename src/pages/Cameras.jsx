@@ -294,7 +294,7 @@ export default function Cameras() {
       fps: 25,
       zone_code: cam.zone_code || cam.zone || "ZONE-A",
       detections_count: cam.people_count || 0,
-      ai_purposes: (cam.ai_purposes || (isFrs ? [] : ["ENTRY", "ZONE"])).filter((p) => p !== "ENTRY_EXIT"),
+      ai_purposes: (cam.ai_purposes && cam.ai_purposes.length > 0) ? cam.ai_purposes.filter((p) => p !== "ENTRY_EXIT") : (isFrs ? [] : ["ENTRY"]),
       is_running: true,
     });
   }
@@ -321,7 +321,7 @@ export default function Cameras() {
       fps: 25,
       zone_code: eng.zone_code || existing.zone_code || "ZONE-A",
       detections_count: eng.detections_count || existing.detections_count || 0,
-      ai_purposes: (eng.ai_purposes || existing.ai_purposes || (isFrs ? [] : ["ENTRY", "ZONE"])).filter((p) => p !== "ENTRY_EXIT"),
+      ai_purposes: ((eng.ai_purposes && eng.ai_purposes.length > 0) ? eng.ai_purposes : (existing.ai_purposes && existing.ai_purposes.length > 0) ? existing.ai_purposes : (isFrs ? [] : ["ENTRY"])).filter((p) => p !== "ENTRY_EXIT"),
       is_running: true,
       // Analytics fields from live worker
       in_count: eng.in_count ?? existing.in_count ?? 0,

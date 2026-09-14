@@ -112,7 +112,7 @@ class CameraWorkerState:
         self.name = name
         self.is_frs = is_frs
         self.camera_type = camera_type
-        self.ai_purposes = ai_purposes or (["ENTRY_EXIT", "ZONE"] if camera_type == "CROWD" else ["FRS"])
+        self.ai_purposes = ai_purposes or (["ENTRY"] if camera_type == "CROWD" else ["FRS"])
         self.zone_code = zone_code or "ZONE-A"
         self.thread: Optional[threading.Thread] = None
         self.running = False
@@ -227,15 +227,9 @@ def _fetch_rois_sync(state) -> tuple:
             derived_purposes.append("QUEUE")
 
         if derived_purposes:
-            current_purps = getattr(state, "ai_purposes", None) or []
-            # Merge current and derived, preserving order, max 2
-            merged = []
-            for p in current_purps + derived_purposes:
-                if p in ("ENTRY_EXIT", "ZONE", "QUEUE", "ENTRY", "EXIT") and p not in merged:
-                    merged.append(p)
-                if len(merged) >= 2:
-                    break
-            state.ai_purposes = merged or derived_purposes[:2]
+            # DB ROI types are authoritative — OVERRIDE current purposes instead of merging.
+            # This prevents ZONE cameras from retaining stale ENTRY/ENTRY_EXIT from initialization.
+            state.ai_purposes = derived_purposes
 
         # Fallback default virtual counting line across middle of frame if none configured
         if not lines and (getattr(state, "camera_type", "") == "CROWD" or not getattr(state, "is_frs", False)):
