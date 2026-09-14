@@ -308,11 +308,7 @@ class CanonicalCountingService:
         d_in = int(row.tot_in if row else 0)
         d_out = int(row.tot_out if row else 0)
 
-        if d_in > 0 or d_out > 0:
-            return d_in, d_out
-
-        # Secondary fallback: only if line_crossing_events is completely empty for this query
-        # check CrowdSnapshot
+        # Check CrowdSnapshot (stores manual backfills and consolidated counts)
         stmt_snap = select(
             func.coalesce(func.sum(CrowdSnapshot.inflow_rate), 0).label("snap_in"),
             func.coalesce(func.sum(CrowdSnapshot.outflow_rate), 0).label("snap_out"),
@@ -327,7 +323,10 @@ class CanonicalCountingService:
 
         res_snap = await self.db.execute(stmt_snap)
         row_snap = res_snap.first()
-        return int(row_snap.snap_in if row_snap else 0), int(row_snap.snap_out if row_snap else 0)
+        snap_in = int(row_snap.snap_in if row_snap else 0)
+        snap_out = int(row_snap.snap_out if row_snap else 0)
+
+        return max(d_in, snap_in), max(d_out, snap_out)
 
     async def get_festival_totals(
         self, event_id: uuid.UUID
@@ -440,37 +439,40 @@ class CanonicalCountingService:
                     cur_in, cur_out = hourly_map.get(h, (0, 0))
                     hourly_map[h] = (cur_in + inf, cur_out + outf)
 
-        if not has_ledger_data:
-            # Fallback to CrowdSnapshot
-            stmt_snap = (
-                select(
-                    CrowdSnapshot.timestamp,
-                    CrowdSnapshot.inflow_rate,
-                    CrowdSnapshot.outflow_rate,
-                )
-                .where(
-                    CrowdSnapshot.event_id == event_id,
-                    CrowdSnapshot.timestamp >= start_utc,
-                    CrowdSnapshot.timestamp < end_utc,
-                )
+        # Also query CrowdSnapshot (manual entries, backfills, consolidated live counts)
+        snap_hourly_map: Dict[int, Tuple[int, int]] = {h: (0, 0) for h in range(24)}
+        stmt_snap = (
+            select(
+                CrowdSnapshot.timestamp,
+                CrowdSnapshot.inflow_rate,
+                CrowdSnapshot.outflow_rate,
             )
-            res_snap = await self.db.execute(stmt_snap)
-            for r in res_snap.all():
-                raw_ts = r.timestamp
-                if raw_ts:
-                    if raw_ts.tzinfo is None:
-                        raw_ts = raw_ts.replace(tzinfo=timezone.utc)
-                    loc_dt = raw_ts.astimezone(tz)
-                    h = loc_dt.hour
-                    cur_in, cur_out = hourly_map.get(h, (0, 0))
-                    hourly_map[h] = (cur_in + int(r.inflow_rate or 0), cur_out + int(r.outflow_rate or 0))
+            .where(
+                CrowdSnapshot.event_id == event_id,
+                CrowdSnapshot.timestamp >= start_utc,
+                CrowdSnapshot.timestamp < end_utc,
+            )
+        )
+        res_snap = await self.db.execute(stmt_snap)
+        for r in res_snap.all():
+            raw_ts = r.timestamp
+            if raw_ts:
+                if raw_ts.tzinfo is None:
+                    raw_ts = raw_ts.replace(tzinfo=timezone.utc)
+                loc_dt = raw_ts.astimezone(tz)
+                h = loc_dt.hour
+                scur_in, scur_out = snap_hourly_map.get(h, (0, 0))
+                snap_hourly_map[h] = (scur_in + int(r.inflow_rate or 0), scur_out + int(r.outflow_rate or 0))
 
         items: List[HourlyCountItem] = []
         peak_val = 0
         peak_hour_str = "—"
 
         for h in range(24):
-            inf, outf = hourly_map.get(h, (0, 0))
+            l_in, l_out = hourly_map.get(h, (0, 0))
+            s_in, s_out = snap_hourly_map.get(h, (0, 0))
+            inf = max(l_in, s_in)
+            outf = max(l_out, s_out)
             h_str = f"{h:02d}:00"
             items.append(HourlyCountItem(hour=h_str, entry=inf, exit=outf, net_flow=inf - outf))
             if inf > peak_val:
@@ -581,18 +583,22 @@ class CanonicalCountingService:
 
         for d_tmpl in days_template:
             d_str = d_tmpl.date
-            # Per-day fallback: use LineCrossingEvent if that day has records, else CrowdSnapshot
-            d_in, d_out = day_totals_map.get(d_str, (0, 0))
-            h_map = day_hourly_map.get(d_str, {})
-            if d_in == 0 and d_out == 0 and d_str in snap_totals_map:
-                d_in, d_out = snap_totals_map[d_str]
-                h_map = snap_hourly_map.get(d_str, {})
+            # Per-day merge: take max(ledger, snapshot) so manual days/hours and live camera days are both preserved
+            l_in, l_out = day_totals_map.get(d_str, (0, 0))
+            s_in, s_out = snap_totals_map.get(d_str, (0, 0))
+            d_in = max(l_in, s_in)
+            d_out = max(l_out, s_out)
+
+            l_h_map = day_hourly_map.get(d_str, {})
+            s_h_map = snap_hourly_map.get(d_str, {})
 
             # Peak hour for this day
             peak_h = "—"
             max_h_ent = 0
             for h in range(24):
-                h_in, _ = h_map.get(h, (0, 0))
+                hl_in, _ = l_h_map.get(h, (0, 0))
+                hs_in, _ = s_h_map.get(h, (0, 0))
+                h_in = max(hl_in, hs_in)
                 if h_in > max_h_ent:
                     max_h_ent = h_in
                     peak_h = f"{h:02d}:00 - {(h+1):02d}:00"

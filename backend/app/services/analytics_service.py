@@ -204,10 +204,14 @@ class AnalyticsService:
         res_z = await self.db.execute(stmt_z)
         zones_db = list(res_z.scalars().all())
 
-        # 2. Fetch Gates strictly for this event
+        # 2. Fetch Gates strictly for this event (via associated zones)
         stmt_g = select(Gate)
         if event_id:
-            stmt_g = stmt_g.where(Gate.event_id == event_id)
+            zone_ids = [z.id for z in zones_db if z.id]
+            if zone_ids:
+                stmt_g = stmt_g.where(Gate.zone_id.in_(zone_ids))
+            else:
+                stmt_g = stmt_g.where(Gate.id == None)
         stmt_g = stmt_g.order_by(Gate.gate_code)
         gates_db = list((await self.db.execute(stmt_g)).scalars().all())
 

@@ -1456,9 +1456,8 @@ class RTSPCameraWorker:
                                 "line_name": line.get("name"),
                                 "zone_code": getattr(self.state, "zone_code", "ZONE-A"),
                                 "timestamp": datetime.now(timezone.utc).isoformat(),
-                                "today_entries": tot_live_in,
-                                "today_exits": tot_live_out,
-                                "total_visitors_festival": tot_live_in,
+                                "camera_in_count": self.state.in_count,
+                                "camera_out_count": self.state.out_count,
                             }
                             _emit_frs_event_threadsafe("crowd_telemetry", telemetry_payload)
                             _emit_frs_event_threadsafe("crowd_update", telemetry_payload)
@@ -3329,3 +3328,124 @@ async def restore_active_cameras_from_db():
 
     except Exception as e:
         logger.warning(f"[FRS-Engine] Failed to restore cameras from DB: {e}")
+
+
+async def resync_camera_workers_from_db(add_both: bool = False) -> Dict[str, Any]:
+    """
+    Dynamically updates active in-memory camera worker counts from PostgreSQL without restarting the server.
+    When add_both=True, persists the live detections into DB CrowdSnapshot and adds to total.
+    """
+    try:
+        from app.db.session import AsyncSessionLocal
+        from app.models.camera import Camera
+        from app.models.crowd import CrowdSnapshot
+        from sqlalchemy import select, func
+
+        IST = timezone(timedelta(hours=5, minutes=30))
+        now_ist = datetime.now(timezone.utc).astimezone(IST)
+        today_start = datetime.combine(now_ist.date(), datetime.min.time(), tzinfo=IST).astimezone(timezone.utc)
+
+        async with AsyncSessionLocal() as pg_db:
+            counts_stmt = (
+                select(
+                    CrowdSnapshot.camera_code,
+                    func.sum(CrowdSnapshot.inflow_rate).label("in_sum"),
+                    func.sum(CrowdSnapshot.outflow_rate).label("out_sum"),
+                )
+                .where(CrowdSnapshot.timestamp >= today_start)
+                .group_by(CrowdSnapshot.camera_code)
+            )
+            counts_res = await pg_db.execute(counts_stmt)
+            camera_counts = {r.camera_code: (int(r.in_sum or 0), int(r.out_sum or 0)) for r in counts_res.all()}
+
+            total_today_in = sum(v[0] for v in camera_counts.values())
+            total_today_out = sum(v[1] for v in camera_counts.values())
+
+            results = {}
+            with _workers_lock:
+                worker_items = list(_camera_workers.items())
+
+            for cam_id, state in worker_items:
+                clean_code = cam_id.replace("-FRS", "").replace("-CROWD", "")
+                db_in, db_out = camera_counts.get(cam_id) or camera_counts.get(clean_code) or (0, 0)
+
+                # Fallback to total if single camera worker
+                if len(worker_items) == 1 and db_in == 0 and total_today_in > 0:
+                    db_in = total_today_in
+                    db_out = total_today_out
+
+                old_in = state.in_count
+                old_out = state.out_count
+
+                if add_both:
+                    # Persist the live in-memory detections into DB so they are never lost
+                    if old_in > 0 or old_out > 0:
+                        cam_stmt = select(Camera).where(Camera.camera_code.in_([cam_id, clean_code])).limit(1)
+                        cam_res = await pg_db.execute(cam_stmt)
+                        cam_obj = cam_res.scalars().first()
+
+                        now_utc = datetime.now(timezone.utc)
+                        snap = CrowdSnapshot(
+                            id=uuid.uuid4(),
+                            event_id=cam_obj.event_id if cam_obj else None,
+                            zone_id=cam_obj.zone_id if cam_obj else None,
+                            zone_code=state.zone_code or (cam_obj.zone_code if cam_obj else "ZONE-A"),
+                            camera_id=cam_obj.id if cam_obj else None,
+                            camera_code=clean_code,
+                            profile_id="LIVE_CONSOLIDATION",
+                            timestamp=now_utc,
+                            people_count=max(0, old_in - old_out),
+                            density=0.0,
+                            inflow_rate=old_in,
+                            outflow_rate=old_out,
+                            occupancy_percentage=0.0,
+                            risk_level="LOW",
+                            risk_score=0.0,
+                        )
+                        pg_db.add(snap)
+                        if cam_obj:
+                            cam_obj.people_count = (cam_obj.people_count or 0) + (old_in - old_out)
+                            cam_obj.last_seen_at = now_utc
+                            pg_db.add(cam_obj)
+                        await pg_db.commit()
+
+                    state.in_count = old_in + db_in
+                    state.out_count = old_out + db_out
+                else:
+                    state.in_count = max(state.in_count, db_in)
+                    state.out_count = max(state.out_count, db_out)
+
+                state.occupancy_count = max(0, state.in_count - state.out_count)
+
+                results[cam_id] = {
+                    "previous_in": old_in,
+                    "db_in": db_in,
+                    "new_in": state.in_count,
+                    "previous_out": old_out,
+                    "db_out": db_out,
+                    "new_out": state.out_count,
+                }
+
+                # Broadcast instantaneous sync event to UI over WebSocket
+                telemetry_payload = {
+                    "camera_id": cam_id,
+                    "camera_code": clean_code,
+                    "in_count": state.in_count,
+                    "out_count": state.out_count,
+                    "occupancy": state.occupancy_count,
+                    "current_occupancy": state.occupancy_count,
+                    "inflow_delta": 0,
+                    "outflow_delta": 0,
+                    "zone_code": getattr(state, "zone_code", "ZONE-A"),
+                    "timestamp": datetime.now(timezone.utc).isoformat(),
+                    "camera_in_count": state.in_count,
+                    "camera_out_count": state.out_count,
+                }
+                _emit_frs_event_threadsafe("crowd_telemetry", telemetry_payload)
+                _emit_frs_event_threadsafe("crowd_update", telemetry_payload)
+
+        logger.info(f"[FRS-Engine] Resynced {len(results)} camera worker(s) with DB: {results}")
+        return results
+    except Exception as e:
+        logger.error(f"[FRS-Engine] Error resyncing camera workers: {e}")
+        return {}

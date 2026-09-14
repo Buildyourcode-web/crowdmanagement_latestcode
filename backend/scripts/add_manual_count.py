@@ -348,6 +348,19 @@ async def insert_manual_count(
         await db.commit()
         print(f"=======================================================\n✅ Successfully committed to database!\n")
 
+        # Attempt to dynamically resync in-memory camera workers in running backend process
+        try:
+            import urllib.request
+            req = urllib.request.Request(
+                "http://127.0.0.1:8000/api/v1/cameras/resync-counts",
+                data=b"",
+                method="POST",
+            )
+            with urllib.request.urlopen(req, timeout=1.5) as resp:
+                print("🔄 Live camera in-memory counters synced successfully!")
+        except Exception:
+            pass
+
 
 def _is_uuid(val: str) -> bool:
     try:
@@ -359,6 +372,17 @@ def _is_uuid(val: str) -> bool:
 
 async def run(args):
     try:
+        if args.resync:
+            try:
+                import urllib.request
+                url = f"http://127.0.0.1:8000/api/v1/cameras/resync-counts?add_both={'true' if args.add_both else 'false'}"
+                req = urllib.request.Request(url, data=b"", method="POST")
+                with urllib.request.urlopen(req, timeout=3.0) as resp:
+                    print("✅ Live camera in-memory workers resynced successfully with database!")
+            except Exception as ex:
+                print(f"⚠️ Could not reach running backend container at http://127.0.0.1:8000: {ex}")
+            return
+
         if args.list:
             await list_available_events()
             return
@@ -399,6 +423,8 @@ async def run(args):
 
 def main():
     parser = argparse.ArgumentParser(description="Add manual counts, audit totals, and distribute across cameras")
+    parser.add_argument("--resync", action="store_true", help="Resync running camera worker in-memory counts with database without server restart")
+    parser.add_argument("--add-both", action="store_true", help="Add database counts to existing in-memory live camera counts instead of max")
     parser.add_argument("--list", action="store_true", help="List all available events and codes")
     parser.add_argument("--event", type=str, help="Event code, name, or UUID")
     parser.add_argument("--summary", "--audit", dest="summary", action="store_true", help="Display full audit report and database sync verification")

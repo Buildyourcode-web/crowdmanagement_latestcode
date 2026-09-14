@@ -610,3 +610,17 @@ async def delete_camera_roi(
     client_ip = request.client.host if request.client else None
     result = await service.delete_roi_configuration(id, roi_id, current_user, client_ip)
     return success_response(result)
+
+
+@router.post("/resync-counts", response_model=StandardResponse[dict])
+async def resync_camera_counts(
+    add_both: bool = Query(False, description="Add DB counts to existing camera memory counts instead of max"),
+    db: AsyncSession = Depends(get_db),
+):
+    """
+    Dynamically re-syncs active in-memory camera worker counts with the PostgreSQL database.
+    Allows manual or historical counts to immediately merge into live camera streams without restarting the server.
+    """
+    from app.frs_engine.frs_service import resync_camera_workers_from_db
+    res = await resync_camera_workers_from_db(add_both=add_both)
+    return success_response(data={"resynced_cameras": res})

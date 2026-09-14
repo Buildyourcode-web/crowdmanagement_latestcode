@@ -146,24 +146,55 @@ export const useDashboardStore = create((set, get) => ({
   patchDashboardCrossing: (payload) =>
     set((state) => {
       if (!state.data) return state;
-      // If payload includes authoritative totals from backend, update directly
-      if (payload?.today_entries !== undefined && payload?.today_exits !== undefined) {
-        return {
-          data: {
-            ...state.data,
-            today_entries: payload.today_entries,
-            today_exits: payload.today_exits,
-            current_occupancy: Math.max(0, payload.today_entries - payload.today_exits),
-            net_flow: payload.today_entries - payload.today_exits,
-            ...(payload.total_visitors_festival !== undefined ? {
-              total_visitors_festival: payload.total_visitors_festival,
-              festival_total_entries: payload.total_visitors_festival,
-            } : {}),
-          },
-          lastUpdated: new Date().toISOString(),
-        };
+      const inDelta = Number(payload?.inflow_delta || 0);
+      const outDelta = Number(payload?.outflow_delta || 0);
+
+      const curTodayIn = Number(state.data.today_entries || 0);
+      const curTodayOut = Number(state.data.today_exits || 0);
+      const curFestIn = Number(
+        state.data.total_visitors_festival !== undefined
+          ? state.data.total_visitors_festival
+          : (state.data.festival_total_entries || curTodayIn)
+      );
+
+      const incomingTodayIn = payload?.today_entries !== undefined && payload?.today_entries !== null
+        ? Number(payload.today_entries)
+        : null;
+      const incomingTodayOut = payload?.today_exits !== undefined && payload?.today_exits !== null
+        ? Number(payload.today_exits)
+        : null;
+
+      // CRITICAL: Never downgrade count if un-restarted camera worker has smaller local count than DB total!
+      // Accept incoming total only if it's strictly greater; otherwise increment current count by live delta (+1)
+      let nextTodayIn = curTodayIn;
+      if (incomingTodayIn !== null && incomingTodayIn > curTodayIn) {
+        nextTodayIn = incomingTodayIn;
+      } else if (inDelta > 0) {
+        nextTodayIn = curTodayIn + inDelta;
       }
-      return state;
+
+      let nextTodayOut = curTodayOut;
+      if (incomingTodayOut !== null && incomingTodayOut > curTodayOut) {
+        nextTodayOut = incomingTodayOut;
+      } else if (outDelta > 0) {
+        nextTodayOut = curTodayOut + outDelta;
+      }
+
+      const diffIn = nextTodayIn - curTodayIn;
+      const nextFestIn = curFestIn + (diffIn > 0 ? diffIn : 0);
+
+      return {
+        data: {
+          ...state.data,
+          today_entries: nextTodayIn,
+          today_exits: nextTodayOut,
+          current_occupancy: Math.max(0, nextTodayIn - nextTodayOut),
+          net_flow: nextTodayIn - nextTodayOut,
+          total_visitors_festival: nextFestIn,
+          festival_total_entries: nextFestIn,
+        },
+        lastUpdated: new Date().toISOString(),
+      };
     }),
 
   // Partial real-time patch from WebSocket events
