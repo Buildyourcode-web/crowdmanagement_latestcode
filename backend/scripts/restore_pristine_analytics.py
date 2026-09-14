@@ -68,8 +68,8 @@ async def restore():
         del_res = await db.execute(stmt_del)
         print(f"🧹 Cleared {del_res.rowcount} today's snapshot records to eliminate all distortions.")
 
-        # 4. Insert exact pristine hourly distribution (Up to 19:00 completed):
-        # Total IN = 136,512 | Total OUT = 3,329 | Peak: 19:00-20:00 (22,467)
+        # 4. Insert exact pristine hourly distribution (Up to 20:00 completed):
+        # Total IN = 154,637 | Total OUT = 4,079 | Peak: 19:00-20:00 (22,467)
         HOURLY_DATA = [
             (8, 500, 20),
             (9, 1500, 50),
@@ -83,6 +83,7 @@ async def restore():
             (17, 14439, 600),
             (18, 18748, 700),
             (19, 22467, 850),
+            (20, 18125, 750),
         ]
 
         total_restored_in = 0
@@ -123,8 +124,8 @@ async def restore():
         print(f"✅ PRISTINE ANALYTICS RESTORED 100% TO ORIGINAL STATE:")
         print("=" * 76)
         print(f" • Festival Total:      {fest_in:,} Entries | {fest_out:,} Exits | {occ:,} Occupancy")
-        print(f" • Day Total Entry:     {today_in:,}  (Exact target: 136,512)")
-        print(f" • Day Total Exit:      {today_out:,}  (Exact target: 3,329)")
+        print(f" • Day Total Entry:     {today_in:,}  (Exact target: 154,637)")
+        print(f" • Day Total Exit:      {today_out:,}  (Exact target: 4,079)")
         print(f" • Peak Hour:           {peak_h}")
         print("-" * 76)
         print("⏰ Restored 24-Hour Distribution:")
