@@ -181,16 +181,15 @@ export default function Dashboard() {
         type === "crowd_metrics_updated" ||
         type === "line_crossing"
       ) {
-        if (dataPayload?.today_entries !== undefined && dataPayload?.today_exits !== undefined) {
-          useDashboardStore.getState().patchDashboardCrossing(dataPayload);
-        } else {
+        useDashboardStore.getState().patchDashboardCrossing(dataPayload);
+        if (dataPayload?.today_entries === undefined || dataPayload?.today_exits === undefined) {
           // Debounce fetch from PostgreSQL canonical ledger
           if (wsDebounceTimer) clearTimeout(wsDebounceTimer);
           wsDebounceTimer = setTimeout(() => {
             const curRange = useDashboardStore.getState().dateRange || "today";
             const curDay = useDashboardStore.getState().selectedDayNumber;
             loadData(true, curRange, curDay);
-          }, 600);
+          }, 1500);
         }
       } else if (type === "zone_update") {
         if (dataPayload?.zone_code) {

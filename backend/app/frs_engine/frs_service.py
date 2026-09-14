@@ -1456,6 +1456,9 @@ class RTSPCameraWorker:
                                 "line_name": line.get("name"),
                                 "zone_code": getattr(self.state, "zone_code", "ZONE-A"),
                                 "timestamp": datetime.now(timezone.utc).isoformat(),
+                                "today_entries": tot_live_in,
+                                "today_exits": tot_live_out,
+                                "total_visitors_festival": tot_live_in,
                                 "camera_in_count": self.state.in_count,
                                 "camera_out_count": self.state.out_count,
                             }
