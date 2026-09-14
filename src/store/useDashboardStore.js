@@ -5,7 +5,16 @@ import { create } from "zustand";
 let initialCachedData = null;
 const initialRangeCache = {};
 
+const CACHE_VERSION = "v4_exact";
 try {
+  if (sessionStorage.getItem("byc_cache_version") !== CACHE_VERSION) {
+    sessionStorage.removeItem("byc_dashboard_cache");
+    ["TODAY", "YESTERDAY", "7DAYS", "FESTIVAL"].forEach((k) => {
+      sessionStorage.removeItem(`byc_dashboard_cache_${k}`);
+    });
+    sessionStorage.setItem("byc_cache_version", CACHE_VERSION);
+  }
+
   const cachedStr = sessionStorage.getItem("byc_dashboard_cache");
   if (cachedStr) {
     initialCachedData = JSON.parse(cachedStr);
@@ -129,21 +138,7 @@ export const useDashboardStore = create((set, get) => ({
         payload.festival_total_entries = curFestIn;
       }
 
-      // Also protect current hour bucket in hourly_flow from dropping
-      if (Array.isArray(payload.hourly_flow) && Array.isArray(curData.hourly_flow)) {
-        payload.hourly_flow = payload.hourly_flow.map((bucket, idx) => {
-          const curBucket = curData.hourly_flow[idx];
-          if (curBucket && (curBucket.entry || 0) > (bucket.entry || 0)) {
-            return {
-              ...bucket,
-              entry: curBucket.entry,
-              exit: Math.max(bucket.exit || 0, curBucket.exit || 0),
-              net_flow: curBucket.entry - Math.max(bucket.exit || 0, curBucket.exit || 0),
-            };
-          }
-          return bucket;
-        });
-      }
+
     }
 
     const dayNum = forDayNumber ?? payload?.selected_day_number ?? current.selectedDayNumber;
