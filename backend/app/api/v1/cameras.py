@@ -622,5 +622,10 @@ async def resync_camera_counts(
     Allows manual or historical counts to immediately merge into live camera streams without restarting the server.
     """
     from app.frs_engine.frs_service import resync_camera_workers_from_db
+    try:
+        from app.services.dashboard_service import _dashboard_cache
+        _dashboard_cache.clear()
+    except Exception:
+        pass
     res = await resync_camera_workers_from_db(add_both=add_both)
     return success_response(data={"resynced_cameras": res})

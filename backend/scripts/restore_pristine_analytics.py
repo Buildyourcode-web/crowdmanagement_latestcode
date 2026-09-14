@@ -136,6 +136,17 @@ async def restore():
 
         # 6. Flush cache and sync in-memory camera workers
         try:
+            from app.services.dashboard_service import _dashboard_cache, _completed_hourly_cache
+            _dashboard_cache.clear()
+            _completed_hourly_cache.clear()
+            for h in hourly:
+                if h.entry > 0 or h.exit > 0:
+                    _completed_hourly_cache[h.hour] = (h.entry, h.exit)
+            print("💾 Populated in-memory monotonic hourly cache with all 13 completed hours!")
+        except Exception:
+            pass
+
+        try:
             import urllib.request
             req = urllib.request.Request(
                 "http://127.0.0.1:8000/api/v1/cameras/resync-counts",
