@@ -480,9 +480,24 @@ def _persist_crowd_snapshot_threadsafe(camera_code: str, inflow_delta: int, outf
                 now = datetime.now(timezone.utc)
                 target_zone = zone_code_override or (cam.zone_code if (cam and cam.zone_code) else "ZONE-A")
 
+                evt_id = cam.event_id if cam else None
+                if not evt_id:
+                    from app.models.event import Event
+                    evt_stmt = select(Event).where(Event.status.in_(["ACTIVE", "LIVE"])).order_by(Event.created_at.desc()).limit(1)
+                    evt_res = await session.execute(evt_stmt)
+                    evt = evt_res.scalars().first()
+                    if not evt:
+                        evt_stmt = select(Event).order_by(Event.created_at.desc()).limit(1)
+                        evt_res = await session.execute(evt_stmt)
+                        evt = evt_res.scalars().first()
+                    if evt:
+                        evt_id = evt.id
+                        if cam and not cam.event_id:
+                            cam.event_id = evt_id
+
                 snap = CrowdSnapshot(
                     id=uuid.uuid4(),
-                    event_id=cam.event_id if cam else None,
+                    event_id=evt_id,
                     zone_id=cam.zone_id if cam else None,
                     zone_code=target_zone,
                     camera_id=cam.id if cam else None,
@@ -521,7 +536,7 @@ def _persist_crowd_snapshot_threadsafe(camera_code: str, inflow_delta: int, outf
 
                 await session.commit()
         except Exception as e:
-            logger.debug(f"[Crowd-AI] Snapshot persist notice: {e}")
+            logger.error(f"[Crowd-AI] Snapshot persist error: {e}")
 
     global _main_loop
     if _main_loop and _main_loop.is_running():
@@ -547,6 +562,7 @@ def _persist_line_crossing_event_threadsafe(
         try:
             from app.db.session import AsyncSessionLocal
             from app.models.camera import Camera
+            from app.models.event import Event
             from app.models.line_crossing import LineCrossingEvent
             from sqlalchemy import select
 
@@ -558,9 +574,49 @@ def _persist_line_crossing_event_threadsafe(
 
                 evt_id = cam.event_id if cam else None
                 site_id = cam.site_id if cam else None
-                cam_id = cam.id if cam else uuid.uuid4()
+
+                # 1. Resolve event_id if not present
+                if not evt_id:
+                    evt_stmt = select(Event).where(Event.status.in_(["ACTIVE", "LIVE"])).order_by(Event.created_at.desc()).limit(1)
+                    evt_res = await session.execute(evt_stmt)
+                    evt = evt_res.scalars().first()
+                    if not evt:
+                        evt_stmt = select(Event).order_by(Event.created_at.desc()).limit(1)
+                        evt_res = await session.execute(evt_stmt)
+                        evt = evt_res.scalars().first()
+                    if evt:
+                        evt_id = evt.id
+                        if not site_id:
+                            site_id = getattr(evt, "site_id", None)
+
+                # 2. Ensure camera exists in DB so foreign key never fails
+                if not cam:
+                    cam = Camera(
+                        id=uuid.uuid4(),
+                        camera_code=clean_code,
+                        name=f"Camera {clean_code}",
+                        label=f"Camera {clean_code}",
+                        camera_type="CROWD",
+                        status="online",
+                        stream_status="ONLINE",
+                        enabled=True,
+                        is_active=True,
+                        event_id=evt_id,
+                        site_id=site_id,
+                    )
+                    session.add(cam)
+                    await session.flush()
+                else:
+                    if not cam.event_id and evt_id:
+                        cam.event_id = evt_id
+                        cam.site_id = site_id
+                    cam.enabled = True
+                    cam.is_active = True
+                    cam.status = "online"
+
+                cam_id = cam.id
                 evt_str = str(evt_id) if evt_id else "evt_default"
-                cam_str = str(cam_id) if cam_id else camera_code
+                cam_str = str(cam_id)
                 safe_line = str(line_id).replace(" ", "_").replace(":", "_")
                 safe_sess = str(track_session_id).replace(" ", "_")
                 idempotency_key = f"{evt_str}_{cam_str}_{safe_line}_{safe_sess}_CROSSING-{crossing_sequence:03d}"
@@ -597,8 +653,15 @@ def _persist_line_crossing_event_threadsafe(
                 )
                 await session.execute(stmt_insert)
                 await session.commit()
+
+                # Invalidate dashboard in-memory cache so next GET /api/v1/dashboard/summary is fresh
+                try:
+                    from app.services.dashboard_service import _dashboard_cache
+                    _dashboard_cache.clear()
+                except Exception:
+                    pass
         except Exception as e:
-            logger.debug(f"[FRS-Engine] Line crossing persist notice: {e}")
+            logger.error(f"[FRS-Engine] Line crossing persist error: {type(e).__name__}: {e}")
 
     global _main_loop
     if _main_loop and _main_loop.is_running():
@@ -618,6 +681,7 @@ def _persist_queue_snapshot_threadsafe(camera_code: str, headcount: int, movemen
         try:
             from app.db.session import AsyncSessionLocal
             from app.models.camera import Camera
+            from app.models.event import Event
             from app.models.queue import QueueSnapshot
             from sqlalchemy import select
 
@@ -627,30 +691,41 @@ def _persist_queue_snapshot_threadsafe(camera_code: str, headcount: int, movemen
                 res = await session.execute(stmt)
                 cam = res.scalars().first()
 
+                evt_id = cam.event_id if cam else None
+                if not evt_id:
+                    evt_stmt = select(Event).where(Event.status.in_(["ACTIVE", "LIVE"])).order_by(Event.created_at.desc()).limit(1)
+                    evt_res = await session.execute(evt_stmt)
+                    evt = evt_res.scalars().first()
+                    if evt:
+                        evt_id = evt.id
+
                 now = datetime.now(timezone.utc)
                 target_zone = zone_code_override or (cam.zone_code if (cam and cam.zone_code) else "ZONE-A")
                 wait_min = max(1, int(round(headcount * 0.8)))
 
                 snap = QueueSnapshot(
                     id=uuid.uuid4(),
-                    event_id=cam.event_id if cam else None,
+                    event_id=evt_id,
                     zone_id=cam.zone_id if cam else None,
                     zone_code=target_zone,
                     camera_id=cam.id if cam else None,
                     camera_code=camera_code,
                     queue_code=f"QUEUE-{target_zone}",
-                    queue_name=f"Queue {target_zone}",
+                    gate_code=f"GATE-{target_zone}",
                     timestamp=now,
-                    people_count=headcount,
-                    wait_time_minutes=wait_min,
-                    movement_status=movement_status,
-                    service_rate=12.0,
+                    people_waiting=headcount,
+                    queue_length=headcount,
+                    average_wait_seconds=wait_min * 60,
+                    inflow_rate=0,
+                    outflow_rate=0,
+                    processing_rate=12,
+                    growth_rate=0,
                     risk_level="LOW" if headcount < 20 else ("MODERATE" if headcount < 50 else "HIGH"),
                 )
                 session.add(snap)
                 await session.commit()
         except Exception as e:
-            logger.debug(f"[Queue-AI] Queue snapshot persist notice: {e}")
+            logger.error(f"[Queue-AI] Queue snapshot persist error: {type(e).__name__}: {e}")
 
     global _main_loop
     if _main_loop and _main_loop.is_running():
@@ -1360,6 +1435,13 @@ class RTSPCameraWorker:
                                 f"{crossing_label} | IN={self.state.in_count} OUT={self.state.out_count} OCCUPANCY={self.state.occupancy_count}"
                             )
 
+                            tot_live_in = 0
+                            tot_live_out = 0
+                            for w_obj in list(_camera_workers.values()):
+                                if getattr(w_obj, "crowd_ai_active", False):
+                                    tot_live_in += int(getattr(w_obj, "in_count", 0) or 0)
+                                    tot_live_out += int(getattr(w_obj, "out_count", 0) or 0)
+
                             telemetry_payload = {
                                 "camera_id": self.state.camera_id,
                                 "camera_code": self.state.camera_id,
@@ -1374,6 +1456,9 @@ class RTSPCameraWorker:
                                 "line_name": line.get("name"),
                                 "zone_code": getattr(self.state, "zone_code", "ZONE-A"),
                                 "timestamp": datetime.now(timezone.utc).isoformat(),
+                                "today_entries": tot_live_in,
+                                "today_exits": tot_live_out,
+                                "total_visitors_festival": tot_live_in,
                             }
                             _emit_frs_event_threadsafe("crowd_telemetry", telemetry_payload)
                             _emit_frs_event_threadsafe("crowd_update", telemetry_payload)

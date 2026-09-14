@@ -17,6 +17,7 @@ router = APIRouter(prefix="/dashboard", tags=["Command Center Dashboard"])
 async def get_dashboard_summary(
     date_range: str = Query("today", description="today, yesterday, 7days, festival, custom"),
     day_number: Optional[int] = Query(None, description="Optional festival day number (1..N)"),
+    skip_cache: bool = Query(False, description="Bypass in-memory cache and re-aggregate"),
     ctx: EventContext = Depends(get_event_context),
     db: AsyncSession = Depends(get_db),
     current_user: User = Depends(require_permission(Permissions.CROWD_READ)),
@@ -32,6 +33,7 @@ async def get_dashboard_summary(
         day_number=day_number,
         event_id=ctx.event_id,
         allowed_site_ids=ctx.allowed_site_ids,
+        skip_cache=skip_cache,
     )
     return success_response(summary)
 

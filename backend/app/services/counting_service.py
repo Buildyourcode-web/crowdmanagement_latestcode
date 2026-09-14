@@ -24,7 +24,7 @@ from typing import Any, Dict, List, Optional, Tuple
 from zoneinfo import ZoneInfo
 
 from loguru import logger
-from sqlalchemy import case, func, select, text
+from sqlalchemy import case, func, or_, select, text
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.models.camera import Camera
@@ -294,7 +294,7 @@ class CanonicalCountingService:
                 ),
                 0,
             ).label("tot_out"),
-        ).where(LineCrossingEvent.event_id == event_id)
+        ).where(or_(LineCrossingEvent.event_id == event_id, LineCrossingEvent.event_id.is_(None)))
 
         if camera_id:
             stmt = stmt.where(LineCrossingEvent.camera_id == camera_id)
@@ -316,7 +316,7 @@ class CanonicalCountingService:
         stmt_snap = select(
             func.coalesce(func.sum(CrowdSnapshot.inflow_rate), 0).label("snap_in"),
             func.coalesce(func.sum(CrowdSnapshot.outflow_rate), 0).label("snap_out"),
-        ).where(CrowdSnapshot.event_id == event_id)
+        ).where(or_(CrowdSnapshot.event_id == event_id, CrowdSnapshot.event_id.is_(None)))
 
         if camera_id:
             stmt_snap = stmt_snap.where(CrowdSnapshot.camera_id == camera_id)
@@ -413,7 +413,7 @@ class CanonicalCountingService:
                 LineCrossingEvent.count_delta,
             )
             .where(
-                LineCrossingEvent.event_id == event_id,
+                or_(LineCrossingEvent.event_id == event_id, LineCrossingEvent.event_id.is_(None)),
                 LineCrossingEvent.crossing_timestamp >= start_utc,
                 LineCrossingEvent.crossing_timestamp < end_utc,
             )

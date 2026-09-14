@@ -76,6 +76,7 @@ class DashboardService:
         day_number: Optional[int] = None,
         event_id: Optional[uuid.UUID] = None,
         allowed_site_ids: Optional[List[uuid.UUID]] = None,
+        skip_cache: bool = False,
     ) -> DashboardSummaryResponse:
         """
         Consolidated Command Center Dashboard aggregator with Stale-While-Revalidate (SWR)
@@ -85,20 +86,21 @@ class DashboardService:
         cache_key = f"dashboard:{event_id}:{day_number}:{date_range.lower()}"
         now = time.monotonic()
 
-        cached = _dashboard_cache.get(cache_key)
+        if not skip_cache:
+            cached = _dashboard_cache.get(cache_key)
 
-        # 1. Fast path: In-memory cache HIT and Fresh (<8s) -> Return immediately (<1ms)
-        if cached and now < cached.fresh_until:
-            return cached.data
+            # 1. Fast path: In-memory cache HIT and Fresh (<8s) -> Return immediately (<1ms)
+            if cached and now < cached.fresh_until:
+                return cached.data
 
-        # 2. SWR path: Cache is Stale (8s-300s) -> Return instantly, refresh in background!
-        if cached and now < cached.stale_until:
-            if not cached.is_updating:
-                cached.is_updating = True
-                asyncio.create_task(
-                    self._refresh_in_background(cache_key, date_range, day_number, event_id, allowed_site_ids)
-                )
-            return cached.data
+            # 2. SWR path: Cache is Stale (8s-300s) -> Return instantly, refresh in background!
+            if cached and now < cached.stale_until:
+                if not cached.is_updating:
+                    cached.is_updating = True
+                    asyncio.create_task(
+                        self._refresh_in_background(cache_key, date_range, day_number, event_id, allowed_site_ids)
+                    )
+                return cached.data
 
         # 3. Cache MISS: in-flight request coalescing
         if cache_key in _in_flight_requests:
@@ -255,8 +257,15 @@ class DashboardService:
             if acquired:
                 try:
                     for cid, w in list(_camera_workers.items()):
-                        if cid in event_camera_codes or getattr(w, "camera_id", "") in event_camera_codes:
-                            if getattr(w, "running", False):
+                        clean_cid = cid.replace("-FRS", "").replace("-CROWD", "")
+                        if getattr(w, "running", False):
+                            if (
+                                not event_camera_codes
+                                or cid in event_camera_codes
+                                or clean_cid in event_camera_codes
+                                or getattr(w, "camera_id", "") in event_camera_codes
+                                or getattr(w, "camera_id", "").replace("-FRS", "").replace("-CROWD", "") in event_camera_codes
+                            ):
                                 if getattr(w, "is_frs", False):
                                     frs_running_count += 1
                                 live_frs_workers[cid] = w
@@ -272,6 +281,8 @@ class DashboardService:
                 c.camera_code in live_crowd_pipes
                 or c.camera_code in live_queue_pipes
                 or c.camera_code in live_frs_workers
+                or f"{c.camera_code}-CROWD" in live_frs_workers
+                or f"{c.camera_code}-FRS" in live_frs_workers
             )
             if (c.enabled and (c.status or "").lower() == "online") or is_worker_active:
                 online_camera_codes.add(c.camera_code)
@@ -314,8 +325,16 @@ class DashboardService:
         if fest_total_in == 0 and fest_total_out == 0:
             live_in = 0
             live_out = 0
-            for s in live_frs_workers.values():
-                if getattr(s, "crowd_ai_active", False):
+            workers_pool = list(live_frs_workers.values())
+            if not workers_pool:
+                try:
+                    from app.frs_engine.frs_service import _camera_workers, _workers_lock
+                    with _workers_lock:
+                        workers_pool = list(_camera_workers.values())
+                except Exception:
+                    pass
+            for s in workers_pool:
+                if getattr(s, "crowd_ai_active", False) and getattr(s, "running", False):
                     live_in += int(getattr(s, "in_count", 0) or 0)
                     live_out += int(getattr(s, "out_count", 0) or 0)
             if live_in > 0 or live_out > 0:

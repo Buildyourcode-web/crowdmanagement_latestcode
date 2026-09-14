@@ -10,6 +10,9 @@ import apiClient from "./apiClient.js";
  */
 export async function getDashboardSummary(dateRange = "today", skipCache = false, dayNumber = null) {
   const params = { date_range: dateRange };
+  if (skipCache) {
+    params.skip_cache = true;
+  }
   if (dayNumber !== null && dayNumber !== undefined) {
     params.day_number = dayNumber;
   }
