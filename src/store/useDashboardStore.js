@@ -5,7 +5,7 @@ import { create } from "zustand";
 let initialCachedData = null;
 const initialRangeCache = {};
 
-const CACHE_VERSION = "v5_live_fixed";
+const CACHE_VERSION = "v6_all_hours_safe";
 try {
   if (sessionStorage.getItem("byc_cache_version") !== CACHE_VERSION) {
     sessionStorage.removeItem("byc_dashboard_cache");
@@ -138,26 +138,18 @@ export const useDashboardStore = create((set, get) => ({
         payload.festival_total_entries = curFestIn;
       }
 
-      // Protect ONLY the active current hour in hourly_flow from dropping back to 0 on 8-second HTTP poll
+      // Strict monotonic protection: Today entries, festival totals, and hourly flow buckets MUST NEVER DROP TO 0!
       if (Array.isArray(payload.hourly_flow) && Array.isArray(curData.hourly_flow)) {
-        const nowUtc = new Date();
-        const istOffsetMs = 5.5 * 3600 * 1000;
-        const istDate = new Date(nowUtc.getTime() + istOffsetMs);
-        const currentHourStr = `${String(istDate.getUTCHours()).padStart(2, "0")}:00`;
-
         payload.hourly_flow = payload.hourly_flow.map((bucket, idx) => {
-          if (bucket.hour === currentHourStr) {
-            const curBucket = curData.hourly_flow[idx] || curData.hourly_flow.find((b) => b.hour === currentHourStr);
-            const liveIn = Math.max(bucket.entry || 0, curBucket?.entry || 0);
-            const liveOut = Math.max(bucket.exit || 0, curBucket?.exit || 0);
-            return {
-              ...bucket,
-              entry: liveIn,
-              exit: liveOut,
-              net_flow: liveIn - liveOut,
-            };
-          }
-          return bucket;
+          const curBucket = curData.hourly_flow[idx] || curData.hourly_flow.find((b) => b.hour === bucket.hour);
+          const liveIn = Math.max(bucket.entry || 0, curBucket?.entry || 0);
+          const liveOut = Math.max(bucket.exit || 0, curBucket?.exit || 0);
+          return {
+            ...bucket,
+            entry: liveIn,
+            exit: liveOut,
+            net_flow: liveIn - liveOut,
+          };
         });
       }
     }

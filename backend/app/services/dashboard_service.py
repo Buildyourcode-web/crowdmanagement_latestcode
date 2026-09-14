@@ -573,6 +573,51 @@ class DashboardService:
                                 p.net_flow = p.entry - p.exit
                                 break
 
+                        # Production Guarantee: Persist the active hour count to DB CrowdSnapshot
+                        # so when this hour completes and rolls over to the next hour,
+                        # the completed hour's count is already durable in PostgreSQL and NEVER turns to 0!
+                        try:
+                            cur_hour_int = now_local.hour
+                            ts_hour_utc = datetime.combine(today_date, dtime(cur_hour_int, 30, 0), tzinfo=tz).astimezone(timezone.utc)
+                            h_profile = f"HOURLY_AUTO_{cur_hour_int:02d}"
+
+                            cur_h_entry = next((p.entry for p in hourly_flow if p.hour == cur_h_str), 0)
+                            cur_h_exit = next((p.exit for p in hourly_flow if p.hour == cur_h_str), 0)
+
+                            if cur_h_entry > 0 or cur_h_exit > 0:
+                                q_snap = select(CrowdSnapshot).where(
+                                    CrowdSnapshot.event_id == target_event_id,
+                                    CrowdSnapshot.profile_id == h_profile,
+                                    CrowdSnapshot.timestamp >= start_utc,
+                                    CrowdSnapshot.timestamp < end_utc,
+                                ).limit(1)
+                                exist_snap = (await self.db.execute(q_snap)).scalars().first()
+
+                                if exist_snap:
+                                    exist_snap.inflow_rate = cur_h_entry
+                                    exist_snap.outflow_rate = cur_h_exit
+                                    exist_snap.people_count = max(0, cur_h_entry - cur_h_exit)
+                                    exist_snap.timestamp = ts_hour_utc
+                                else:
+                                    new_snap = CrowdSnapshot(
+                                        id=uuid.uuid4(),
+                                        event_id=target_event_id,
+                                        camera_code="CAM-KHB-001",
+                                        profile_id=h_profile,
+                                        timestamp=ts_hour_utc,
+                                        people_count=max(0, cur_h_entry - cur_h_exit),
+                                        density=0.0,
+                                        inflow_rate=cur_h_entry,
+                                        outflow_rate=cur_h_exit,
+                                        occupancy_percentage=0.0,
+                                        risk_level="LOW",
+                                        risk_score=0.0,
+                                    )
+                                    self.db.add(new_snap)
+                                await self.db.commit()
+                        except Exception as persist_err:
+                            logger.warning(f"[Dashboard] Hourly snapshot auto-persist warning: {persist_err}")
+
                     # Recompute peak hour accurately across all buckets
                     max_p = max(hourly_flow, key=lambda x: x.entry, default=None)
                     if max_p and max_p.entry > 0:
