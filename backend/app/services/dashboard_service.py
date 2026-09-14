@@ -309,6 +309,29 @@ class DashboardService:
             range_in, range_out, range_occ = 0, 0, 0
             today_in, today_out, today_occ = 0, 0, 0
 
+        # Live worker fallback: if DB counts are still 0 (new deployment / line_crossing_events empty),
+        # aggregate in-memory in_count / out_count from active crowd workers so dashboard is never blank.
+        if fest_total_in == 0 and fest_total_out == 0:
+            live_in = 0
+            live_out = 0
+            for s in live_frs_workers.values():
+                if getattr(s, "crowd_ai_active", False):
+                    live_in += int(getattr(s, "in_count", 0) or 0)
+                    live_out += int(getattr(s, "out_count", 0) or 0)
+            if live_in > 0 or live_out > 0:
+                fest_total_in = live_in
+                fest_total_out = live_out
+                fest_occ = max(0, live_in - live_out)
+                # Also propagate to range/today since DB is empty
+                if range_in == 0:
+                    range_in = live_in
+                    range_out = live_out
+                    range_occ = fest_occ
+                if today_in == 0:
+                    today_in = live_in
+                    today_out = live_out
+                    today_occ = fest_occ
+
         _step("4-canonical-totals")
 
         # -------------------------------------------------------------------

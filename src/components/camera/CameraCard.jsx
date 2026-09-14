@@ -85,7 +85,7 @@ export default function CameraCard({ camera, onSelect, onToggleFrs, onFullscreen
     ? camera.ai_purposes
     : [isFrs ? "FRS" : "ENTRY"];
   const hasExit = purposes.includes("EXIT") && !purposes.includes("ENTRY");
-  const hasZone = purposes.includes("ZONE") && !purposes.includes("ENTRY") && !purposes.includes("EXIT");
+  const hasZone = (purposes.includes("ZONE") || purposes.includes("CROWD_ROI")) && !purposes.includes("ENTRY") && !purposes.includes("EXIT");
   const hasEntry = !isFrs && !hasExit && !hasZone;
 
   // Listen for tab switching to prevent background frame accumulation in browser TCP buffer

@@ -1790,7 +1790,7 @@ export default function Cameras() {
                   <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: 12, flex: 1, flexWrap: "wrap" }}>
                     <div style={{ display: "flex", alignItems: "center", gap: 8, flexWrap: "wrap" }}>
                       {purps.map((pKey) => {
-                        const m = PURPOSE_META[pKey] || PURPOSE_META.ENTRY_EXIT;
+                        const m = PURPOSE_META[pKey] || PURPOSE_META.ENTRY;
                         return (
                           <span
                             key={pKey}
@@ -1814,7 +1814,7 @@ export default function Cameras() {
                     </div>
                     <div style={{ display: "flex", alignItems: "center", gap: 8, flexWrap: "wrap" }}>
                       {purps.map((pKey) => {
-                        const m = PURPOSE_META[pKey] || PURPOSE_META.ENTRY_EXIT;
+                        const m = PURPOSE_META[pKey] || PURPOSE_META.ENTRY;
                         return (
                           <button
                             key={pKey}
