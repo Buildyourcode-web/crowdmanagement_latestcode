@@ -5,7 +5,6 @@ import sys
 import uuid
 from datetime import datetime, timedelta, timezone
 from typing import List, Optional
-from zoneinfo import ZoneInfo
 
 if hasattr(sys.stdout, "reconfigure"):
     sys.stdout.reconfigure(encoding="utf-8")
@@ -54,6 +53,22 @@ async def list_event_cameras(event_identifier: str):
         print("===================================================\n")
 
 
+def _get_timezone(event: Optional[Event] = None):
+    tz_name = (event.timezone if event and event.timezone else "Asia/Kolkata").strip()
+    try:
+        from zoneinfo import ZoneInfo
+        return ZoneInfo(tz_name)
+    except Exception:
+        pass
+    try:
+        from zoneinfo import ZoneInfo
+        return ZoneInfo("Asia/Kolkata")
+    except Exception:
+        pass
+    # Built-in fixed offset UTC+05:30 (IST) — works anywhere without tzdata package
+    return timezone(timedelta(hours=5, minutes=30))
+
+
 async def _get_event(db, event_identifier: str) -> Optional[Event]:
     is_uuid = False
     try:
@@ -64,16 +79,31 @@ async def _get_event(db, event_identifier: str) -> Optional[Event]:
 
     if is_uuid:
         stmt = select(Event).where(Event.id == evt_uuid)
+        res = await db.execute(stmt)
+        event = res.scalars().first()
     else:
+        clean_id = event_identifier.strip().lower()
+        # 1. Exact match by code or name
         stmt = select(Event).where(
             or_(
-                func.lower(Event.code) == event_identifier.strip().lower(),
-                func.lower(Event.name) == event_identifier.strip().lower(),
+                func.lower(Event.code) == clean_id,
+                func.lower(Event.name) == clean_id,
             )
         )
+        res = await db.execute(stmt)
+        event = res.scalars().first()
 
-    res = await db.execute(stmt)
-    event = res.scalars().first()
+        # 2. Substring match (e.g. 'Khairatabad' matches 'Khairatabad Ganesh Festival 2026')
+        if not event:
+            stmt = select(Event).where(
+                or_(
+                    Event.code.ilike(f"%{clean_id}%"),
+                    Event.name.ilike(f"%{clean_id}%"),
+                )
+            ).order_by(Event.created_at.desc()).limit(1)
+            res = await db.execute(stmt)
+            event = res.scalars().first()
+
     if not event:
         print(f"❌ Error: Event '{event_identifier}' not found in database.")
     return event
@@ -95,9 +125,9 @@ async def insert_manual_count(
             await list_available_events()
             return
 
-        # Time parsing
+        # Time parsing with zero-dependency fallback
+        tz = _get_timezone(event)
         tz_name = (event.timezone or "Asia/Kolkata").strip()
-        tz = ZoneInfo(tz_name)
 
         if custom_time_str:
             try:
@@ -111,7 +141,7 @@ async def insert_manual_count(
         else:
             dt_local = datetime.now(tz)
 
-        dt_utc = dt_local.astimezone(ZoneInfo("UTC"))
+        dt_utc = dt_local.astimezone(timezone.utc)
 
         # Fetch active event cameras
         stmt_cams = select(Camera).where(Camera.event_id == event.id, Camera.is_active == True).order_by(Camera.camera_code)
@@ -135,8 +165,8 @@ async def insert_manual_count(
         if set_total_inflow is not None:
             h_start_local = dt_local.replace(minute=0, second=0, microsecond=0)
             h_end_local = h_start_local + timedelta(hours=1)
-            h_start_utc = h_start_local.astimezone(ZoneInfo("UTC"))
-            h_end_utc = h_end_local.astimezone(ZoneInfo("UTC"))
+            h_start_utc = h_start_local.astimezone(timezone.utc)
+            h_end_utc = h_end_local.astimezone(timezone.utc)
 
             counting_srv = CanonicalCountingService(db)
             existing_inflow, _ = await counting_srv.get_durable_counts(
