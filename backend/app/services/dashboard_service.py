@@ -606,11 +606,13 @@ class DashboardService:
                                 h_profile = f"HOURLY_AUTO_{h_int:02d}"
 
                                 q_snap = select(CrowdSnapshot).where(
-                                    CrowdSnapshot.event_id == target_event_id,
                                     CrowdSnapshot.profile_id == h_profile,
                                     CrowdSnapshot.timestamp >= start_utc,
                                     CrowdSnapshot.timestamp < end_utc,
-                                ).limit(1)
+                                )
+                                if target_event_id:
+                                    q_snap = q_snap.where(or_(CrowdSnapshot.event_id == target_event_id, CrowdSnapshot.event_id.is_(None)))
+                                q_snap = q_snap.limit(1)
                                 exist_snap = (await self.db.execute(q_snap)).scalars().first()
 
                                 if exist_snap:
