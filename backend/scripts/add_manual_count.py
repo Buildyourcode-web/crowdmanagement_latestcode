@@ -16,6 +16,7 @@ from app.db.session import AsyncSessionLocal, async_engine
 from app.models.camera import Camera
 from app.models.crowd import CrowdSnapshot
 from app.models.event import Event
+from app.models.zone import Zone
 from app.services.counting_service import CanonicalCountingService
 from sqlalchemy import select, or_, func
 
@@ -51,6 +52,76 @@ async def list_event_cameras(event_identifier: str):
         for c in cams:
             print(f" • Code: {c.camera_code:<12} | Name: {c.name:<25} | Zone: {c.zone_code or 'N/A':<8} | ID: {c.id}")
         print("===================================================\n")
+
+
+async def show_event_summary(event_identifier: str, target_date_str: Optional[str] = None):
+    async with AsyncSessionLocal() as db:
+        event = await _get_event(db, event_identifier)
+        if not event:
+            return
+
+        tz = _get_timezone(event)
+        now_local = datetime.now(tz)
+        if target_date_str:
+            try:
+                eff_date = datetime.strptime(target_date_str, "%Y-%m-%d").date()
+            except ValueError:
+                eff_date = now_local.date()
+        else:
+            eff_date = now_local.date()
+
+        counting_srv = CanonicalCountingService(db)
+        fest_in, fest_out, fest_occ = await counting_srv.get_festival_totals(event.id)
+        today_in, today_out = await counting_srv.get_today_totals_only_db(event.id)
+        hourly_items, peak_h = await counting_srv.get_hourly_breakdown(event.id, eff_date)
+        daily_items, _, _, _ = await counting_srv.get_festival_daily_breakdown(event.id)
+
+        # Cameras
+        stmt_c = select(Camera).where(Camera.event_id == event.id, Camera.is_active == True).order_by(Camera.camera_code)
+        cams = (await db.execute(stmt_c)).scalars().all()
+
+        # Zones
+        stmt_z = select(Zone).where(Zone.event_id == event.id).order_by(Zone.zone_code)
+        zones = (await db.execute(stmt_z)).scalars().all()
+
+        print("\n" + "=" * 76)
+        print(f"📊 DATABASE SYNC & COUNT AUDIT: {event.name} ({event.code})")
+        print("=" * 76)
+        print(f" • Event Status:        {event.status or 'ACTIVE'}")
+        print(f" • Festival Total:      {fest_in:,} Entries | {fest_out:,} Exits | {fest_occ:,} Current Occupancy")
+        print(f" • Date Audited:        {eff_date} ({eff_date.strftime('%A')})")
+        print(f" • Day's DB Total:      {today_in:,} Entries | {today_out:,} Exits")
+        print("-" * 76)
+        print(f"⏰ Hourly Breakdown for {eff_date} (Asia/Kolkata):")
+        sum_h_in = 0
+        sum_h_out = 0
+        any_hourly = False
+        for h in hourly_items:
+            sum_h_in += h.entry
+            sum_h_out += h.exit
+            if h.entry > 0 or h.exit > 0:
+                any_hourly = True
+                h_num = int(h.hour[:2])
+                print(f"   [{h.hour} – {(h_num+1):02d}:00]  IN: {h.entry:<6} | OUT: {h.exit:<6} | Net: {h.net_flow:<6}")
+        if not any_hourly:
+            print("   (No recorded entries for this date yet)")
+        print(f" • Hourly Sum IN:       {sum_h_in:,} (Matches Day Total: {'✅ YES' if sum_h_in == today_in else '❌ NO'})")
+        print(f" • Peak Hour:           {peak_h}")
+        print("-" * 76)
+        print(f"📅 Festival Daily Breakdown ({len(daily_items)} days):")
+        for d in daily_items:
+            if d.entry_count > 0 or d.status == "TODAY":
+                print(f"   {d.label:<8} ({d.date}): {d.entry_count:<6} Entries | {d.exit_count:<6} Exits | Status: {d.status}")
+        print("-" * 76)
+        print(f"📹 Cameras ({len(cams)} active):")
+        for c in cams:
+            print(f"   • {c.camera_code:<15} ({c.name or 'Camera'}): {c.people_count or 0} people | Zone: {c.zone_code or 'N/A'}")
+        if zones:
+            print("-" * 76)
+            print(f"🏢 Zones ({len(zones)} defined):")
+            for z in zones:
+                print(f"   • {z.zone_code:<10} ({z.name or z.zone_code}): {z.current_people or 0} people")
+        print("=" * 76 + "\n")
 
 
 def _get_timezone(event: Optional[Event] = None):
@@ -301,6 +372,17 @@ async def run(args):
             await list_event_cameras(args.event)
             return
 
+        if args.summary or (args.inflow == 0 and args.outflow == 0 and args.set_total is None):
+            # If no count deltas specified or summary requested, display full audit report
+            date_arg = None
+            if args.time:
+                try:
+                    date_arg = args.time.strip().split()[0]
+                except Exception:
+                    pass
+            await show_event_summary(args.event, date_arg)
+            return
+
         await insert_manual_count(
             event_identifier=args.event,
             inflow=args.inflow,
@@ -316,9 +398,10 @@ async def run(args):
 
 
 def main():
-    parser = argparse.ArgumentParser(description="Add manual counts and distribute across cameras")
+    parser = argparse.ArgumentParser(description="Add manual counts, audit totals, and distribute across cameras")
     parser.add_argument("--list", action="store_true", help="List all available events and codes")
     parser.add_argument("--event", type=str, help="Event code, name, or UUID")
+    parser.add_argument("--summary", "--audit", dest="summary", action="store_true", help="Display full audit report and database sync verification")
     parser.add_argument("--list-cameras", action="store_true", help="List all cameras assigned to this event")
     parser.add_argument("--camera", type=str, default=None, help="Target a specific camera code (e.g. CAM-001)")
     parser.add_argument("--distribute", action="store_true", help="Distribute the counts evenly across all active cameras of the event")

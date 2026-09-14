@@ -520,66 +520,60 @@ class CanonicalCountingService:
             )
         )
         res_l = await self.db.execute(stmt_l)
-        rows_l = res_l.all()
+        for r in res_l.all():
+            raw_ts = r.crossing_timestamp
+            if raw_ts:
+                if raw_ts.tzinfo is None:
+                    raw_ts = raw_ts.replace(tzinfo=timezone.utc)
+                loc_dt = raw_ts.astimezone(tz)
+                d_str = str(loc_dt.date())
+                h = loc_dt.hour
+                c_delta = int(r.count_delta or 0)
+                inf = c_delta if (r.direction == "IN" and c_delta > 0) else 0
+                outf = c_delta if (r.direction == "OUT" and c_delta > 0) else 0
 
-        has_ledger = False
-        if rows_l:
-            for r in rows_l:
-                raw_ts = r.crossing_timestamp
-                if raw_ts:
-                    if raw_ts.tzinfo is None:
-                        raw_ts = raw_ts.replace(tzinfo=timezone.utc)
-                    loc_dt = raw_ts.astimezone(tz)
-                    d_str = str(loc_dt.date())
-                    h = loc_dt.hour
-                    c_delta = int(r.count_delta or 0)
-                    inf = c_delta if (r.direction == "IN" and c_delta > 0) else 0
-                    outf = c_delta if (r.direction == "OUT" and c_delta > 0) else 0
+                if d_str not in day_hourly_map:
+                    day_hourly_map[d_str] = {}
+                cur_in, cur_out = day_hourly_map[d_str].get(h, (0, 0))
+                day_hourly_map[d_str][h] = (cur_in + inf, cur_out + outf)
 
-                    if inf > 0 or outf > 0:
-                        has_ledger = True
+                d_in, d_out = day_totals_map.get(d_str, (0, 0))
+                day_totals_map[d_str] = (d_in + inf, d_out + outf)
 
-                    if d_str not in day_hourly_map:
-                        day_hourly_map[d_str] = {}
-                    cur_in, cur_out = day_hourly_map[d_str].get(h, (0, 0))
-                    day_hourly_map[d_str][h] = (cur_in + inf, cur_out + outf)
-
-                    d_in, d_out = day_totals_map.get(d_str, (0, 0))
-                    day_totals_map[d_str] = (d_in + inf, d_out + outf)
-
-        if not has_ledger:
-            # Fallback to CrowdSnapshot bulk fetch
-            stmt_snap = (
-                select(
-                    CrowdSnapshot.timestamp,
-                    CrowdSnapshot.inflow_rate,
-                    CrowdSnapshot.outflow_rate,
-                )
-                .where(
-                    CrowdSnapshot.event_id == event_id,
-                    CrowdSnapshot.timestamp >= start_fest_utc,
-                    CrowdSnapshot.timestamp < end_fest_utc,
-                )
+        # 2. Query CrowdSnapshot in bulk for per-day fallback
+        snap_hourly_map: Dict[str, Dict[int, Tuple[int, int]]] = {}
+        snap_totals_map: Dict[str, Tuple[int, int]] = {}
+        stmt_snap = (
+            select(
+                CrowdSnapshot.timestamp,
+                CrowdSnapshot.inflow_rate,
+                CrowdSnapshot.outflow_rate,
             )
-            res_snap = await self.db.execute(stmt_snap)
-            for r in res_snap.all():
-                raw_ts = r.timestamp
-                if raw_ts:
-                    if raw_ts.tzinfo is None:
-                        raw_ts = raw_ts.replace(tzinfo=timezone.utc)
-                    loc_dt = raw_ts.astimezone(tz)
-                    d_str = str(loc_dt.date())
-                    h = loc_dt.hour
-                    inf = int(r.inflow_rate or 0)
-                    outf = int(r.outflow_rate or 0)
+            .where(
+                CrowdSnapshot.event_id == event_id,
+                CrowdSnapshot.timestamp >= start_fest_utc,
+                CrowdSnapshot.timestamp < end_fest_utc,
+            )
+        )
+        res_snap = await self.db.execute(stmt_snap)
+        for r in res_snap.all():
+            raw_ts = r.timestamp
+            if raw_ts:
+                if raw_ts.tzinfo is None:
+                    raw_ts = raw_ts.replace(tzinfo=timezone.utc)
+                loc_dt = raw_ts.astimezone(tz)
+                d_str = str(loc_dt.date())
+                h = loc_dt.hour
+                inf = int(r.inflow_rate or 0)
+                outf = int(r.outflow_rate or 0)
 
-                    if d_str not in day_hourly_map:
-                        day_hourly_map[d_str] = {}
-                    cur_in, cur_out = day_hourly_map[d_str].get(h, (0, 0))
-                    day_hourly_map[d_str][h] = (cur_in + inf, cur_out + outf)
+                if d_str not in snap_hourly_map:
+                    snap_hourly_map[d_str] = {}
+                cur_in, cur_out = snap_hourly_map[d_str].get(h, (0, 0))
+                snap_hourly_map[d_str][h] = (cur_in + inf, cur_out + outf)
 
-                    d_in, d_out = day_totals_map.get(d_str, (0, 0))
-                    day_totals_map[d_str] = (d_in + inf, d_out + outf)
+                d_in, d_out = snap_totals_map.get(d_str, (0, 0))
+                snap_totals_map[d_str] = (d_in + inf, d_out + outf)
 
         daily_items: List[DailyCountItem] = []
         total_entries = 0
@@ -587,10 +581,14 @@ class CanonicalCountingService:
 
         for d_tmpl in days_template:
             d_str = d_tmpl.date
+            # Per-day fallback: use LineCrossingEvent if that day has records, else CrowdSnapshot
             d_in, d_out = day_totals_map.get(d_str, (0, 0))
+            h_map = day_hourly_map.get(d_str, {})
+            if d_in == 0 and d_out == 0 and d_str in snap_totals_map:
+                d_in, d_out = snap_totals_map[d_str]
+                h_map = snap_hourly_map.get(d_str, {})
 
             # Peak hour for this day
-            h_map = day_hourly_map.get(d_str, {})
             peak_h = "—"
             max_h_ent = 0
             for h in range(24):
