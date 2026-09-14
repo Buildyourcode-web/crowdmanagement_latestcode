@@ -19,12 +19,7 @@ security = HTTPBearer(auto_error=False)
 # Shared Redis pool
 _redis_pool: Optional[Redis] = None
 
-# User lookup cache (avoids 3s DB roundtrip to Supabase on every single API request)
-import time
-_cached_dev_user: Optional[User] = None
-_cached_users: dict[str, tuple[User, float]] = {}
-_cached_default_event: Optional[Any] = None
-_cached_default_event_exp: float = 0.0
+
 
 
 async def get_db() -> AsyncGenerator[AsyncSession, None]:
@@ -99,18 +94,6 @@ async def get_current_user(
     jwt_role = payload.get("role")
     jwt_perms = payload.get("permissions") or []
 
-    now_ts = time.time()
-    if user_id in _cached_users:
-        cached_u, exp = _cached_users[user_id]
-        if now_ts < exp:
-            try:
-                user = await db.merge(cached_u, load=False)
-            except Exception:
-                user = cached_u
-            user._jwt_role = jwt_role
-            user._jwt_permissions = jwt_perms
-            return user
-
     stmt = (
         select(User)
         .options(selectinload(User.role).selectinload(Role.permissions))
@@ -131,7 +114,6 @@ async def get_current_user(
             detail={"code": "USER_INACTIVE", "message": "User account is disabled"},
         )
 
-    _cached_users[user_id] = (user, now_ts + 60.0)
     user._jwt_role = jwt_role
     user._jwt_permissions = jwt_perms
     return user
@@ -186,9 +168,7 @@ class EventContext:
     has_frs_access: bool = False
 
 
-_cached_events_by_id: dict[str, tuple[Any, float]] = {}
-_cached_default_event: Optional[Any] = None
-_cached_default_event_exp: float = 0.0
+
 
 
 async def get_event_context(
@@ -212,50 +192,27 @@ async def get_event_context(
 
     if is_super:
         if x_event_id:
-            global _cached_events_by_id
-            now_ts = time.time()
-            if x_event_id in _cached_events_by_id and now_ts < _cached_events_by_id[x_event_id][1]:
-                target_event = _cached_events_by_id[x_event_id][0]
-                try:
-                    target_event = await db.merge(target_event, load=False)
-                except Exception:
-                    pass
-            else:
-                try:
-                    target_uuid = uuid.UUID(x_event_id)
-                    stmt = select(Event).where((Event.id == target_uuid) | (Event.code == x_event_id))
-                except ValueError:
-                    stmt = select(Event).where(Event.code == x_event_id)
-                res = await db.execute(stmt)
-                target_event = res.scalars().first()
-                if not target_event:
-                    raise HTTPException(
-                        status_code=status.HTTP_404_NOT_FOUND,
-                        detail={"code": "EVENT_NOT_FOUND", "message": f"Event '{x_event_id}' not found"},
-                    )
-                _cached_events_by_id[x_event_id] = (target_event, now_ts + 300.0)
+            try:
+                target_uuid = uuid.UUID(x_event_id)
+                stmt = select(Event).where((Event.id == target_uuid) | (Event.code == x_event_id))
+            except ValueError:
+                stmt = select(Event).where(Event.code == x_event_id)
+            res = await db.execute(stmt)
+            target_event = res.scalars().first()
+            if not target_event:
+                raise HTTPException(
+                    status_code=status.HTTP_404_NOT_FOUND,
+                    detail={"code": "EVENT_NOT_FOUND", "message": f"Event '{x_event_id}' not found"},
+                )
         else:
-            global _cached_default_event, _cached_default_event_exp
-            now_ts = time.time()
-            if settings.APP_ENV != "testing" and _cached_default_event is not None and now_ts < _cached_default_event_exp:
-                target_event = _cached_default_event
-                try:
-                    target_event = await db.merge(target_event, load=False)
-                except Exception:
-                    pass
-            else:
-                # Resolve active/live event dynamically first, then fallback to latest
-                stmt = select(Event).where(Event.status.in_(["ACTIVE", "LIVE"])).order_by(Event.created_at.desc()).limit(1)
+            # Resolve active/live event dynamically first, then fallback to latest
+            stmt = select(Event).where(Event.status.in_(["ACTIVE", "LIVE"])).order_by(Event.created_at.desc()).limit(1)
+            res = await db.execute(stmt)
+            target_event = res.scalars().first()
+            if not target_event:
+                stmt = select(Event).order_by(Event.created_at.desc()).limit(1)
                 res = await db.execute(stmt)
                 target_event = res.scalars().first()
-                if not target_event:
-                    stmt = select(Event).order_by(Event.created_at.desc()).limit(1)
-                    res = await db.execute(stmt)
-                    target_event = res.scalars().first()
-                if target_event:
-                    _cached_default_event = target_event
-                    _cached_default_event_exp = now_ts + 120.0
-
 
         if not target_event:
             raise HTTPException(
