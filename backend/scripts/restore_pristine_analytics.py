@@ -40,13 +40,22 @@ async def restore():
         print(f"🔄 RESTORING PRISTINE ANALYTICS & COUNTS FOR: {evt.name} ({evt.code})")
         print("=" * 76)
 
-        # 2. Get camera details
-        c_stmt = select(Camera).where(Camera.event_id == evt.id, Camera.is_active == True).limit(1)
-        cam = (await db.execute(c_stmt)).scalars().first()
-        cam_code = cam.camera_code if cam else "MANUAL_ENTRY"
+        # 2. Get camera details (Match by event or active camera codes like CAM-KHB-001)
+        c_stmt = select(Camera).where(Camera.is_active == True).order_by(Camera.created_at.asc())
+        all_cams = (await db.execute(c_stmt)).scalars().all()
+        cam = None
+        for c in all_cams:
+            if c.event_id == evt.id or "KHB" in (c.camera_code or ""):
+                cam = c
+                break
+        if not cam and all_cams:
+            cam = all_cams[0]
+
+        cam_code = cam.camera_code if cam else "CAM-KHB-001"
         cam_id = cam.id if cam else None
         zone_code = cam.zone_code if cam and cam.zone_code else "ZONE-A"
         zone_id = cam.zone_id if cam else None
+        print(f"📹 Targeted Camera for In-Memory Sync: {cam_code} (ID: {cam_id})")
 
         # 3. Clean all today's CrowdSnapshots
         stmt_del = (

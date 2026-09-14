@@ -5,7 +5,7 @@ import { create } from "zustand";
 let initialCachedData = null;
 const initialRangeCache = {};
 
-const CACHE_VERSION = "v4_exact";
+const CACHE_VERSION = "v5_live_fixed";
 try {
   if (sessionStorage.getItem("byc_cache_version") !== CACHE_VERSION) {
     sessionStorage.removeItem("byc_dashboard_cache");
@@ -138,7 +138,28 @@ export const useDashboardStore = create((set, get) => ({
         payload.festival_total_entries = curFestIn;
       }
 
+      // Protect ONLY the active current hour in hourly_flow from dropping back to 0 on 8-second HTTP poll
+      if (Array.isArray(payload.hourly_flow) && Array.isArray(curData.hourly_flow)) {
+        const nowUtc = new Date();
+        const istOffsetMs = 5.5 * 3600 * 1000;
+        const istDate = new Date(nowUtc.getTime() + istOffsetMs);
+        const currentHourStr = `${String(istDate.getUTCHours()).padStart(2, "0")}:00`;
 
+        payload.hourly_flow = payload.hourly_flow.map((bucket, idx) => {
+          if (bucket.hour === currentHourStr) {
+            const curBucket = curData.hourly_flow[idx] || curData.hourly_flow.find((b) => b.hour === currentHourStr);
+            const liveIn = Math.max(bucket.entry || 0, curBucket?.entry || 0);
+            const liveOut = Math.max(bucket.exit || 0, curBucket?.exit || 0);
+            return {
+              ...bucket,
+              entry: liveIn,
+              exit: liveOut,
+              net_flow: liveIn - liveOut,
+            };
+          }
+          return bucket;
+        });
+      }
     }
 
     const dayNum = forDayNumber ?? payload?.selected_day_number ?? current.selectedDayNumber;
@@ -177,8 +198,18 @@ export const useDashboardStore = create((set, get) => ({
   patchDashboardCrossing: (payload) =>
     set((state) => {
       if (!state.data) return state;
-      const inDelta = Number(payload?.inflow_delta || 0);
-      const outDelta = Number(payload?.outflow_delta || 0);
+      const inDelta = Number(
+        payload?.inflow_delta ??
+        payload?.delta_in ??
+        payload?.in_delta ??
+        (payload?.crossing === "IN" ? 1 : 0)
+      );
+      const outDelta = Number(
+        payload?.outflow_delta ??
+        payload?.delta_out ??
+        payload?.out_delta ??
+        (payload?.crossing === "OUT" ? 1 : 0)
+      );
 
       const curTodayIn = Number(state.data.today_entries || 0);
       const curTodayOut = Number(state.data.today_exits || 0);

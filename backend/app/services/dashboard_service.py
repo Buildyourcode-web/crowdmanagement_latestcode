@@ -338,8 +338,13 @@ class DashboardService:
                 live_out += int(getattr(s, "out_count", 0) or 0)
 
         if live_in > 0 or live_out > 0:
-            today_in = max(today_in, live_in)
-            today_out = max(today_out, live_out)
+            if today_in > 0 and 0 < live_in < (today_in * 0.5):
+                today_in += live_in
+                today_out += live_out
+            else:
+                today_in = max(today_in, live_in)
+                today_out = max(today_out, live_out)
+
             today_occ = max(0, today_in - today_out)
             fest_total_in = max(fest_total_in, today_in)
             fest_total_out = max(fest_total_out, today_out)
@@ -552,16 +557,31 @@ class DashboardService:
                 # Specific day (Day 1..Day N or Yesterday/Today)
                 h_items, peak_h = await self.counting_service.get_hourly_breakdown(target_event_id, target_d)
                 hourly_flow = [HourlyFlowPoint(hour=i.hour, entry=i.entry, exit=i.exit, net_flow=i.net_flow) for i in h_items]
-                if target_d == today_date and live_in > 0:
+                if target_d == today_date:
                     flow_sum = sum(p.entry for p in hourly_flow)
-                    if live_in > flow_sum:
-                        delta_live = live_in - flow_sum
+                    out_flow_sum = sum(p.exit for p in hourly_flow)
+
+                    delta_live = max(0, today_in - flow_sum)
+                    delta_out = max(0, today_out - out_flow_sum)
+
+                    if delta_live > 0 or delta_out > 0:
                         cur_h_str = f"{now_local.hour:02d}:00"
                         for p in hourly_flow:
                             if p.hour == cur_h_str:
                                 p.entry += delta_live
+                                p.exit += delta_out
                                 p.net_flow = p.entry - p.exit
-                    if peak_h in ("—", "No data"):
+                                break
+
+                    # Recompute peak hour accurately across all buckets
+                    max_p = max(hourly_flow, key=lambda x: x.entry, default=None)
+                    if max_p and max_p.entry > 0:
+                        try:
+                            h_int = int(max_p.hour.split(":")[0])
+                            peak_h = f"{h_int:02d}:00 - {(h_int+1):02d}:00"
+                        except Exception:
+                            pass
+                    elif peak_h in ("—", "No data"):
                         peak_h = f"{now_local.hour:02d}:00 - {(now_local.hour+1):02d}:00"
             else:
                 # Festival Total -> Show Day-by-Day comparison bars

@@ -3373,14 +3373,23 @@ async def resync_camera_workers_from_db(add_both: bool = False) -> Dict[str, Any
             with _workers_lock:
                 worker_items = list(_camera_workers.items())
 
-            for cam_id, state in worker_items:
+            matched_any = any(
+                (camera_counts.get(cid) or camera_counts.get(cid.replace("-FRS", "").replace("-CROWD", "")) or (0, 0))[0] > 0
+                for cid, _ in worker_items
+            )
+
+            for idx, (cam_id, state) in enumerate(worker_items):
                 clean_code = cam_id.replace("-FRS", "").replace("-CROWD", "")
                 db_in, db_out = camera_counts.get(cam_id) or camera_counts.get(clean_code) or (0, 0)
 
-                # Fallback to total if single camera worker
-                if len(worker_items) == 1 and db_in == 0 and total_today_in > 0:
-                    db_in = total_today_in
-                    db_out = total_today_out
+                # Fallback to total if single camera worker, or if no worker matched specific DB counts (e.g. MANUAL_ENTRY)
+                if db_in == 0 and total_today_in > 0:
+                    if not matched_any and ("001" in cam_id or idx == 0):
+                        db_in = total_today_in
+                        db_out = total_today_out
+                    elif len(worker_items) == 1:
+                        db_in = total_today_in
+                        db_out = total_today_out
 
                 old_in = state.in_count
                 old_out = state.out_count
@@ -3446,6 +3455,9 @@ async def resync_camera_workers_from_db(add_both: bool = False) -> Dict[str, Any
                     "outflow_delta": 0,
                     "zone_code": getattr(state, "zone_code", "ZONE-A"),
                     "timestamp": datetime.now(timezone.utc).isoformat(),
+                    "today_entries": state.in_count,
+                    "today_exits": state.out_count,
+                    "total_visitors_festival": state.in_count,
                     "camera_in_count": state.in_count,
                     "camera_out_count": state.out_count,
                 }
