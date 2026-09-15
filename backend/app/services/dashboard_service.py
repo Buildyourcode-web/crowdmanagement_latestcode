@@ -9,7 +9,7 @@ from datetime import datetime, time as dtime, timedelta, timezone
 import asyncio
 import time
 import uuid
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Tuple
 
 from loguru import logger
 from sqlalchemy import desc, func, or_, select
