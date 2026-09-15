@@ -163,11 +163,15 @@ async def fix_day2():
         print("\n✅ DAY 2 IS NOW 100% ACCURATE & READY FOR LIVE COUNTING!\n")
 
 
-def main():
+async def main_async():
     try:
-        asyncio.run(fix_day2())
+        await fix_day2()
     finally:
-        asyncio.run(async_engine.dispose())
+        await async_engine.dispose()
+
+
+def main():
+    asyncio.run(main_async())
 
 
 if __name__ == "__main__":

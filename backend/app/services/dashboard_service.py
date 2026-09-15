@@ -558,42 +558,47 @@ class DashboardService:
                 if target_d == today_date:
                     cur_h_str = f"{now_local.hour:02d}:00"
 
-                    # 1. Monotonic freeze: Ensure past completed hours NEVER drop below previously tracked in memory
+                    # 1. Monotonic protection: Past completed hours only fall back to memory if DB returns 0 (glitch protection).
+                    # Real DB values (including corrections) ALWAYS take precedence!
                     for p in hourly_flow:
                         if p.hour != cur_h_str:
-                            prev_in, prev_out = _completed_hourly_cache.get(p.hour, (0, 0))
-                            if prev_in > p.entry:
-                                p.entry = prev_in
-                                p.exit = max(p.exit, prev_out)
-                                p.net_flow = p.entry - p.exit
+                            if p.entry == 0:
+                                prev_in, prev_out = _completed_hourly_cache.get(p.hour, (0, 0))
+                                if prev_in > 0:
+                                    p.entry = prev_in
+                                    p.exit = max(p.exit, prev_out)
+                                    p.net_flow = p.entry - p.exit
+                            else:
+                                _completed_hourly_cache[p.hour] = (p.entry, p.exit)
 
-                    flow_sum = sum(p.entry for p in hourly_flow)
-                    out_flow_sum = sum(p.exit for p in hourly_flow)
+                    # Only apply live delta if camera workers are actively running with live counts
+                    if live_in > 0 or live_out > 0:
+                        flow_sum = sum(p.entry for p in hourly_flow)
+                        out_flow_sum = sum(p.exit for p in hourly_flow)
 
-                    delta_live = max(0, today_in - flow_sum)
-                    delta_out = max(0, today_out - out_flow_sum)
+                        delta_live = max(0, today_in - flow_sum)
+                        delta_out = max(0, today_out - out_flow_sum)
 
-                    if delta_live > 0 or delta_out > 0:
-                        for p in hourly_flow:
-                            if p.hour == cur_h_str:
-                                p.entry += delta_live
-                                p.exit += delta_out
-                                p.net_flow = p.entry - p.exit
-                                break
+                        if delta_live > 0 or delta_out > 0:
+                            for p in hourly_flow:
+                                if p.hour == cur_h_str:
+                                    p.entry += delta_live
+                                    p.exit += delta_out
+                                    p.net_flow = p.entry - p.exit
+                                    break
 
-                    # Record past completed hours into monotonic in-memory cache
+                    # Record past completed hours into cache
                     for p in hourly_flow:
                         if p.hour != cur_h_str and (p.entry > 0 or p.exit > 0):
-                            cur_c_in, cur_c_out = _completed_hourly_cache.get(p.hour, (0, 0))
-                            _completed_hourly_cache[p.hour] = (max(cur_c_in, p.entry), max(cur_c_out, p.exit))
+                            _completed_hourly_cache[p.hour] = (p.entry, p.exit)
 
-                    # Production Guarantee: Persist the active hour count AND previous hour count to DB CrowdSnapshot
-                    # so when this hour completes and rolls over to the next hour,
-                    # the completed hour's count is already durable in PostgreSQL and NEVER turns to 0!
+                    # Production Guarantee: Persist ONLY previous completed hour count to DB CrowdSnapshot
+                    # Do NOT persist the active current hour (it's still changing live).
                     try:
                         cur_hour_int = now_local.hour
                         prev_hour_int = (cur_hour_int - 1) % 24
-                        hours_to_persist = [cur_hour_int, prev_hour_int]
+                        # Only persist previous completed hour so it is durable across restarts
+                        hours_to_persist = [prev_hour_int]
 
                         for h_int in hours_to_persist:
                             h_str = f"{h_int:02d}:00"
@@ -614,8 +619,10 @@ class DashboardService:
                                 exist_snap = (await self.db.execute(q_snap)).scalars().first()
 
                                 if exist_snap:
-                                    exist_snap.inflow_rate = max(exist_snap.inflow_rate, h_entry)
-                                    exist_snap.outflow_rate = max(exist_snap.outflow_rate, h_exit)
+                                    if h_entry > 0:
+                                        exist_snap.inflow_rate = h_entry
+                                    if h_exit > 0:
+                                        exist_snap.outflow_rate = h_exit
                                     exist_snap.people_count = max(0, exist_snap.inflow_rate - exist_snap.outflow_rate)
                                     exist_snap.timestamp = ts_hour_utc
                                 else:
