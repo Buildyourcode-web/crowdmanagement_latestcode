@@ -482,8 +482,20 @@ def _persist_crowd_snapshot_threadsafe(camera_code: str, inflow_delta: int, outf
 
                 evt_id = cam.event_id if cam else None
                 if not evt_id:
-                    from app.models.event import Event
-                    evt_stmt = select(Event).where(Event.status.in_(["ACTIVE", "LIVE"])).order_by(Event.created_at.desc()).limit(1)
+                    from sqlalchemy import case, or_
+                    evt_stmt = select(Event).where(
+                        or_(
+                            Event.code.ilike("%KHB%"),
+                            Event.name.ilike("%Khairatabad%"),
+                            Event.status.in_(["ACTIVE", "LIVE"]),
+                        )
+                    ).order_by(
+                        case(
+                            (or_(Event.code.ilike("%KHB%"), Event.name.ilike("%Khairatabad%")), 1),
+                            else_=2,
+                        ),
+                        Event.created_at.desc(),
+                    ).limit(1)
                     evt_res = await session.execute(evt_stmt)
                     evt = evt_res.scalars().first()
                     if not evt:
@@ -582,7 +594,20 @@ def _persist_line_crossing_event_threadsafe(
 
                 # 1. Resolve event_id if not present
                 if not evt_id:
-                    evt_stmt = select(Event).where(Event.status.in_(["ACTIVE", "LIVE"])).order_by(Event.created_at.desc()).limit(1)
+                    from sqlalchemy import case, or_
+                    evt_stmt = select(Event).where(
+                        or_(
+                            Event.code.ilike("%KHB%"),
+                            Event.name.ilike("%Khairatabad%"),
+                            Event.status.in_(["ACTIVE", "LIVE"]),
+                        )
+                    ).order_by(
+                        case(
+                            (or_(Event.code.ilike("%KHB%"), Event.name.ilike("%Khairatabad%")), 1),
+                            else_=2,
+                        ),
+                        Event.created_at.desc(),
+                    ).limit(1)
                     evt_res = await session.execute(evt_stmt)
                     evt = evt_res.scalars().first()
                     if not evt:

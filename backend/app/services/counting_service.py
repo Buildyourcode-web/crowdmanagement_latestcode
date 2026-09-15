@@ -294,7 +294,22 @@ class CanonicalCountingService:
                 ),
                 0,
             ).label("tot_out"),
-        ).where(or_(LineCrossingEvent.event_id == event_id, LineCrossingEvent.event_id.is_(None)))
+        ).where(
+            or_(
+                LineCrossingEvent.event_id == event_id,
+                LineCrossingEvent.event_id.is_(None),
+                LineCrossingEvent.event_id.in_(
+                    select(Event.id).where(
+                        or_(
+                            Event.code.ilike("%KHB%"),
+                            Event.code.ilike("%VIGNESHWARA%"),
+                            Event.name.ilike("%Khairatabad%"),
+                            Event.name.ilike("%vigneshwara%"),
+                        )
+                    )
+                ),
+            )
+        )
 
         if camera_id:
             stmt = stmt.where(LineCrossingEvent.camera_id == camera_id)
@@ -312,7 +327,22 @@ class CanonicalCountingService:
         stmt_snap = select(
             func.coalesce(func.sum(CrowdSnapshot.inflow_rate), 0).label("snap_in"),
             func.coalesce(func.sum(CrowdSnapshot.outflow_rate), 0).label("snap_out"),
-        ).where(or_(CrowdSnapshot.event_id == event_id, CrowdSnapshot.event_id.is_(None)))
+        ).where(
+            or_(
+                CrowdSnapshot.event_id == event_id,
+                CrowdSnapshot.event_id.is_(None),
+                CrowdSnapshot.event_id.in_(
+                    select(Event.id).where(
+                        or_(
+                            Event.code.ilike("%KHB%"),
+                            Event.code.ilike("%VIGNESHWARA%"),
+                            Event.name.ilike("%Khairatabad%"),
+                            Event.name.ilike("%vigneshwara%"),
+                        )
+                    )
+                ),
+            )
+        )
 
         if camera_id:
             stmt_snap = stmt_snap.where(CrowdSnapshot.camera_id == camera_id)
@@ -412,7 +442,20 @@ class CanonicalCountingService:
                 LineCrossingEvent.count_delta,
             )
             .where(
-                or_(LineCrossingEvent.event_id == event_id, LineCrossingEvent.event_id.is_(None)),
+                or_(
+                    LineCrossingEvent.event_id == event_id,
+                    LineCrossingEvent.event_id.is_(None),
+                    LineCrossingEvent.event_id.in_(
+                        select(Event.id).where(
+                            or_(
+                                Event.code.ilike("%KHB%"),
+                                Event.code.ilike("%VIGNESHWARA%"),
+                                Event.name.ilike("%Khairatabad%"),
+                                Event.name.ilike("%vigneshwara%"),
+                            )
+                        )
+                    ),
+                ),
                 LineCrossingEvent.crossing_timestamp >= start_utc,
                 LineCrossingEvent.crossing_timestamp < end_utc,
             )
@@ -448,7 +491,20 @@ class CanonicalCountingService:
                 CrowdSnapshot.outflow_rate,
             )
             .where(
-                or_(CrowdSnapshot.event_id == event_id, CrowdSnapshot.event_id.is_(None)),
+                or_(
+                    CrowdSnapshot.event_id == event_id,
+                    CrowdSnapshot.event_id.is_(None),
+                    CrowdSnapshot.event_id.in_(
+                        select(Event.id).where(
+                            or_(
+                                Event.code.ilike("%KHB%"),
+                                Event.code.ilike("%VIGNESHWARA%"),
+                                Event.name.ilike("%Khairatabad%"),
+                                Event.name.ilike("%vigneshwara%"),
+                            )
+                        )
+                    ),
+                ),
                 CrowdSnapshot.timestamp >= start_utc,
                 CrowdSnapshot.timestamp < end_utc,
             )
