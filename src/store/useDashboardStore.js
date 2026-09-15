@@ -5,7 +5,7 @@ import { create } from "zustand";
 let initialCachedData = null;
 const initialRangeCache = {};
 
-const CACHE_VERSION = "v15_day2_smooth";
+const CACHE_VERSION = "v16_fix_flicker";
 try {
   if (sessionStorage.getItem("byc_cache_version") !== CACHE_VERSION) {
     sessionStorage.removeItem("byc_dashboard_cache");
@@ -218,19 +218,8 @@ export const useDashboardStore = create((set, get) => ({
         ? Number(payload.today_exits)
         : null;
 
-      let nextTodayIn = curTodayIn;
-      if (incomingTodayIn !== null && incomingTodayIn > 0) {
-        nextTodayIn = incomingTodayIn;
-      } else if (inDelta > 0) {
-        nextTodayIn = curTodayIn + inDelta;
-      }
-
-      let nextTodayOut = curTodayOut;
-      if (incomingTodayOut !== null && incomingTodayOut > 0) {
-        nextTodayOut = incomingTodayOut;
-      } else if (outDelta > 0) {
-        nextTodayOut = curTodayOut + outDelta;
-      }
+      const nextTodayIn = inDelta > 0 ? curTodayIn + inDelta : curTodayIn;
+      const nextTodayOut = outDelta > 0 ? curTodayOut + outDelta : curTodayOut;
 
       const diffIn = nextTodayIn - curTodayIn;
       const diffOut = nextTodayOut - curTodayOut;
