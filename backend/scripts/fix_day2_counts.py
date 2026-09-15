@@ -83,8 +83,8 @@ async def fix_day2():
             (6, 2178, 1095),
             (7, 2113, 1255),
             (8, 198, 134),
-            (9, 0, 0),
-            (10, 46, 0),  # User specified: exactly 46 for 10:00 hour!
+            (9, 256, 30),  # User specified: 256 for 09:00 hour!
+            (10, 84, 15),  # User specified: 84 for 10:00 hour!
         ]
 
         total_d2_in = 0

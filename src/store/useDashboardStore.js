@@ -5,7 +5,7 @@ import { create } from "zustand";
 let initialCachedData = null;
 const initialRangeCache = {};
 
-const CACHE_VERSION = "v13_fix_inflation_loop";
+const CACHE_VERSION = "v14_day2_exact";
 try {
   if (sessionStorage.getItem("byc_cache_version") !== CACHE_VERSION) {
     sessionStorage.removeItem("byc_dashboard_cache");
@@ -128,27 +128,27 @@ export const useDashboardStore = create((set, get) => ({
       const incomingTodayIn = Number(payload.today_entries || 0);
       const incomingFestIn = Number(payload.total_visitors_festival ?? payload.festival_total_entries ?? incomingTodayIn);
 
-      if (curTodayIn > incomingTodayIn) {
+      if (curTodayIn > 0 && incomingTodayIn === 0) {
         payload.today_entries = curTodayIn;
         payload.current_occupancy = Math.max(0, curTodayIn - Number(payload.today_exits || 0));
         payload.net_flow = curTodayIn - Number(payload.today_exits || 0);
       }
-      if (curFestIn > incomingFestIn) {
+      if (curFestIn > 0 && incomingFestIn === 0) {
         payload.total_visitors_festival = curFestIn;
         payload.festival_total_entries = curFestIn;
       }
 
-      // Strict monotonic protection: Today entries, festival totals, and hourly flow buckets MUST NEVER DROP TO 0!
+      // Hourly protection: only block drop to exactly 0 (momentary glitch), allow all real corrections
       if (Array.isArray(payload.hourly_flow) && Array.isArray(curData.hourly_flow)) {
         payload.hourly_flow = payload.hourly_flow.map((bucket, idx) => {
           const curBucket = curData.hourly_flow.find((b) => b.hour === bucket.hour) || curData.hourly_flow[idx];
-          const liveIn = Math.max(bucket.entry || 0, curBucket?.entry || 0);
-          const liveOut = Math.max(bucket.exit || 0, curBucket?.exit || 0);
+          const bIn = (bucket.entry || 0) === 0 && (curBucket?.entry || 0) > 0 ? curBucket.entry : (bucket.entry || 0);
+          const bOut = (bucket.exit || 0) === 0 && (curBucket?.exit || 0) > 0 ? curBucket.exit : (bucket.exit || 0);
           return {
             ...bucket,
-            entry: liveIn,
-            exit: liveOut,
-            net_flow: liveIn - liveOut,
+            entry: bIn,
+            exit: bOut,
+            net_flow: bIn - bOut,
           };
         });
       }
