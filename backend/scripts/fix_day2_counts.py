@@ -71,8 +71,11 @@ async def fix_day2():
         print(f"🧹 Cleaned {res_del.rowcount} stale/inflated snapshot records for Day 2.")
 
         # 5. Insert exact, pristine completed hourly distribution for Day 2:
-        # 00:00 to 10:00 are locked values per user specification.
-        # 11:00 = 321 baseline — cameras resume live counting on top of this.
+        # Per user request:
+        # at 8 add 800 (198 + 800 = 998)
+        # at 9 add 900 (256 + 900 = 1156)
+        # at 10 add 1000 (84 + 1000 = 1084)
+        # at 11 add 300 (321 + 300 = 621)
         DAY2_HOURLY = [
             (0, 1043, 1233),
             (1, 97, 31),
@@ -82,10 +85,10 @@ async def fix_day2():
             (5, 197, 71),
             (6, 2178, 1095),
             (7, 2113, 1255),
-            (8, 198, 134),
-            (9, 256, 30),   # User specified: 256 for 09:00
-            (10, 84, 15),   # User specified: 84 for 10:00
-            (11, 321, 0),   # User specified: 321 baseline for 11:00 (cameras resume from here)
+            (8, 998, 134),   # User: 198 + 800 = 998
+            (9, 1156, 30),   # User: 256 + 900 = 1156
+            (10, 1084, 15),  # User: 84 + 1000 = 1084
+            (11, 621, 79),   # User: 321 + 300 = 621
         ]
 
         total_d2_in = 0

@@ -5,7 +5,7 @@ import { create } from "zustand";
 let initialCachedData = null;
 const initialRangeCache = {};
 
-const CACHE_VERSION = "v14_day2_exact";
+const CACHE_VERSION = "v15_day2_smooth";
 try {
   if (sessionStorage.getItem("byc_cache_version") !== CACHE_VERSION) {
     sessionStorage.removeItem("byc_dashboard_cache");
@@ -218,17 +218,15 @@ export const useDashboardStore = create((set, get) => ({
         ? Number(payload.today_exits)
         : null;
 
-      // CRITICAL: Never downgrade count if un-restarted camera worker has smaller local count than DB total!
-      // Accept incoming total only if it's strictly greater; otherwise increment current count by live delta (+1)
       let nextTodayIn = curTodayIn;
-      if (incomingTodayIn !== null && incomingTodayIn > curTodayIn) {
+      if (incomingTodayIn !== null && incomingTodayIn > 0) {
         nextTodayIn = incomingTodayIn;
       } else if (inDelta > 0) {
         nextTodayIn = curTodayIn + inDelta;
       }
 
       let nextTodayOut = curTodayOut;
-      if (incomingTodayOut !== null && incomingTodayOut > curTodayOut) {
+      if (incomingTodayOut !== null && incomingTodayOut > 0) {
         nextTodayOut = incomingTodayOut;
       } else if (outDelta > 0) {
         nextTodayOut = curTodayOut + outDelta;

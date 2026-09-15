@@ -571,79 +571,10 @@ class DashboardService:
                             else:
                                 _completed_hourly_cache[p.hour] = (p.entry, p.exit)
 
-                    # Only apply live delta if camera workers are actively running with live counts
-                    if live_in > 0 or live_out > 0:
-                        flow_sum = sum(p.entry for p in hourly_flow)
-                        out_flow_sum = sum(p.exit for p in hourly_flow)
-
-                        delta_live = max(0, today_in - flow_sum)
-                        delta_out = max(0, today_out - out_flow_sum)
-
-                        if delta_live > 0 or delta_out > 0:
-                            for p in hourly_flow:
-                                if p.hour == cur_h_str:
-                                    p.entry += delta_live
-                                    p.exit += delta_out
-                                    p.net_flow = p.entry - p.exit
-                                    break
-
                     # Record past completed hours into cache
                     for p in hourly_flow:
                         if p.hour != cur_h_str and (p.entry > 0 or p.exit > 0):
                             _completed_hourly_cache[p.hour] = (p.entry, p.exit)
-
-                    # Production Guarantee: Persist ONLY previous completed hour count to DB CrowdSnapshot
-                    # Do NOT persist the active current hour (it's still changing live).
-                    try:
-                        cur_hour_int = now_local.hour
-                        prev_hour_int = (cur_hour_int - 1) % 24
-                        # Only persist previous completed hour so it is durable across restarts
-                        hours_to_persist = [prev_hour_int]
-
-                        for h_int in hours_to_persist:
-                            h_str = f"{h_int:02d}:00"
-                            h_entry = next((p.entry for p in hourly_flow if p.hour == h_str), 0)
-                            h_exit = next((p.exit for p in hourly_flow if p.hour == h_str), 0)
-                            if h_entry > 0 or h_exit > 0:
-                                ts_hour_utc = datetime.combine(today_date, dtime(h_int, 30, 0), tzinfo=tz).astimezone(timezone.utc)
-                                h_profile = f"HOURLY_AUTO_{h_int:02d}"
-
-                                q_snap = select(CrowdSnapshot).where(
-                                    CrowdSnapshot.profile_id == h_profile,
-                                    CrowdSnapshot.timestamp >= start_utc,
-                                    CrowdSnapshot.timestamp < end_utc,
-                                )
-                                if target_event_id:
-                                    q_snap = q_snap.where(or_(CrowdSnapshot.event_id == target_event_id, CrowdSnapshot.event_id.is_(None)))
-                                q_snap = q_snap.limit(1)
-                                exist_snap = (await self.db.execute(q_snap)).scalars().first()
-
-                                if exist_snap:
-                                    if h_entry > 0:
-                                        exist_snap.inflow_rate = h_entry
-                                    if h_exit > 0:
-                                        exist_snap.outflow_rate = h_exit
-                                    exist_snap.people_count = max(0, exist_snap.inflow_rate - exist_snap.outflow_rate)
-                                    exist_snap.timestamp = ts_hour_utc
-                                else:
-                                    new_snap = CrowdSnapshot(
-                                        id=uuid.uuid4(),
-                                        event_id=target_event_id,
-                                        camera_code="CAM-KHB-001",
-                                        profile_id=h_profile,
-                                        timestamp=ts_hour_utc,
-                                        people_count=max(0, h_entry - h_exit),
-                                        density=0.0,
-                                        inflow_rate=h_entry,
-                                        outflow_rate=h_exit,
-                                        occupancy_percentage=0.0,
-                                        risk_level="LOW",
-                                        risk_score=0.0,
-                                    )
-                                    self.db.add(new_snap)
-                        await self.db.commit()
-                    except Exception as persist_err:
-                        logger.warning(f"[Dashboard] Hourly snapshot auto-persist warning: {persist_err}")
 
                     # Recompute peak hour accurately across all buckets
                     max_p = max(hourly_flow, key=lambda x: x.entry, default=None)
