@@ -5,7 +5,7 @@ import { create } from "zustand";
 let initialCachedData = null;
 const initialRangeCache = {};
 
-const CACHE_VERSION = "v11_23hour_added";
+const CACHE_VERSION = "v13_fix_inflation_loop";
 try {
   if (sessionStorage.getItem("byc_cache_version") !== CACHE_VERSION) {
     sessionStorage.removeItem("byc_dashboard_cache");

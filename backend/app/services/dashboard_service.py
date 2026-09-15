@@ -340,12 +340,8 @@ class DashboardService:
                 live_out += int(getattr(s, "out_count", 0) or 0)
 
         if live_in > 0 or live_out > 0:
-            if today_in > 0 and 0 < live_in < (today_in * 0.5):
-                today_in += live_in
-                today_out += live_out
-            else:
-                today_in = max(today_in, live_in)
-                today_out = max(today_out, live_out)
+            today_in = max(today_in, live_in)
+            today_out = max(today_out, live_out)
 
             today_occ = max(0, today_in - today_out)
             fest_total_in = max(fest_total_in, today_in)
@@ -560,13 +556,16 @@ class DashboardService:
                 h_items, peak_h = await self.counting_service.get_hourly_breakdown(target_event_id, target_d)
                 hourly_flow = [HourlyFlowPoint(hour=i.hour, entry=i.entry, exit=i.exit, net_flow=i.net_flow) for i in h_items]
                 if target_d == today_date:
+                    cur_h_str = f"{now_local.hour:02d}:00"
+
                     # 1. Monotonic freeze: Ensure past completed hours NEVER drop below previously tracked in memory
                     for p in hourly_flow:
-                        prev_in, prev_out = _completed_hourly_cache.get(p.hour, (0, 0))
-                        if prev_in > p.entry:
-                            p.entry = prev_in
-                            p.exit = max(p.exit, prev_out)
-                            p.net_flow = p.entry - p.exit
+                        if p.hour != cur_h_str:
+                            prev_in, prev_out = _completed_hourly_cache.get(p.hour, (0, 0))
+                            if prev_in > p.entry:
+                                p.entry = prev_in
+                                p.exit = max(p.exit, prev_out)
+                                p.net_flow = p.entry - p.exit
 
                     flow_sum = sum(p.entry for p in hourly_flow)
                     out_flow_sum = sum(p.exit for p in hourly_flow)
@@ -574,7 +573,6 @@ class DashboardService:
                     delta_live = max(0, today_in - flow_sum)
                     delta_out = max(0, today_out - out_flow_sum)
 
-                    cur_h_str = f"{now_local.hour:02d}:00"
                     if delta_live > 0 or delta_out > 0:
                         for p in hourly_flow:
                             if p.hour == cur_h_str:
@@ -583,9 +581,9 @@ class DashboardService:
                                 p.net_flow = p.entry - p.exit
                                 break
 
-                    # Record every non-zero hour into monotonic in-memory cache
+                    # Record past completed hours into monotonic in-memory cache
                     for p in hourly_flow:
-                        if p.entry > 0 or p.exit > 0:
+                        if p.hour != cur_h_str and (p.entry > 0 or p.exit > 0):
                             cur_c_in, cur_c_out = _completed_hourly_cache.get(p.hour, (0, 0))
                             _completed_hourly_cache[p.hour] = (max(cur_c_in, p.entry), max(cur_c_out, p.exit))
 
