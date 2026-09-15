@@ -141,7 +141,7 @@ export const useDashboardStore = create((set, get) => ({
       // Strict monotonic protection: Today entries, festival totals, and hourly flow buckets MUST NEVER DROP TO 0!
       if (Array.isArray(payload.hourly_flow) && Array.isArray(curData.hourly_flow)) {
         payload.hourly_flow = payload.hourly_flow.map((bucket, idx) => {
-          const curBucket = curData.hourly_flow[idx] || curData.hourly_flow.find((b) => b.hour === bucket.hour);
+          const curBucket = curData.hourly_flow.find((b) => b.hour === bucket.hour) || curData.hourly_flow[idx];
           const liveIn = Math.max(bucket.entry || 0, curBucket?.entry || 0);
           const liveOut = Math.max(bucket.exit || 0, curBucket?.exit || 0);
           return {
