@@ -24,6 +24,7 @@ services:
     volumes:
       - ./media:/app/media
       - ./data:/app/data
+      - ./app:/app/app
     networks:
       - byc_network
 

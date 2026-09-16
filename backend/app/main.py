@@ -295,43 +295,48 @@ async def get_static_crop_photo(filename: str):
         return FileResponse(str(fallback_crops[0]))
     raise HTTPException(status_code=404, detail="Crop photo not found")
 
+_photo_cache: dict[str, str] = {}
+
 @app.get("/static/enrollment/{filename:path}")
 async def get_static_enrollment_photo(filename: str):
+    # 0. Check in-memory cache for 0ms lookup
+    if filename in _photo_cache:
+        cached_p = _photo_cache[filename]
+        if os.path.isfile(cached_p):
+            return FileResponse(cached_p)
+
     # 1. Direct path match
     for base in [_ENROLLMENT_DIR, _BACKEND_DIR / "backend" / "data" / "enrollment"]:
         if not base.is_dir():
             continue
         p = base / filename
         if p.is_file():
+            _photo_cache[filename] = str(p)
             return FileResponse(str(p))
 
-    # 2. Match by stem / ID recursively (e.g. 68122, ram, 76643) even if nested in subfolders
-    stem = _Path(filename).stem.lower().strip()
-    if "_" in stem and not stem.isdigit():
-        stem_clean = stem.split("_")[0]
-    else:
-        stem_clean = stem
+    # 2. Extract clean stem / ID (e.g. '76730.jpg' -> '76730', 'wl-76730.jpg' -> '76730')
+    raw_stem = _Path(filename).stem.lower().strip()
+    stem = raw_stem[3:] if raw_stem.startswith("wl-") else raw_stem
+    stem_clean = stem.split("_")[0] if ("_" in stem and not stem.isdigit()) else stem
 
+    # 3. Fast case-insensitive recursive walk across enrollment directories
     for base in [_ENROLLMENT_DIR, _BACKEND_DIR / "backend" / "data" / "enrollment"]:
         if not base.is_dir():
             continue
-        for ext in [".jpg", ".jpeg", ".png", ".JPG", ".JPEG", ".PNG"]:
-            exact = base / f"{stem}{ext}"
-            if exact.is_file():
-                return FileResponse(str(exact))
-            if stem_clean != stem:
-                exact2 = base / f"{stem_clean}{ext}"
-                if exact2.is_file():
-                    return FileResponse(str(exact2))
-
-        # Recursive search in case 2019 dataset is organized in month subfolders
-        try:
-            matches = list(base.rglob(f"{stem}*.*")) or list(base.rglob(f"{stem_clean}*.*"))
-            for m in matches:
-                if m.is_file() and m.suffix.lower() in [".jpg", ".jpeg", ".png"]:
-                    return FileResponse(str(m))
-        except Exception:
-            pass
+        base_str = str(base)
+        for root, _, files in os.walk(base_str):
+            for f in files:
+                f_lower = f.lower()
+                if f_lower.endswith((".jpg", ".jpeg", ".png")):
+                    f_stem = _Path(f).stem.lower().strip()
+                    # Check exact match or starts with ID (e.g. '76730 (1).jpg' matches '76730')
+                    if (f_stem == stem or f_stem == stem_clean or
+                        f_stem.startswith(stem) or f_stem.startswith(stem_clean) or
+                        (len(stem) >= 4 and stem in f_stem)):
+                        full_p = os.path.join(root, f)
+                        if os.path.isfile(full_p):
+                            _photo_cache[filename] = full_p
+                            return FileResponse(full_p)
 
     raise HTTPException(status_code=404, detail="Enrollment photo not found")
 
