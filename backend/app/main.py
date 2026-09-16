@@ -254,7 +254,7 @@ _CROPS_DIR = _BACKEND_DIR / "data" / "crops"
 _ENROLLMENT_DIR.mkdir(parents=True, exist_ok=True)
 _CROPS_DIR.mkdir(parents=True, exist_ok=True)
 
-@app.get("/static/crops/{filename:path}")
+@app.api_route("/static/crops/{filename:path}", methods=["GET", "HEAD"])
 async def get_static_crop_photo(filename: str):
     # 1. Primary crops dir
     p1 = _CROPS_DIR / filename
@@ -297,7 +297,7 @@ async def get_static_crop_photo(filename: str):
 
 _photo_cache: dict[str, str] = {}
 
-@app.get("/static/enrollment/{filename:path}")
+@app.api_route("/static/enrollment/{filename:path}", methods=["GET", "HEAD"])
 async def get_static_enrollment_photo(filename: str):
     # 0. Check in-memory cache for 0ms lookup
     if filename in _photo_cache:
@@ -339,9 +339,6 @@ async def get_static_enrollment_photo(filename: str):
                             return FileResponse(full_p)
 
     raise HTTPException(status_code=404, detail="Enrollment photo not found")
-
-app.mount("/static/enrollment", StaticFiles(directory=str(_ENROLLMENT_DIR)), name="enrollment_photos")
-app.mount("/static/crops", StaticFiles(directory=str(_CROPS_DIR)), name="crop_photos")
 
 
 
