@@ -114,12 +114,22 @@ class FRSService:
 
         results = []
         for c in candidates:
-            ref_img = c.reference_profile.reference_image_path if c.reference_profile else "/media/frs/reference/default.jpg"
-            ref_name = c.reference_profile.display_name if c.reference_profile else "Authorized Reference Profile"
-            ref_id = c.reference_profile.reference_id if c.reference_profile else "REF-001"
+            guessed_name = ""
+            if c.detected_image_path and "crop_" in c.detected_image_path:
+                try:
+                    parts = os.path.basename(c.detected_image_path).replace("crop_", "").split("_")
+                    if parts and parts[0]:
+                        guessed_name = parts[0].upper()
+                except Exception:
+                    pass
+
+            ref_name = c.reference_profile.display_name if c.reference_profile else (guessed_name or "Watchlist Suspect")
+            ref_id = c.reference_profile.reference_id if c.reference_profile else (f"WL-{guessed_name}" if guessed_name else f"WL-{c.candidate_code[:8]}")
+            ref_img = (c.reference_profile.reference_image_path if (c.reference_profile and c.reference_profile.reference_image_path)
+                       else (f"/static/enrollment/{guessed_name.lower()}.jpg" if guessed_name else ""))
             ref_cat = c.reference_profile.category if c.reference_profile else "Authorized Watchlist"
             ref_stat = c.reference_profile.status if c.reference_profile else "ACTIVE"
-            ref_upd = c.reference_profile.last_updated_date if c.reference_profile else "10 Sep 2026"
+            ref_upd = c.reference_profile.last_updated_date if c.reference_profile else "16 Sep 2026"
 
             results.append(
                 FRSCandidateRead(
@@ -164,9 +174,19 @@ class FRSService:
                 detail={"code": "FRS_CANDIDATE_NOT_FOUND", "message": f"Candidate {code} not found"},
             )
 
-        ref_img = c.reference_profile.reference_image_path if c.reference_profile else "/media/frs/reference/default.jpg"
-        ref_name = c.reference_profile.display_name if c.reference_profile else "Authorized Reference Profile"
-        ref_id = c.reference_profile.reference_id if c.reference_profile else "REF-001"
+        guessed_name = ""
+        if c.detected_image_path and "crop_" in c.detected_image_path:
+            try:
+                parts = os.path.basename(c.detected_image_path).replace("crop_", "").split("_")
+                if parts and parts[0]:
+                    guessed_name = parts[0].upper()
+            except Exception:
+                pass
+
+        ref_img = (c.reference_profile.reference_image_path if (c.reference_profile and c.reference_profile.reference_image_path)
+                   else (f"/static/enrollment/{guessed_name.lower()}.jpg" if guessed_name else ""))
+        ref_name = c.reference_profile.display_name if c.reference_profile else (guessed_name or "Watchlist Suspect")
+        ref_id = c.reference_profile.reference_id if c.reference_profile else (f"WL-{guessed_name}" if guessed_name else f"WL-{c.candidate_code[:8]}")
 
         return FRSCandidateRead(
             id=c.candidate_code,

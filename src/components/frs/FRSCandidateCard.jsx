@@ -16,6 +16,7 @@ export default function FRSCandidateCard({ candidate, onReviewUpdated }) {
   const navigate = useNavigate();
   const [showHDModal, setShowHDModal] = useState(false);
   const [showReviewModal, setShowReviewModal] = useState(false);
+  const [refImgError, setRefImgError] = useState(false);
 
   if (!candidate) return null;
 
@@ -225,11 +226,20 @@ export default function FRSCandidateCard({ candidate, onReviewUpdated }) {
                 onClick={() => setShowHDModal(true)}
                 title="Click to open HD reference viewer"
               >
-                <img
-                  src={getImageUrl(candidate.referenceImage || candidate.reference_image)}
-                  alt={candidate.referenceName || candidate.reference_name}
-                  style={{ width: "100%", height: "100%", objectFit: "cover" }}
-                />
+                {refImgError || !(candidate.referenceImage || candidate.reference_image) ? (
+                  <div style={{ width: "100%", height: "100%", display: "flex", flexDirection: "column", alignItems: "center", justifyContent: "center", background: "rgba(255,255,255,0.03)", padding: 10, textAlign: "center" }}>
+                    <i className="bi bi-person-badge" style={{ fontSize: 36, color: "var(--cc-text-muted)", marginBottom: 6 }} />
+                    <span style={{ fontSize: 10, fontWeight: 700, color: "var(--cc-text-secondary)" }}>{candidate.referenceName || "WATCHLIST ARCHIVE"}</span>
+                    <span style={{ fontSize: 9, color: "var(--cc-text-muted)", marginTop: 2 }}>{candidate.referenceId || "ID #"}</span>
+                  </div>
+                ) : (
+                  <img
+                    src={getImageUrl(candidate.referenceImage || candidate.reference_image)}
+                    alt={candidate.referenceName || candidate.reference_name}
+                    style={{ width: "100%", height: "100%", objectFit: "cover" }}
+                    onError={() => setRefImgError(true)}
+                  />
+                )}
                 <div
                   style={{
                     position: "absolute",

@@ -297,21 +297,42 @@ async def get_static_crop_photo(filename: str):
 
 @app.get("/static/enrollment/{filename:path}")
 async def get_static_enrollment_photo(filename: str):
-    p1 = _ENROLLMENT_DIR / filename
-    if p1.is_file():
-        return FileResponse(str(p1))
-    p2 = _BACKEND_DIR / "backend" / "data" / "enrollment" / filename
-    if p2.is_file():
-        return FileResponse(str(p2))
-    # Match by person name
-    clean_name = filename.lower()
-    for known in ["ram", "satish", "divya", "nagesh"]:
-        if known in clean_name:
-            for search_dir in [_ENROLLMENT_DIR, _BACKEND_DIR / "backend" / "data" / "enrollment"]:
-                if search_dir.is_dir():
-                    matches = [f for f in search_dir.glob(f"*{known}*.*") if f.is_file()]
-                    if matches:
-                        return FileResponse(str(matches[0]))
+    # 1. Direct path match
+    for base in [_ENROLLMENT_DIR, _BACKEND_DIR / "backend" / "data" / "enrollment"]:
+        if not base.is_dir():
+            continue
+        p = base / filename
+        if p.is_file():
+            return FileResponse(str(p))
+
+    # 2. Match by stem / ID recursively (e.g. 68122, ram, 76643) even if nested in subfolders
+    stem = _Path(filename).stem.lower().strip()
+    if "_" in stem and not stem.isdigit():
+        stem_clean = stem.split("_")[0]
+    else:
+        stem_clean = stem
+
+    for base in [_ENROLLMENT_DIR, _BACKEND_DIR / "backend" / "data" / "enrollment"]:
+        if not base.is_dir():
+            continue
+        for ext in [".jpg", ".jpeg", ".png", ".JPG", ".JPEG", ".PNG"]:
+            exact = base / f"{stem}{ext}"
+            if exact.is_file():
+                return FileResponse(str(exact))
+            if stem_clean != stem:
+                exact2 = base / f"{stem_clean}{ext}"
+                if exact2.is_file():
+                    return FileResponse(str(exact2))
+
+        # Recursive search in case 2019 dataset is organized in month subfolders
+        try:
+            matches = list(base.rglob(f"{stem}*.*")) or list(base.rglob(f"{stem_clean}*.*"))
+            for m in matches:
+                if m.is_file() and m.suffix.lower() in [".jpg", ".jpeg", ".png"]:
+                    return FileResponse(str(m))
+        except Exception:
+            pass
+
     raise HTTPException(status_code=404, detail="Enrollment photo not found")
 
 app.mount("/static/enrollment", StaticFiles(directory=str(_ENROLLMENT_DIR)), name="enrollment_photos")

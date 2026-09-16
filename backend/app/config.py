@@ -46,7 +46,7 @@ class Settings(BaseSettings):
     PREDICTIONS_ENABLED: bool = True
 
     # FRS Production Thresholds
-    FRS_MATCH_THRESHOLD: float = 0.65
+    FRS_MATCH_THRESHOLD: float = 0.72
     FRS_DET_THRESHOLD: float = 0.50
     FRS_MIN_FACE_SIZE: int = 60
     FRS_MIN_SHARPNESS: float = 45.0

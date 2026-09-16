@@ -47,7 +47,8 @@ services:
       - USE_CUDA=true
       - MODEL_NAME=buffalo_l
       - DET_SIZE=640
-      - MATCH_THRESHOLD=0.60
+      - MATCH_THRESHOLD=0.72
+      - FRS_MATCH_THRESHOLD=0.72
       - FRS_ENABLED=true
       - AI_ENABLED=true
 

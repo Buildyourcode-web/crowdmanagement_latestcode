@@ -276,14 +276,14 @@ async def _emit_frs_event(event_type: str, payload: dict):
 
 try:
     from app.config import settings
-    MATCH_THRESHOLD = float(getattr(settings, "FRS_MATCH_THRESHOLD", 0.65))
+    MATCH_THRESHOLD = float(getattr(settings, "FRS_MATCH_THRESHOLD", 0.72))
     MIN_FACE_SIZE = int(getattr(settings, "FRS_MIN_FACE_SIZE", 60))
     MIN_SHARPNESS_SCORE = float(getattr(settings, "FRS_MIN_SHARPNESS", 45.0))
     MAX_POSE_YAW_DEG = float(getattr(settings, "FRS_MAX_YAW_ANGLE", 35.0))
     MAX_POSE_PITCH_DEG = 30.0
     MIN_DET_CONFIDENCE = float(getattr(settings, "FRS_DET_THRESHOLD", 0.50))
 except Exception:
-    MATCH_THRESHOLD = float(os.getenv("FRS_MATCH_THRESHOLD", "0.65"))
+    MATCH_THRESHOLD = float(os.getenv("FRS_MATCH_THRESHOLD", "0.72"))
     MIN_FACE_SIZE = int(os.getenv("MIN_FACE_WIDTH", "60"))
     MIN_SHARPNESS_SCORE = float(os.getenv("MIN_SHARPNESS_SCORE", "45.0"))
     MAX_POSE_YAW_DEG = float(os.getenv("MAX_POSE_YAW_DEG", "35.0"))
@@ -990,8 +990,8 @@ class RTSPCameraWorker:
 
                             h, w = frame_to_process.shape[:2]
                             fw, fh = tx2 - tx1, ty2 - ty1
-                            pad_x = int(fw * 0.25)
-                            pad_y = int(fh * 0.25)
+                            pad_x = int(fw * 0.35)
+                            pad_y = int(fh * 0.35)
                             cx1, cy1 = max(0, tx1 - pad_x), max(0, ty1 - pad_y)
                             cx2, cy2 = min(w, tx2 + pad_x), min(h, ty2 + pad_y)
                             crop = frame_to_process[cy1:cy2, cx1:cx2]
@@ -1124,7 +1124,19 @@ class RTSPCameraWorker:
                                             ).limit(1)
                                         )
                                         prof = prof_q.scalars().first()
-                                        prof_id = prof.id if prof else None
+                                        if not prof:
+                                            prof = FRSReferenceProfile(
+                                                reference_id=f"WL-{person_clean.upper()}",
+                                                reference_code=f"WL-{person_clean.upper()}",
+                                                display_name=person_clean,
+                                                category="Pickpocket Watchlist" if _is_pickpocket else "Authorized Watchlist",
+                                                status="ACTIVE",
+                                                active=True,
+                                                reference_image_path=ref_img_url,
+                                            )
+                                            pg_db.add(prof)
+                                            await pg_db.flush()
+                                        prof_id = prof.id
 
                                         cand = FRSCandidate(
                                             candidate_code=cand_code,
