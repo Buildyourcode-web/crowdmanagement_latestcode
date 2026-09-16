@@ -56,9 +56,13 @@ export default function FRSCandidateCard({ candidate, onReviewUpdated }) {
           }}
         >
           <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
-            <i className="bi bi-person-bounding-box" style={{ color: "var(--cc-accent)", fontSize: 16 }} />
-            <span style={{ fontSize: 12, fontWeight: 800, letterSpacing: "0.05em", color: "var(--cc-text-primary)" }}>
-              {candidate.category === "Missing Person Registry" ? "POSSIBLE MISSING PERSON CANDIDATE" : "POSSIBLE WATCHLIST MATCH"}
+            <i className="bi bi-person-bounding-box" style={{ color: candidate.category === "Pickpocket Watchlist" ? "var(--cc-red)" : "var(--cc-accent)", fontSize: 16 }} />
+            <span style={{ fontSize: 12, fontWeight: 800, letterSpacing: "0.05em", color: candidate.category === "Pickpocket Watchlist" ? "var(--cc-red)" : "var(--cc-text-primary)" }}>
+              {candidate.category === "Missing Person Registry"
+                ? "POSSIBLE MISSING PERSON CANDIDATE"
+                : candidate.category === "Pickpocket Watchlist"
+                ? "🚨 PICKPOCKET WATCHLIST ALERT"
+                : "POSSIBLE WATCHLIST MATCH"}
             </span>
           </div>
 
@@ -70,9 +74,9 @@ export default function FRSCandidateCard({ candidate, onReviewUpdated }) {
                 letterSpacing: "0.08em",
                 padding: "2px 7px",
                 borderRadius: "var(--cc-radius-sm)",
-                background: candidate.priority === "HIGH" ? "var(--cc-red-dim)" : "var(--cc-yellow-dim)",
-                color: candidate.priority === "HIGH" ? "var(--cc-red)" : "var(--cc-yellow)",
-                border: `1px solid ${candidate.priority === "HIGH" ? "var(--cc-red-border)" : "var(--cc-yellow-border)"}`,
+                background: (candidate.priority === "HIGH" || candidate.priority === "CRITICAL") ? "var(--cc-red-dim)" : "var(--cc-yellow-dim)",
+                color: (candidate.priority === "HIGH" || candidate.priority === "CRITICAL") ? "var(--cc-red)" : "var(--cc-yellow)",
+                border: `1px solid ${(candidate.priority === "HIGH" || candidate.priority === "CRITICAL") ? "var(--cc-red-border)" : "var(--cc-yellow-border)"}`,
               }}
             >
               {candidate.priority} PRIORITY

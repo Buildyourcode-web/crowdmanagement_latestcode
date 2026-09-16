@@ -34,7 +34,7 @@ class CandidateMatch:
 class CandidateMatcher:
     """Biometric gallery index and similarity searcher."""
 
-    def __init__(self, match_threshold: float = 0.75, top_k: int = 3):
+    def __init__(self, match_threshold: float = 0.65, top_k: int = 3):
         self.match_threshold = match_threshold
         self.top_k = top_k
         self._gallery_matrix: Optional[np.ndarray] = None

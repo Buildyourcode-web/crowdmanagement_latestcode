@@ -45,6 +45,13 @@ class Settings(BaseSettings):
     RTSP_ENABLED: bool = False
     PREDICTIONS_ENABLED: bool = True
 
+    # FRS Production Thresholds
+    FRS_MATCH_THRESHOLD: float = 0.65
+    FRS_DET_THRESHOLD: float = 0.50
+    FRS_MIN_FACE_SIZE: int = 60
+    FRS_MIN_SHARPNESS: float = 45.0
+    FRS_MAX_YAW_ANGLE: float = 35.0
+
     model_config = SettingsConfigDict(
         env_file=".env",
         env_file_encoding="utf-8",

@@ -51,6 +51,13 @@ class FRSRepository(BaseRepository[FRSCandidate]):
         result = await self.db.execute(stmt)
         return list(result.scalars().all()), total
 
+    async def count_reference_profiles(self, active_only: bool = True) -> int:
+        stmt = select(func.count(FRSReferenceProfile.id))
+        if active_only:
+            stmt = stmt.where(FRSReferenceProfile.status == "ACTIVE")
+        result = await self.db.execute(stmt)
+        return result.scalar() or 0
+
     async def list_reference_profiles(self, active_only: bool = False) -> List[FRSReferenceProfile]:
         stmt = select(FRSReferenceProfile)
         if active_only:

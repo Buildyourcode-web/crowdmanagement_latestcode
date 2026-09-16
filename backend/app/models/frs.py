@@ -40,7 +40,7 @@ class FRSReferenceProfile(Base, UUIDMixin, TimestampMixin):
         if "embedding_version" not in kwargs:
             self.embedding_version = "1.0.0"
         if "last_updated_date" not in kwargs:
-            self.last_updated_date = "10 Sep 2026"
+            self.last_updated_date = datetime.now(timezone.utc).strftime("%d %b %Y")
 
 
 class FRSCandidate(Base, UUIDMixin, TimestampMixin):
@@ -72,13 +72,13 @@ class FRSCandidate(Base, UUIDMixin, TimestampMixin):
         index=True,
         nullable=False,
     )
-    date_str: Mapped[str] = mapped_column(String(50), default="14 Sep 2026", nullable=False)
-    time_str: Mapped[str] = mapped_column(String(50), default="19:42:18", nullable=False)
+    date_str: Mapped[str] = mapped_column(String(50), default=lambda: datetime.now(timezone.utc).strftime("%d %b %Y"), nullable=False)
+    time_str: Mapped[str] = mapped_column(String(50), default=lambda: datetime.now(timezone.utc).strftime("%H:%M:%S"), nullable=False)
     
     status: Mapped[str] = mapped_column(String(50), default="REVIEW_REQUIRED", index=True, nullable=False)
     review_required: Mapped[bool] = mapped_column(Boolean, default=True, nullable=False)
     priority: Mapped[str] = mapped_column(String(20), default="HIGH", nullable=False)
-    image_quality: Mapped[str] = mapped_column(String(50), default="High (94%)", nullable=False)
+    image_quality: Mapped[str] = mapped_column(String(50), default="Standard", nullable=False)
     
     timeline: Mapped[Any] = mapped_column(JSON, default=list, nullable=False)
     officer_notes: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
@@ -104,19 +104,20 @@ class FRSCandidate(Base, UUIDMixin, TimestampMixin):
         if "priority" not in kwargs:
             self.priority = "HIGH"
         if "image_quality" not in kwargs:
-            self.image_quality = "High (94%)"
+            self.image_quality = "Standard"
         if "timeline" not in kwargs:
             self.timeline = []
         if "model_version" not in kwargs:
             self.model_version = "buffalo_l"
         if "embedding_model_version" not in kwargs:
             self.embedding_model_version = "insightface-r50"
+        now_dt = datetime.now(timezone.utc)
         if "date_str" not in kwargs:
-            self.date_str = "14 Sep 2026"
+            self.date_str = now_dt.strftime("%d %b %Y")
         if "time_str" not in kwargs:
-            self.time_str = "19:42:18"
+            self.time_str = now_dt.strftime("%H:%M:%S")
         if "detected_at" not in kwargs:
-            self.detected_at = datetime.now(timezone.utc)
+            self.detected_at = now_dt
 
 
 class FRSReview(Base, UUIDMixin, TimestampMixin):
@@ -124,7 +125,7 @@ class FRSReview(Base, UUIDMixin, TimestampMixin):
 
     candidate_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), ForeignKey("frs_candidates.id"), nullable=False)
     reviewer_id: Mapped[Optional[uuid.UUID]] = mapped_column(UUID(as_uuid=True), ForeignKey("users.id"), nullable=True)
-    reviewer_name: Mapped[str] = mapped_column(String(100), default="Cmd Officer Sharma", nullable=False)
+    reviewer_name: Mapped[str] = mapped_column(String(100), default="Duty Review Officer", nullable=False)
     
     decision: Mapped[str] = mapped_column(String(50), nullable=False)
     notes: Mapped[Optional[str]] = mapped_column(Text, nullable=True)

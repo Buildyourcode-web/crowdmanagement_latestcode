@@ -149,11 +149,11 @@ class FaceQualityAssessor:
             pitch, yaw, roll = float(pose[0]), float(pose[1]), float(pose[2])
 
         is_blurry = blur_score < self.min_sharpness
-        is_too_small = fw < self.min_width
-        is_extreme_pose = abs(yaw) > self.max_yaw
+        is_too_small = fw < self.min_width or fh < self.min_width
+        is_extreme_pose = abs(yaw) > self.max_yaw or abs(pitch) > 30.0
 
-        # Extreme lighting check (underexposed < 20 or overexposed > 235)
-        is_bad_exposure = brightness < 20.0 or brightness > 235.0
+        # Extreme lighting check (underexposed < 25 or overexposed > 230)
+        is_bad_exposure = brightness < 25.0 or brightness > 230.0
 
         is_usable = not (is_blurry or is_too_small or is_extreme_pose or is_bad_exposure)
 

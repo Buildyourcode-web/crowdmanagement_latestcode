@@ -274,7 +274,22 @@ async def _emit_frs_event(event_type: str, payload: dict):
 # RTSP Camera Worker thread
 # ---------------------------------------------------------------------------
 
-MATCH_THRESHOLD = 0.60
+try:
+    from app.config import settings
+    MATCH_THRESHOLD = float(getattr(settings, "FRS_MATCH_THRESHOLD", 0.65))
+    MIN_FACE_SIZE = int(getattr(settings, "FRS_MIN_FACE_SIZE", 60))
+    MIN_SHARPNESS_SCORE = float(getattr(settings, "FRS_MIN_SHARPNESS", 45.0))
+    MAX_POSE_YAW_DEG = float(getattr(settings, "FRS_MAX_YAW_ANGLE", 35.0))
+    MAX_POSE_PITCH_DEG = 30.0
+    MIN_DET_CONFIDENCE = float(getattr(settings, "FRS_DET_THRESHOLD", 0.50))
+except Exception:
+    MATCH_THRESHOLD = float(os.getenv("FRS_MATCH_THRESHOLD", "0.65"))
+    MIN_FACE_SIZE = int(os.getenv("MIN_FACE_WIDTH", "60"))
+    MIN_SHARPNESS_SCORE = float(os.getenv("MIN_SHARPNESS_SCORE", "45.0"))
+    MAX_POSE_YAW_DEG = float(os.getenv("MAX_POSE_YAW_DEG", "35.0"))
+    MAX_POSE_PITCH_DEG = float(os.getenv("MAX_POSE_PITCH_DEG", "30.0"))
+    MIN_DET_CONFIDENCE = float(os.getenv("MIN_DET_CONFIDENCE", "0.50"))
+
 DET_SIZE = (640, 640)
 
 # Shared singleton FRS (InsightFace) components — these are model-level singletons
@@ -307,13 +322,47 @@ def get_shared_engine():
             if FaceModel is not None:
                 _shared_face_model = FaceModel()
                 _shared_matcher = IdentityMatcher(threshold=MATCH_THRESHOLD)
+
+                # ── Step 1: Try loading pre-built FAISS index from disk (instant) ──
+                _prebuilt_index = _PKG_BACKEND_DIR / "data" / "frs_gallery" / "gallery_2019.index"
+                index_loaded = False
+                if _prebuilt_index.exists():
+                    try:
+                        ok = _shared_matcher.load_faiss_index(str(_prebuilt_index))
+                        if ok:
+                            logger.info(
+                                f"[FRS-Engine] ✅ Pre-built FAISS index loaded: "
+                                f"{_shared_matcher._faiss_index.ntotal if _shared_matcher._faiss_index else 0} vectors "
+                                f"from {_prebuilt_index.name}"
+                            )
+                            index_loaded = True
+                    except Exception as ex:
+                        logger.warning(f"[FRS-Engine] Pre-built FAISS index load failed: {ex}")
+
+                # ── Step 2: Load gallery from DB (always — for metadata + fallback) ──
                 try:
                     embeddings, ids, names = db.load_all_embeddings()
                     if embeddings:
-                        _shared_matcher.load_gallery(embeddings, ids, names)
-                        logger.info(f"[FRS-Engine] Shared gallery loaded: {len(names)} identities ({set(names)})")
+                        if index_loaded:
+                            # FAISS already loaded from disk — just populate the gallery metadata
+                            # so IdentityMatcher.gallery has person info for display names
+                            _shared_matcher.gallery.load_from_flat_lists(embeddings, ids, names)
+                            logger.info(
+                                f"[FRS-Engine] Gallery metadata loaded: {len(names)} identities "
+                                f"(FAISS index retained from disk)"
+                            )
+                        else:
+                            # No pre-built index — full load + FAISS rebuild
+                            _shared_matcher.load_gallery(embeddings, ids, names)
+                            logger.info(
+                                f"[FRS-Engine] Gallery loaded + FAISS rebuilt: "
+                                f"{len(names)} identities"
+                            )
+                    else:
+                        logger.warning("[FRS-Engine] No embeddings found in DB — gallery is empty")
                 except Exception as e:
                     logger.warning(f"[FRS-Engine] Gallery load warning: {e}")
+
         return _shared_face_model, _shared_matcher
 
 
@@ -825,12 +874,66 @@ class RTSPCameraWorker:
                 frame_counter += 1
                 try:
                     with _shared_engine_lock:
-                        faces = face_model.detect_faces(frame_to_process)
+                        raw_faces = face_model.detect_faces(frame_to_process)
                 except Exception as e:
                     time.sleep(0.05)
                     continue
 
-                # Update FaceTracker with detected faces for continuous, smooth tracking
+                # ── Strict Face Quality & Recognizability Gate ────────────────
+                # Detect and compare ONLY clearly visible faces.
+                # Ignore small (<MIN_FACE_SIZE px), blurry (<MIN_SHARPNESS_SCORE),
+                # low confidence (<MIN_DET_CONFIDENCE), extreme pose (>35° yaw, >30° pitch),
+                # or poorly illuminated faces before tracking and matching.
+                faces = []
+                h_frame, w_frame = frame_to_process.shape[:2]
+                for f in raw_faces:
+                    fx1, fy1, fx2, fy2 = [int(v) for v in f.bbox]
+                    fw = fx2 - fx1
+                    fh = fy2 - fy1
+
+                    # 1. Size Gate: Ignore small distant faces
+                    if fw < MIN_FACE_SIZE or fh < MIN_FACE_SIZE:
+                        continue
+
+                    # 2. Confidence Gate: Ignore weak / ambiguous detections
+                    det_score = getattr(f, "det_score", 0.0)
+                    if det_score < MIN_DET_CONFIDENCE:
+                        continue
+
+                    # 3. Pose Gate: Ignore extreme side-profile or tilted faces (not recognizable)
+                    pose = getattr(f, "pose", None)
+                    if pose is not None and len(pose) >= 3:
+                        pitch, yaw, roll = float(pose[0]), float(pose[1]), float(pose[2])
+                        if abs(yaw) > MAX_POSE_YAW_DEG or abs(pitch) > MAX_POSE_PITCH_DEG:
+                            continue
+
+                    # 4. Extract Crop for Visual Quality Assessment
+                    cx1 = max(0, min(fx1, w_frame - 1))
+                    cy1 = max(0, min(fy1, h_frame - 1))
+                    cx2 = max(cx1 + 1, min(fx2, w_frame))
+                    cy2 = max(cy1 + 1, min(fy2, h_frame))
+                    crop = frame_to_process[cy1:cy2, cx1:cx2]
+                    if crop.size == 0:
+                        continue
+
+                    gray_crop = cv2.cvtColor(crop, cv2.COLOR_RGB2GRAY)
+
+                    # 5. Blur Gate: Ignore motion-blurred or out-of-focus faces (Laplacian variance)
+                    blur_score = float(cv2.Laplacian(gray_crop, cv2.CV_64F).var())
+                    if blur_score < MIN_SHARPNESS_SCORE:
+                        continue
+
+                    # 6. Illumination Gate: Ignore silhouettes (<25) and blinding glare (>230)
+                    brightness = float(np.mean(gray_crop))
+                    if brightness < 25.0 or brightness > 230.0:
+                        continue
+
+                    f.extra["blur_score"] = blur_score
+                    f.extra["brightness"] = brightness
+                    faces.append(f)
+                # ──────────────────────────────────────────────────────────────
+
+                # Update FaceTracker with ONLY clearly visible, verified faces
                 active_tracks = tracker.update(faces, frame_counter)
                 new_boxes = []
                 now_ts = time.time()
@@ -841,8 +944,8 @@ class RTSPCameraWorker:
                         continue
 
                     tx1, ty1, tx2, ty2 = [int(v) for v in track.bbox]
-                    # Allow distant faces down to 14px
-                    if (tx2 - tx1) < 14 or (ty2 - ty1) < 14:
+                    # Strictly ignore tracks smaller than MIN_FACE_SIZE
+                    if (tx2 - tx1) < MIN_FACE_SIZE or (ty2 - ty1) < MIN_FACE_SIZE:
                         continue
 
                     # Find if any face detection corresponds to this track in current frame
@@ -981,6 +1084,32 @@ class RTSPCameraWorker:
                                 "bbox": [tx1, ty1, tx2, ty2],
                             }
 
+                            # ── Pickpocket watchlist: elevate to CRITICAL ──────────────────
+                            _is_pickpocket = False
+                            try:
+                                from app.frs_engine.database import repository as _db_ref
+                                p_info = _db_ref.get_person_by_name(person_clean)
+                                if p_info and p_info.get("category") == "pickpocket_watchlist":
+                                    _is_pickpocket = True
+                            except Exception:
+                                pass
+                            if _is_pickpocket:
+                                payload["category"] = "Pickpocket Watchlist"
+                                payload["priority"] = "CRITICAL"
+                                payload["status"] = "IMMEDIATE_ACTION"
+                                payload["alertType"] = "PICKPOCKET_DETECTED"
+                                payload["alert_type"] = "PICKPOCKET_DETECTED"
+                                payload["alertMessage"] = (
+                                    f"⚠️ PICKPOCKET ALERT: {person_clean} detected at {self.state.name}!"
+                                )
+                                logger.warning(
+                                    f"[FRS-ALERT] 🚨 PICKPOCKET DETECTED: {person_clean} "
+                                    f"({match_pct}%) at camera {self.state.camera_id}"
+                                )
+                                # Emit dedicated high-priority alert event
+                                _emit_frs_event_threadsafe("frs_pickpocket_alert", payload)
+                            # ─────────────────────────────────────────────────────────────────
+
                             logger.info(f"[FRS-Worker:{self.state.camera_id}] MATCH: {person_clean} ({match_pct}%) -> Broadcast & Save")
 
                             async def _persist():
@@ -1026,18 +1155,18 @@ class RTSPCameraWorker:
 
                             _emit_frs_event_threadsafe("frs_candidate", payload)
                     else:
-                        # Unmatched / scanning face: ALWAYS show detection bounding box so every person is detected!
+                        # Unmatched clear face: Show verified clear face label
                         conf_val = track.candidate_similarity if track.candidate_similarity > 0.0 else 0.85
                         det_pct = round(max(0.35, min(0.99, conf_val)) * 100)
                         new_boxes.append({
                             "bbox": [tx1, ty1, tx2, ty2],
-                            "label": f"FACE SCANNING {det_pct}%",
+                            "label": f"CLEAR FACE {det_pct}%",
                             "is_match": False,
                             "expiry": now_ts + 1.2,
                         })
                         rendered_bboxes.append((tx1, ty1, tx2, ty2))
 
-                # Safety fallback: If any face detected by model was missed by tracker, render it directly
+                # Safety fallback: If any clear face detected by model was missed by tracker, render it directly
                 for face in faces:
                     fx1, fy1, fx2, fy2 = [int(v) for v in face.bbox]
                     already_rendered = False
@@ -1050,7 +1179,7 @@ class RTSPCameraWorker:
                         det_pct = round(float(det_score) * 100)
                         new_boxes.append({
                             "bbox": [fx1, fy1, fx2, fy2],
-                            "label": f"FACE SCANNING {det_pct}%",
+                            "label": f"CLEAR FACE {det_pct}%",
                             "is_match": False,
                             "expiry": now_ts + 1.2,
                         })

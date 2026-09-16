@@ -172,22 +172,28 @@ def get_person_by_name(name: str) -> Optional[dict]:
         try:
             sconn = sqlite3.connect(sp)
             scur = sconn.cursor()
-            scur.execute("SELECT id, name, created_at FROM people WHERE LOWER(name) = LOWER(?) LIMIT 1", (name,))
+            scur.execute(
+                "SELECT id, name, category, created_at FROM people WHERE LOWER(name) = LOWER(?) LIMIT 1",
+                (name,)
+            )
             row = scur.fetchone()
             sconn.close()
             if row:
-                return {"id": row[0], "name": row[1], "created_at": row[2]}
+                return {"id": row[0], "name": row[1], "category": row[2] or "general", "created_at": row[3]}
         except Exception:
             pass
 
     try:
         pg = _get_pg_conn()
         cur = pg.cursor()
-        cur.execute("SELECT id, name, created_at FROM people WHERE LOWER(name) = LOWER(%s) LIMIT 1", (name,))
+        cur.execute(
+            "SELECT id, name, created_at FROM people WHERE LOWER(name) = LOWER(%s) LIMIT 1",
+            (name,)
+        )
         row = cur.fetchone()
         pg.close()
         if row:
-            return {"id": row[0], "name": row[1], "created_at": row[2]}
+            return {"id": row[0], "name": row[1], "category": "general", "created_at": row[2]}
     except Exception:
         pass
 

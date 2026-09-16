@@ -37,9 +37,9 @@ class FRSPipelineConfig:
     min_sharpness_score: float = 50.0  # Laplacian variance
     min_brightness: float = 40.0
     max_brightness: float = 220.0
-    max_pose_yaw_deg: float = 45.0
+    max_pose_yaw_deg: float = 35.0
     max_pose_pitch_deg: float = 30.0
-    match_threshold: float = 0.75  # 75% cosine similarity
+    match_threshold: float = 0.65  # 65% cosine similarity
     top_k: int = 3
     duplicate_suppression_seconds: int = 60
     retention_days: int = 30

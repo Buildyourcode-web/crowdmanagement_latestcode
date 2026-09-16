@@ -36,15 +36,17 @@ DET_SIZE: int = _int(os.getenv("DET_SIZE"), 960)
 USE_CUDA: bool = _bool(os.getenv("USE_CUDA"), True)
 
 # ── Matching ───────────────────────────────────────────────────────────────────
-# Calibrated 60% threshold: perfectly matches enrolled identities (75%-100%) while rejecting all room strangers (4%-44%).
-MATCH_THRESHOLD: float = _float(os.getenv("MATCH_THRESHOLD"), 0.55)
+# Calibrated 65% threshold: matches enrolled identities reliably while rejecting background crowd.
+MATCH_THRESHOLD: float = _float(os.getenv("FRS_MATCH_THRESHOLD") or os.getenv("MATCH_THRESHOLD"), 0.65)
 MATCHING_STRATEGY: str = os.getenv("MATCHING_STRATEGY", "max_similarity")
 AMBIGUITY_MARGIN: float = _float(os.getenv("AMBIGUITY_MARGIN"), 0.05)
 
 # ── Face Quality & Size Thresholds ─────────────────────────────────────────────
-MIN_SHARPNESS_SCORE: float = _float(os.getenv("MIN_SHARPNESS_SCORE"), 30.0)
-MIN_FACE_WIDTH: int = _int(os.getenv("MIN_FACE_WIDTH"), 30)
+MIN_SHARPNESS_SCORE: float = _float(os.getenv("MIN_SHARPNESS_SCORE"), 45.0)
+MIN_FACE_WIDTH: int = _int(os.getenv("MIN_FACE_WIDTH"), 60)
 MAX_POSE_YAW_DEG: float = _float(os.getenv("MAX_POSE_YAW_DEG"), 35.0)
+MAX_POSE_PITCH_DEG: float = _float(os.getenv("MAX_POSE_PITCH_DEG"), 30.0)
+MIN_DET_CONFIDENCE: float = _float(os.getenv("MIN_DET_CONFIDENCE"), 0.50)
 
 # ── Face Tracking & Temporal Evidence ──────────────────────────────────────────
 MAX_MISSED_FRAMES: int = _int(os.getenv("MAX_MISSED_FRAMES"), 15)

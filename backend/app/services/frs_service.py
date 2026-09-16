@@ -42,7 +42,7 @@ class FRSService:
         "min_sharpness_score": 50.0,
         "min_face_width": 60,
         "min_face_height": 60,
-        "match_threshold": 0.75,
+        "match_threshold": getattr(settings, "FRS_MATCH_THRESHOLD", 0.65),
         "top_k": 3,
         "duplicate_suppression_seconds": 60,
         "retention_days": 30,
@@ -68,6 +68,15 @@ class FRSService:
         )
         dismissed = sum(1 for c in candidates if c.status in ("DISMISSED", "REJECTED_BY_REVIEWER"))
 
+        active_cases = await self.frs_repo.count_reference_profiles(active_only=True)
+
+        # Dynamic pipeline metrics from registry if any are actively running
+        pipelines = FRSPipelineRegistry.get_all()
+        fps_vals = [p.get_health().get("fps", 0.0) for p in pipelines.values() if p.running]
+        avg_fps = round(sum(fps_vals) / len(fps_vals), 1) if fps_vals else 24.0
+        lat_vals = [p.get_health().get("latency_ms", 35.0) for p in pipelines.values() if p.running]
+        avg_lat = round(sum(lat_vals) / len(lat_vals), 1) if lat_vals else 38.0
+
         return FRSDashboardKPIs(
             camerasOnline=online_cams,
             camerasTotal=len(cameras),
@@ -75,9 +84,9 @@ class FRSService:
             possibleMatches=possible_matches,
             pendingReview=pending,
             dismissed=dismissed,
-            activeCases=2,
-            processingFps=15,
-            avgLatencyMs=42,
+            activeCases=active_cases,
+            processingFps=int(avg_fps),
+            avgLatencyMs=int(avg_lat),
         )
 
     # ── Candidate Listing & Details ───────────────────────────────────────────

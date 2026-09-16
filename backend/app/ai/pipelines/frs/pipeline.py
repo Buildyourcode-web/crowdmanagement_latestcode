@@ -16,8 +16,11 @@ Never automatically confirms identity. Never triggers enforcement.
 """
 
 import asyncio
+import os
 import time
+import uuid
 from datetime import datetime, timezone
+from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional
 
 import cv2
@@ -194,7 +197,21 @@ class FRSPipeline:
             self._last_candidate_at = datetime.now(timezone.utc)
 
             # 6. Candidate metadata (strictly REVIEW_REQUIRED)
-            candidate_code = f"FRS-EVT-{int(time.time() * 1000) % 1000000:06d}"
+            candidate_code = f"FRS-EVT-{datetime.now(timezone.utc).strftime('%Y%m%d%H%M%S')}-{uuid.uuid4().hex[:6].upper()}"
+            detected_crop_rel = f"/media/frs/detected/{candidate_code}.jpg"
+
+            # Persist detected face crop to disk for human review UI
+            try:
+                media_dir = Path("media/frs/detected")
+                media_dir.mkdir(parents=True, exist_ok=True)
+                crop_path = media_dir / f"{candidate_code}.jpg"
+                crop_to_write = crop
+                if crop.ndim == 3 and crop.shape[2] == 3:
+                    crop_to_write = cv2.cvtColor(crop, cv2.COLOR_RGB2BGR)
+                cv2.imwrite(str(crop_path), crop_to_write)
+            except Exception as save_err:
+                logger.warning(f"FRSPipeline[{self.camera_code}] Failed to save face crop: {save_err}")
+
             candidate_record = {
                 "candidate_code": candidate_code,
                 "camera_id": self.camera_id,
@@ -205,7 +222,7 @@ class FRSPipeline:
                 "location": self.config.location_name,
                 "reference_profile_id": top_match.reference_id,
                 "reference_name": top_match.display_name,
-                "detected_image_path": f"/media/frs/detected/{candidate_code}.jpg",
+                "detected_image_path": detected_crop_rel,
                 "match_score": top_match.similarity_score,
                 "detection_confidence": face.confidence,
                 "quality_score": quality_res.quality_score,

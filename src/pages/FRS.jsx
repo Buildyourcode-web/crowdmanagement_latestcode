@@ -72,13 +72,16 @@ export default function FRS() {
     const unsubEvents = realtimeService.subscribe((msg, eventType, payload) => {
       const type = eventType || msg?.type;
       const data = payload || msg?.payload;
-      if (type === "frs_candidate" && data) {
+      if ((type === "frs_candidate" || type === "frs_pickpocket_alert") && data) {
         setDetections((prev) => {
           const exists = prev.some((d) => d.id === data.id);
           if (exists) return prev;
           return [data, ...prev].slice(0, 100);
         });
         setKpis((k) => (k ? { ...k, pending_review: (k.pending_review || 0) + 1 } : k));
+        if (type === "frs_pickpocket_alert") {
+          setAlertReviewCandidate(data);
+        }
       }
     });
 
