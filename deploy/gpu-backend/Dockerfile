@@ -46,7 +46,8 @@ RUN pip install --no-cache-dir -r /app/requirements.txt
 # 4. CRITICAL FIX: insightface depends on 'onnxruntime' (CPU) which overwrites 'onnxruntime-gpu'.
 # We uninstall the CPU package and force-reinstall onnxruntime-gpu so CUDAExecutionProvider is registered.
 RUN pip uninstall -y onnxruntime && \
-    pip install --no-cache-dir --force-reinstall --no-deps onnxruntime-gpu
+    pip install --no-cache-dir --force-reinstall --no-deps onnxruntime-gpu && \
+    pip install --no-cache-dir faiss-cpu
 
 # 4. Create persistent volume mount points for data, models, and InsightFace cache
 RUN mkdir -p /app/media /app/models /app/data /root/.insightface/models
@@ -56,6 +57,7 @@ COPY backend/app /app/app
 COPY backend/alembic /app/alembic
 COPY backend/alembic.ini /app/alembic.ini
 COPY backend/scripts /app/scripts
+COPY backend/scripts_frs /app/scripts_frs
 
 # Copy YOLO model if present in local build context
 COPY models /app/models
