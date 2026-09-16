@@ -462,7 +462,7 @@ export default function Dashboard() {
       {/* ========================================================================= */}
       {/* SECTION 2 & 9: HERO KPI + PEOPLE MOVEMENT PANEL */}
       {/* ========================================================================= */}
-      <div style={{ display: "grid", gridTemplateColumns: "1.4fr 1fr 1fr 1fr", gap: 10 }}>
+      <div style={{ display: "grid", gridTemplateColumns: "1.3fr 1fr 1fr", gap: 10 }}>
         {/* HERO KPI — Festival Total Footfall (all days 14-24 Sept) */}
         <div
           className="cc-card"
@@ -520,24 +520,6 @@ export default function Dashboard() {
           </span>
         </div>
 
-        {/* RANGE-AWARE EXIT */}
-        <div className="cc-card" style={{ padding: "12px 14px", display: "flex", flexDirection: "column", justifyContent: "space-between" }}>
-          <span style={{ fontSize: 11, fontWeight: 600, color: "var(--cc-text-muted)", letterSpacing: "0.05em", textTransform: "uppercase" }}>
-            Total Exit ({data?.selected_range_label || (dateRange === "7DAYS" ? "Last 7 Days" : dateRange === "FESTIVAL" ? "Festival" : dateRange === "YESTERDAY" ? "Yesterday" : "Today")})
-          </span>
-          <div style={{ fontSize: 28, fontWeight: 800, fontFamily: "var(--cc-font-mono)", color: "#f85149" }}>
-            {isRangeLoading ? (
-              <span style={{ opacity: 0.5, fontSize: 20 }}>Updating...</span>
-            ) : loading && !data ? (
-              "—"
-            ) : (
-              (data?.today_exits || 0).toLocaleString()
-            )}
-          </div>
-          <span style={{ fontSize: 10, color: "var(--cc-text-muted)" }}>
-            All exit cameras — line crossings OUT ({data?.selected_range_label || (dateRange === "YESTERDAY" ? "Yesterday" : "Selected Period")})
-          </span>
-        </div>
 
         {/* RANGE-AWARE PEAK */}
         <div className="cc-card" style={{ padding: "12px 14px", display: "flex", flexDirection: "column", justifyContent: "space-between", borderLeft: "3px solid #e3b341" }}>
