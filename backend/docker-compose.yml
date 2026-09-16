@@ -23,6 +23,7 @@ services:
         condition: service_healthy
     volumes:
       - ./media:/app/media
+      - ./data:/app/data
     networks:
       - byc_network
 
