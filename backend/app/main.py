@@ -277,15 +277,6 @@ async def get_static_crop_photo(filename: str):
                 if search_dir.is_dir():
                     matches = [f for f in search_dir.glob(f"*{person}*.*") if f.is_file()]
                     if matches:
-                        try:
-                            shutil.copy2(matches[0], p1)
-                        except Exception:
-                            pass
-                        return FileResponse(str(matches[0]))
-            for search_dir in [_ENROLLMENT_DIR, _BACKEND_DIR / "backend" / "data" / "enrollment"]:
-                if search_dir.is_dir():
-                    matches = [f for f in search_dir.glob(f"*{person}*.*") if f.is_file()]
-                    if matches:
                         return FileResponse(str(matches[0]))
     except Exception:
         pass

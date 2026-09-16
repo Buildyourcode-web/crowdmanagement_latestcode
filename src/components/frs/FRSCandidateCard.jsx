@@ -17,6 +17,7 @@ export default function FRSCandidateCard({ candidate, onReviewUpdated }) {
   const [showHDModal, setShowHDModal] = useState(false);
   const [showReviewModal, setShowReviewModal] = useState(false);
   const [refImgError, setRefImgError] = useState(false);
+  const [cropImgError, setCropImgError] = useState(false);
 
   if (!candidate) return null;
 
@@ -127,17 +128,19 @@ export default function FRSCandidateCard({ candidate, onReviewUpdated }) {
                   boxShadow: "0 4px 12px rgba(0,0,0,0.5)",
                 }}
               >
-                <img
-                  src={getImageUrl(candidate.detectedImage || candidate.detected_image || candidate.detected_image_path || candidate.crop_url)}
-                  alt="Detected face crop"
-                  style={{ width: "100%", height: "100%", objectFit: "cover" }}
-                  onError={(e) => {
-                    const fallback = getImageUrl(candidate.referenceImage || candidate.reference_image || candidate.reference_image_path);
-                    if (fallback && e.target.src !== fallback) {
-                      e.target.src = fallback;
-                    }
-                  }}
-                />
+                {cropImgError ? (
+                  <div style={{ width: "100%", height: "100%", display: "flex", flexDirection: "column", alignItems: "center", justifyContent: "center", background: "rgba(255,255,255,0.03)", padding: 10, textAlign: "center" }}>
+                    <i className="bi bi-camera-video-off" style={{ fontSize: 32, color: "var(--cc-text-muted)", marginBottom: 4 }} />
+                    <span style={{ fontSize: 9, color: "var(--cc-text-muted)" }}>LIVE CROP EXPIRED</span>
+                  </div>
+                ) : (
+                  <img
+                    src={getImageUrl(candidate.detectedImage || candidate.detected_image || candidate.detected_image_path || candidate.crop_url)}
+                    alt="Detected face crop"
+                    style={{ width: "100%", height: "100%", objectFit: "cover" }}
+                    onError={() => setCropImgError(true)}
+                  />
+                )}
                 <div
                   style={{
                     position: "absolute",
