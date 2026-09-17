@@ -60,7 +60,8 @@ _dashboard_cache: Dict[str, _DashboardCacheEntry] = {}
 _in_flight_requests: Dict[str, asyncio.Future] = {}
 _DASHBOARD_CACHE_FRESH_SECONDS: float = 8.0
 _DASHBOARD_CACHE_STALE_SECONDS: float = 300.0
-# Monotonic in-memory cache to guarantee completed hours never drop to 0 on rollover
+# Monotonic in-memory cache to guarantee completed hours never drop to 0 on rollover.
+# Key format: "YYYY-MM-DD:HH:00" so values from one day never bleed into the next.
 _completed_hourly_cache: Dict[str, Tuple[int, int]] = {}
 
 
@@ -557,24 +558,27 @@ class DashboardService:
                 hourly_flow = [HourlyFlowPoint(hour=i.hour, entry=i.entry, exit=i.exit, net_flow=i.net_flow) for i in h_items]
                 if target_d == today_date:
                     cur_h_str = f"{now_local.hour:02d}:00"
+                    date_prefix = today_date.isoformat()  # "YYYY-MM-DD"
 
                     # 1. Monotonic protection: Past completed hours only fall back to memory if DB returns 0 (glitch protection).
                     # Real DB values (including corrections) ALWAYS take precedence!
+                    # Key includes date so yesterday's data NEVER bleeds into today's graph.
                     for p in hourly_flow:
                         if p.hour != cur_h_str:
+                            cache_key_h = f"{date_prefix}:{p.hour}"
                             if p.entry == 0:
-                                prev_in, prev_out = _completed_hourly_cache.get(p.hour, (0, 0))
+                                prev_in, prev_out = _completed_hourly_cache.get(cache_key_h, (0, 0))
                                 if prev_in > 0:
                                     p.entry = prev_in
                                     p.exit = max(p.exit, prev_out)
                                     p.net_flow = p.entry - p.exit
                             else:
-                                _completed_hourly_cache[p.hour] = (p.entry, p.exit)
+                                _completed_hourly_cache[cache_key_h] = (p.entry, p.exit)
 
-                    # Record past completed hours into cache
+                    # Record past completed hours into cache (date-prefixed key)
                     for p in hourly_flow:
                         if p.hour != cur_h_str and (p.entry > 0 or p.exit > 0):
-                            _completed_hourly_cache[p.hour] = (p.entry, p.exit)
+                            _completed_hourly_cache[f"{date_prefix}:{p.hour}"] = (p.entry, p.exit)
 
                     # Recompute peak hour accurately across all buckets
                     max_p = max(hourly_flow, key=lambda x: x.entry, default=None)
