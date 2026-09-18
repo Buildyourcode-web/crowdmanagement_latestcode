@@ -1231,6 +1231,16 @@ class RTSPCameraWorker:
                 continue
 
             now = time.time()
+            now_dt_ist = datetime.now(timezone.utc).astimezone(timezone(timedelta(hours=5, minutes=30)))
+            cur_day_str = now_dt_ist.strftime("%Y-%m-%d")
+            if getattr(self.state, "_active_date", None) != cur_day_str:
+                if getattr(self.state, "_active_date", None) is not None:
+                    logger.info(f"[Crowd-AI-Worker:{self.state.camera_id}] Day rollover detected ({self.state._active_date} -> {cur_day_str}). Resetting daily counters.")
+                    self.state.in_count = 0
+                    self.state.out_count = 0
+                    self.state.occupancy_count = 0
+                self.state._active_date = cur_day_str
+
             _refresh_interval = 5.0 if not self._cached_roi_lines else 60.0
             if (now - self._roi_lines_last_fetch) > _refresh_interval:
                 self._roi_lines_last_fetch = now

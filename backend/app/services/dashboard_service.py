@@ -86,7 +86,9 @@ class DashboardService:
         and single-flight request coalescing. Delivers instant <5ms responses while refreshing
         the database asynchronously in the background.
         """
-        cache_key = f"dashboard:{event_id}:{day_number}:{date_range.lower()}"
+        IST = timezone(timedelta(hours=5, minutes=30))
+        today_date_str = datetime.now(timezone.utc).astimezone(IST).strftime("%Y-%m-%d")
+        cache_key = f"dashboard:{event_id}:{day_number}:{date_range.lower()}:{today_date_str}"
         now = time.monotonic()
 
         if not skip_cache:
@@ -323,35 +325,9 @@ class DashboardService:
             range_in, range_out, range_occ = 0, 0, 0
             today_in, today_out, today_occ = 0, 0, 0
 
-        # Live worker integration: ensure dashboard never reports counts lower than
-        # what active camera workers have detected in memory.
-        live_in = 0
-        live_out = 0
-        workers_pool = list(live_frs_workers.values())
-        if not workers_pool:
-            try:
-                from app.frs_engine.frs_service import _camera_workers, _workers_lock
-                with _workers_lock:
-                    workers_pool = list(_camera_workers.values())
-            except Exception:
-                pass
-        for s in workers_pool:
-            if getattr(s, "crowd_ai_active", False) and getattr(s, "running", False):
-                live_in += int(getattr(s, "in_count", 0) or 0)
-                live_out += int(getattr(s, "out_count", 0) or 0)
-
-        if live_in > 0 or live_out > 0:
-            today_in = max(today_in, live_in)
-            today_out = max(today_out, live_out)
-
-            today_occ = max(0, today_in - today_out)
-            fest_total_in = max(fest_total_in, today_in)
-            fest_total_out = max(fest_total_out, today_out)
-            fest_occ = max(0, fest_total_in - fest_total_out)
-            if range_in < today_in:
-                range_in = today_in
-                range_out = today_out
-                range_occ = today_occ
+        # Canonical single source of truth: PostgreSQL durable ledger.
+        # today_in and range_in are derived strictly from line_crossing_events for the selected day boundary.
+        # Worker in-memory counts are never allowed to override day boundaries or corrupt historical days.
 
         _step("4-canonical-totals")
 
@@ -597,9 +573,6 @@ class DashboardService:
                 for d_item in daily_items:
                     ent_val = d_item.entry_count
                     ext_val = d_item.exit_count
-                    if d_item.day_number == cur_day_num and ent_val == 0 and live_in > 0:
-                        ent_val = live_in
-                        ext_val = live_out
                     if ent_val > max_f_ent:
                         max_f_ent = ent_val
                         peak_h = f"{d_item.label} (Peak Day)"
@@ -625,9 +598,6 @@ class DashboardService:
             for d_item in days_breakdown:
                 ent_val = d_item.entry_count
                 ext_val = d_item.exit_count
-                if d_item.day_number == cur_day_num and ent_val == 0 and live_in > 0:
-                    ent_val = live_in
-                    ext_val = live_out
                 daily_trend.append(
                     DailyTrendPoint(
                         date=d_item.date,
