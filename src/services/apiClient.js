@@ -108,7 +108,11 @@ const DEFAULT_CACHE_TTL = 30_000; // 30 seconds
 function getCacheKey(url, params) {
   const activeEventId = localStorage.getItem("byc_active_event_id") || "default";
   const activeSiteId = localStorage.getItem("byc_active_site_id") || "all";
-  const prefix = `[evt:${activeEventId}|site:${activeSiteId}]`;
+  const now = new Date();
+  const utc = now.getTime() + now.getTimezoneOffset() * 60000;
+  const ist = new Date(utc + 3600000 * 5.5);
+  const dateStr = `${ist.getFullYear()}-${String(ist.getMonth() + 1).padStart(2, "0")}-${String(ist.getDate()).padStart(2, "0")}`;
+  const prefix = `[evt:${activeEventId}|site:${activeSiteId}|date:${dateStr}]`;
   if (!params) return `${prefix}${url}`;
   try {
     const sorted = Object.keys(params).sort().reduce((acc, k) => {

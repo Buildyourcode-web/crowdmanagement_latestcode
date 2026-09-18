@@ -1,34 +1,33 @@
 // Dashboard Store — State management for Command Center Dashboard
 import { create } from "zustand";
 
-// Load initial cached snapshot for instant 0ms render (no blank dashes)
+// Helper to get current IST date string (YYYY-MM-DD)
+const getTodayIstString = () => {
+  const now = new Date();
+  const utc = now.getTime() + now.getTimezoneOffset() * 60000;
+  const ist = new Date(utc + 3600000 * 5.5);
+  return `${ist.getFullYear()}-${String(ist.getMonth() + 1).padStart(2, "0")}-${String(ist.getDate()).padStart(2, "0")}`;
+};
+
+const currentIstDateStr = getTodayIstString();
+const CACHE_VERSION = `v17_${currentIstDateStr}`;
+
 let initialCachedData = null;
 const initialRangeCache = {};
 
-const CACHE_VERSION = "v16_fix_flicker";
 try {
+  // Purge any cache from previous versions or previous calendar dates
   if (sessionStorage.getItem("byc_cache_version") !== CACHE_VERSION) {
-    sessionStorage.removeItem("byc_dashboard_cache");
-    ["TODAY", "YESTERDAY", "7DAYS", "FESTIVAL"].forEach((k) => {
-      sessionStorage.removeItem(`byc_dashboard_cache_${k}`);
-    });
+    sessionStorage.clear();
     sessionStorage.setItem("byc_cache_version", CACHE_VERSION);
-  }
-
-  const cachedStr = sessionStorage.getItem("byc_dashboard_cache");
-  if (cachedStr) {
-    initialCachedData = JSON.parse(cachedStr);
-    const rKey = (initialCachedData.date_range_selected || "TODAY").toUpperCase();
-    initialRangeCache[rKey] = initialCachedData;
-  }
-  ["TODAY", "YESTERDAY", "7DAYS", "FESTIVAL"].forEach((k) => {
-    const s = sessionStorage.getItem(`byc_dashboard_cache_${k}`);
-    if (s) {
-      try {
-        initialRangeCache[k] = JSON.parse(s);
-      } catch (_) {}
+  } else {
+    const cachedStr = sessionStorage.getItem(`byc_dash_cache_${currentIstDateStr}`);
+    if (cachedStr) {
+      initialCachedData = JSON.parse(cachedStr);
+      const rKey = (initialCachedData.date_range_selected || "TODAY").toUpperCase();
+      initialRangeCache[rKey] = initialCachedData;
     }
-  });
+  }
 } catch (_) {}
 
 export const useDashboardStore = create((set, get) => ({
@@ -89,10 +88,7 @@ export const useDashboardStore = create((set, get) => ({
 
   resetDashboardData: () => {
     try {
-      sessionStorage.removeItem("byc_dashboard_cache");
-      ["TODAY", "YESTERDAY", "7DAYS", "FESTIVAL"].forEach((k) => {
-        sessionStorage.removeItem(`byc_dashboard_cache_${k}`);
-      });
+      sessionStorage.clear();
     } catch (_) {}
     set({
       data: null,
@@ -119,41 +115,6 @@ export const useDashboardStore = create((set, get) => ({
 
   setDashboardData: (payload, forRange = null, forDayNumber = null) => {
     const current = get();
-    const curData = current.data;
-
-    // Strict monotonic protection: Today entries and festival totals MUST NEVER DECREASE!
-    if (curData && payload) {
-      const curTodayIn = Number(curData.today_entries || 0);
-      const curFestIn = Number(curData.total_visitors_festival ?? curData.festival_total_entries ?? curTodayIn);
-      const incomingTodayIn = Number(payload.today_entries || 0);
-      const incomingFestIn = Number(payload.total_visitors_festival ?? payload.festival_total_entries ?? incomingTodayIn);
-
-      if (curTodayIn > 0 && incomingTodayIn === 0) {
-        payload.today_entries = curTodayIn;
-        payload.current_occupancy = Math.max(0, curTodayIn - Number(payload.today_exits || 0));
-        payload.net_flow = curTodayIn - Number(payload.today_exits || 0);
-      }
-      if (curFestIn > 0 && incomingFestIn === 0) {
-        payload.total_visitors_festival = curFestIn;
-        payload.festival_total_entries = curFestIn;
-      }
-
-      // Hourly protection: only block drop to exactly 0 (momentary glitch), allow all real corrections
-      if (Array.isArray(payload.hourly_flow) && Array.isArray(curData.hourly_flow)) {
-        payload.hourly_flow = payload.hourly_flow.map((bucket, idx) => {
-          const curBucket = curData.hourly_flow.find((b) => b.hour === bucket.hour) || curData.hourly_flow[idx];
-          const bIn = (bucket.entry || 0) === 0 && (curBucket?.entry || 0) > 0 ? curBucket.entry : (bucket.entry || 0);
-          const bOut = (bucket.exit || 0) === 0 && (curBucket?.exit || 0) > 0 ? curBucket.exit : (bucket.exit || 0);
-          return {
-            ...bucket,
-            entry: bIn,
-            exit: bOut,
-            net_flow: bIn - bOut,
-          };
-        });
-      }
-    }
-
     const dayNum = forDayNumber ?? payload?.selected_day_number ?? current.selectedDayNumber;
     const rangeKey = dayNum ? `DAY_${dayNum}` : (
       forRange ||
@@ -162,10 +123,13 @@ export const useDashboardStore = create((set, get) => ({
       "TODAY"
     ).toUpperCase();
 
+    // Canonical source of truth: payload from server is authoritative.
+    // Never copy prior day's numbers or hours into this day's payload.
+    const todayStr = getTodayIstString();
     try {
       if (payload) {
-        sessionStorage.setItem(`byc_dashboard_cache_${rangeKey}`, JSON.stringify(payload));
-        sessionStorage.setItem("byc_dashboard_cache", JSON.stringify(payload));
+        sessionStorage.setItem(`byc_dash_cache_${rangeKey}_${todayStr}`, JSON.stringify(payload));
+        sessionStorage.setItem(`byc_dash_cache_${todayStr}`, JSON.stringify(payload));
       }
     } catch (_) {}
 
