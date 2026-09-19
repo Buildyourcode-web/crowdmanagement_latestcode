@@ -111,7 +111,8 @@ export default function Dashboard() {
     if (!silent) store.setIsRefreshing(true);
 
     try {
-      const calls = [getDashboardSummary(range, true, dayNum)];
+      const skipCache = !silent;
+      const calls = [getDashboardSummary(range, skipCache, dayNum)];
       if (!fest10Data || range === "festival") {
         calls.push(getFestival10DaysAnalytics());
       }

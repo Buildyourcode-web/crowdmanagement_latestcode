@@ -29,8 +29,9 @@ services:
       # Database (Intra-container high-speed link)
       - DATABASE_URL=postgresql+asyncpg://${POSTGRES_USER:-postgres}:${POSTGRES_PASSWORD:-postgres_secure_2026}@db:5432/${POSTGRES_DB:-main_crowd_ai}
       - DATABASE_SYNC_URL=postgresql://${POSTGRES_USER:-postgres}:${POSTGRES_PASSWORD:-postgres_secure_2026}@db:5432/${POSTGRES_DB:-main_crowd_ai}
-      - DB_POOL_SIZE=20
-      - DB_MAX_OVERFLOW=10
+      - DB_POOL_SIZE=40
+      - DB_MAX_OVERFLOW=20
+      - DB_POOL_TIMEOUT=15
 
       # Redis (Intra-container high-speed bus)
       - REDIS_URL=redis://redis:6379/0

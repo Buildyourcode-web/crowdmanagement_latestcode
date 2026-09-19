@@ -16,9 +16,9 @@ class Settings(BaseSettings):
     # Database
     DATABASE_URL: str = "postgresql+asyncpg://postgres:postgres@localhost:5432/main_crowd_ai"
     DATABASE_SYNC_URL: str = "postgresql://postgres:postgres@localhost:5432/main_crowd_ai"
-    DB_POOL_SIZE: int = 20
-    DB_MAX_OVERFLOW: int = 10
-    DB_POOL_TIMEOUT: int = 30
+    DB_POOL_SIZE: int = 40
+    DB_MAX_OVERFLOW: int = 20
+    DB_POOL_TIMEOUT: int = 15
 
     # Redis
     REDIS_URL: str = "redis://localhost:6379/0"

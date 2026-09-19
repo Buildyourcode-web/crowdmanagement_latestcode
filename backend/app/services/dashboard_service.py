@@ -566,24 +566,9 @@ class DashboardService:
                             pass
                     elif peak_h in ("—", "No data"):
                         peak_h = f"{now_local.hour:02d}:00 - {(now_local.hour+1):02d}:00"
-            else:
-                # Festival Total -> Show Day-by-Day comparison bars
-                daily_items, _, _, _ = await self.counting_service.get_festival_daily_breakdown(target_event_id)
-                max_f_ent = 0
-                for d_item in daily_items:
-                    ent_val = d_item.entry_count
-                    ext_val = d_item.exit_count
-                    if ent_val > max_f_ent:
-                        max_f_ent = ent_val
-                        peak_h = f"{d_item.label} (Peak Day)"
-                    hourly_flow.append(
-                        HourlyFlowPoint(
-                            hour=d_item.label,
-                            entry=ent_val,
-                            exit=ext_val,
-                            net_flow=ent_val - ext_val,
-                        )
-                    )
+            # Note: When target_d is None (Festival Total), hourly_flow is populated below
+            # directly from days_breakdown to avoid duplicate database queries.
+            pass
 
         range_entries = range_in
         range_exits = range_out
@@ -606,6 +591,24 @@ class DashboardService:
                         net_flow=ent_val - ext_val,
                     )
                 )
+
+            # If viewing Festival Total, populate hourly_flow with day-by-day bars from the same result
+            if target_d is None:
+                max_f_ent = 0
+                for d_item in days_breakdown:
+                    ent_val = d_item.entry_count
+                    ext_val = d_item.exit_count
+                    if ent_val > max_f_ent:
+                        max_f_ent = ent_val
+                        peak_h = f"{d_item.label} (Peak Day)"
+                    hourly_flow.append(
+                        HourlyFlowPoint(
+                            hour=d_item.label,
+                            entry=ent_val,
+                            exit=ext_val,
+                            net_flow=ent_val - ext_val,
+                        )
+                    )
         _step("11-daily-query")
 
         # -------------------------------------------------------------------

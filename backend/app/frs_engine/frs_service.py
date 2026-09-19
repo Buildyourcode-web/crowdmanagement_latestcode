@@ -596,11 +596,7 @@ def _persist_crowd_snapshot_threadsafe(camera_code: str, inflow_delta: int, outf
                     zone_obj.status = "ACTIVE"
 
                 await session.commit()
-                try:
-                    from app.services.dashboard_service import _dashboard_cache
-                    _dashboard_cache.clear()
-                except Exception:
-                    pass
+                return
         except Exception as e:
             logger.error(f"[Crowd-AI] Snapshot persist error: {e}")
 
@@ -624,15 +620,14 @@ def _persist_line_crossing_event_threadsafe(
     signed_distance: float = 0.0,
 ):
     """Asynchronously persist durable line-crossing event to PostgreSQL line_crossing_events table."""
-    async def _do_persist():
-        try:
-            from app.db.session import AsyncSessionLocal
-            from app.models.camera import Camera
-            from app.models.event import Event
-            from app.models.line_crossing import LineCrossingEvent
-            from sqlalchemy import select
+    async def _do_persist_attempt():
+        from app.db.session import AsyncSessionLocal
+        from app.models.camera import Camera
+        from app.models.event import Event
+        from app.models.line_crossing import LineCrossingEvent
+        from sqlalchemy import select
 
-            async with AsyncSessionLocal() as session:
+        async with AsyncSessionLocal() as session:
                 clean_code = camera_code.replace("-FRS", "").replace("-CROWD", "")
                 stmt = select(Camera).where(Camera.camera_code.in_([camera_code, clean_code])).limit(1)
                 res = await session.execute(stmt)
@@ -733,14 +728,16 @@ def _persist_line_crossing_event_threadsafe(
                 await session.execute(stmt_insert)
                 await session.commit()
 
-                # Invalidate dashboard in-memory cache so next GET /api/v1/dashboard/summary is fresh
-                try:
-                    from app.services.dashboard_service import _dashboard_cache
-                    _dashboard_cache.clear()
-                except Exception:
-                    pass
-        except Exception as e:
-            logger.error(f"[FRS-Engine] Line crossing persist error: {type(e).__name__}: {e}")
+    async def _do_persist():
+        for _attempt in range(3):
+            try:
+                await _do_persist_attempt()
+                return
+            except Exception as e:
+                if _attempt < 2:
+                    await asyncio.sleep(0.2 * (_attempt + 1))
+                else:
+                    logger.error(f"[FRS-Engine] Line crossing persist error: {type(e).__name__}: {e}")
 
     global _main_loop
     if _main_loop and _main_loop.is_running():
@@ -1672,13 +1669,6 @@ class RTSPCameraWorker:
                                 ground_x=trk["bottom_center"][0] / float(w_orig) if w_orig > 0 else 0.5,
                                 ground_y=trk["bottom_center"][1] / float(h_orig) if h_orig > 0 else 0.5,
                                 signed_distance=0.0,
-                            )
-
-                            _persist_crowd_snapshot_threadsafe(
-                                camera_code=self.state.camera_id,
-                                inflow_delta=inflow_d,
-                                outflow_delta=outflow_d,
-                                headcount=len(self._crowd_tracks),
                             )
 
                     # Periodic telemetry snapshot flush (every 30s)

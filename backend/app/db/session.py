@@ -14,9 +14,9 @@ async_engine = create_async_engine(
     _db_url,
     echo=False,
     future=True,
-    pool_size=getattr(settings, "DB_POOL_SIZE", 5),
-    max_overflow=getattr(settings, "DB_MAX_OVERFLOW", 5),
-    pool_timeout=getattr(settings, "DB_POOL_TIMEOUT", 10),
+    pool_size=getattr(settings, "DB_POOL_SIZE", 40),
+    max_overflow=getattr(settings, "DB_MAX_OVERFLOW", 20),
+    pool_timeout=getattr(settings, "DB_POOL_TIMEOUT", 15),
     pool_recycle=180,
     pool_pre_ping=True,   # validates connections before use — prevents stale-connection errors on AWS/Supabase
     connect_args={
@@ -57,9 +57,9 @@ try:
     sync_engine = create_engine(
         _sync_db_url,
         echo=False,
-        pool_size=5,
-        max_overflow=3,
-        pool_timeout=10,
+        pool_size=10,
+        max_overflow=10,
+        pool_timeout=15,
         pool_recycle=300,
         pool_pre_ping=True,   # prevents stale-connection errors on AWS for background threads
     )
