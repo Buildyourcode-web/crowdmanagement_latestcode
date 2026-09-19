@@ -45,18 +45,24 @@ export default function Dashboard() {
   const timerRef = useRef(null);
   const isMountedRef = useRef(true);
 
-  // 1. Precise Header Clock
+  // 1. Precise Header Clock in IST
   useEffect(() => {
     const updateClock = () => {
-      const now = new Date();
-      setClockStr(
-        now.toLocaleTimeString("en-GB", {
-          hour: "2-digit",
-          minute: "2-digit",
-          second: "2-digit",
-          hour12: false,
-        })
-      );
+      try {
+        const now = new Date();
+        setClockStr(
+          now.toLocaleTimeString("en-GB", {
+            timeZone: "Asia/Kolkata",
+            hour: "2-digit",
+            minute: "2-digit",
+            second: "2-digit",
+            hour12: false,
+          })
+        );
+      } catch (_) {
+        const now = new Date();
+        setClockStr(now.toLocaleTimeString("en-GB", { hour12: false }));
+      }
     };
     updateClock();
     const interval = setInterval(updateClock, 1000);
@@ -64,10 +70,17 @@ export default function Dashboard() {
   }, []);
 
   const currentIstHour = useMemo(() => {
-    const now = new Date();
-    const utc = now.getTime() + now.getTimezoneOffset() * 60000;
-    const ist = new Date(utc + 3600000 * 5.5);
-    return ist.getHours();
+    try {
+      const str = new Intl.DateTimeFormat("en-GB", {
+        timeZone: "Asia/Kolkata",
+        hour: "2-digit",
+        hour12: false,
+      }).format(new Date());
+      return parseInt(str, 10);
+    } catch (_) {
+      const ist = new Date(Date.now() + 5.5 * 3600 * 1000);
+      return ist.getUTCHours();
+    }
   }, [clockStr]);
 
   // Dynamic Event Days derived from active event template
@@ -270,7 +283,11 @@ export default function Dashboard() {
     if (!data?.hourly_flow || data.hourly_flow.length === 0) return null;
 
     const hours = data.hourly_flow.map((p) => p.hour);
-    const isToday = (dateRange || "TODAY") === "TODAY";
+    const isToday =
+      (dateRange || "TODAY").toUpperCase() === "TODAY" ||
+      (selectedDayNumber &&
+        data?.current_day_number &&
+        Number(selectedDayNumber) === Number(data.current_day_number));
     const isYesterday = (dateRange || "").toUpperCase() === "YESTERDAY";
     const currentHourStr = `${String(currentIstHour).padStart(2, "0")}:00`;
 
@@ -413,7 +430,7 @@ export default function Dashboard() {
         },
       ],
     };
-  }, [data?.hourly_flow, dateRange, currentIstHour]);
+  }, [data?.hourly_flow, dateRange, currentIstHour, selectedDayNumber, data?.current_day_number]);
 
   // Daily Trend Table / Chart Option
   const statusColor = dataStatus === "LIVE DATA" ? "#3fb950" : dataStatus === "DEGRADED" ? "#e3b341" : "#8b949e";
