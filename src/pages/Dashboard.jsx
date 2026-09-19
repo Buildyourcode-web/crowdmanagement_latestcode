@@ -170,25 +170,42 @@ export default function Dashboard() {
 
     document.addEventListener("visibilitychange", handleVisibilityChange);
 
-    // 4. WebSocket Real-time event listener (Strict canonical consistency)
-    let wsDebounceTimer = null;
-    const unsubWs = realtimeService.subscribe((msg, eventType, payload) => {
-      const type = String(eventType || msg?.type || "").toLowerCase();
-      const dataPayload = payload || msg?.payload || msg;
+    // 4. WebSocket Real-time event listener (Strict canonical consistency & live ticker)
+    let lastThrottledFetch = 0;
+    let throttleTimer = null;
 
-      if (
-        type === "crowd_telemetry" ||
-        type === "line_crossing"
-      ) {
-        // Debounce fetch from PostgreSQL canonical ledger so all laptops stay perfectly in sync
-        if (wsDebounceTimer) clearTimeout(wsDebounceTimer);
-        wsDebounceTimer = setTimeout(() => {
+    const requestThrottledSync = () => {
+      const now = Date.now();
+      if (now - lastThrottledFetch >= 3000) {
+        lastThrottledFetch = now;
+        if (isMountedRef.current) {
+          const curRange = useDashboardStore.getState().dateRange || "today";
+          const curDay = useDashboardStore.getState().selectedDayNumber;
+          loadData(true, curRange, curDay);
+        }
+      } else if (!throttleTimer) {
+        throttleTimer = setTimeout(() => {
+          throttleTimer = null;
+          lastThrottledFetch = Date.now();
           if (isMountedRef.current) {
             const curRange = useDashboardStore.getState().dateRange || "today";
             const curDay = useDashboardStore.getState().selectedDayNumber;
             loadData(true, curRange, curDay);
           }
-        }, 1500);
+        }, Math.max(500, 3000 - (now - lastThrottledFetch)));
+      }
+    };
+
+    const unsubWs = realtimeService.subscribe((msg, eventType, payload) => {
+      const type = String(eventType || msg?.type || "").toLowerCase();
+      const dataPayload = payload || msg?.payload || msg;
+
+      // Handle only canonical crowd_telemetry or line_crossing (ignore duplicate crowd_update)
+      if (type === "crowd_telemetry" || type === "line_crossing") {
+        // 1. Instant smooth odometer increment on screen
+        useDashboardStore.getState().patchDashboardCrossing(dataPayload);
+        // 2. Throttled background sync with canonical PostgreSQL (runs at most every 3s, never starves)
+        requestThrottledSync();
       } else if (type === "zone_update") {
         if (dataPayload?.zone_code) {
           useDashboardStore.getState().patchZoneDensity(
@@ -217,7 +234,7 @@ export default function Dashboard() {
     return () => {
       isMountedRef.current = false;
       clearTimeout(timerRef.current);
-      if (wsDebounceTimer) clearTimeout(wsDebounceTimer);
+      if (throttleTimer) clearTimeout(throttleTimer);
       document.removeEventListener("visibilitychange", handleVisibilityChange);
       unsubWs();
       unsubStatus();

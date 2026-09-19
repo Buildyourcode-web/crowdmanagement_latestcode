@@ -150,11 +150,42 @@ export const useDashboardStore = create((set, get) => ({
     });
   },
 
-  // Canonical ledger sync: Never speculatively inflate counts on client to avoid bounce/fluctuation.
-  patchDashboardCrossing: () =>
-    set((state) => ({
-      lastUpdated: new Date().toISOString(),
-    })),
+  // Real-time smooth counter increment from WebSocket crossing events
+  patchDashboardCrossing: (payload) =>
+    set((state) => {
+      if (!state.data) return state;
+      const inDelta = Number(payload?.inflow_delta || (payload?.crossing === "IN" ? 1 : 0));
+      const outDelta = Number(payload?.outflow_delta || (payload?.crossing === "OUT" ? 1 : 0));
+
+      if (inDelta <= 0 && outDelta <= 0) {
+        return { lastUpdated: new Date().toISOString() };
+      }
+
+      const curTodayIn = Number(state.data.today_entries || 0);
+      const curTodayOut = Number(state.data.today_exits || 0);
+      const curFestIn = Number(
+        state.data.festival_total_entries !== undefined
+          ? state.data.festival_total_entries
+          : (state.data.total_visitors_festival || curTodayIn)
+      );
+
+      const nextTodayIn = curTodayIn + inDelta;
+      const nextTodayOut = curTodayOut + outDelta;
+      const nextFestIn = curFestIn + inDelta;
+
+      return {
+        data: {
+          ...state.data,
+          today_entries: nextTodayIn,
+          today_exits: nextTodayOut,
+          current_occupancy: Math.max(0, nextTodayIn - nextTodayOut),
+          net_flow: nextTodayIn - nextTodayOut,
+          total_visitors_festival: nextFestIn,
+          festival_total_entries: nextFestIn,
+        },
+        lastUpdated: new Date().toISOString(),
+      };
+    }),
 
   // Partial real-time patch from WebSocket events
   patchDashboardMetrics: (patch) =>
