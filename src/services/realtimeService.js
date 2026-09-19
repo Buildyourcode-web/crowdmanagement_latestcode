@@ -98,7 +98,6 @@ class RealtimeService {
       normalizedType === "line_crossing"
     ) {
       useCrowdStore.getState().setCrowdFromAPI?.(payload);
-      useDashboardStore.getState().patchDashboardCrossing?.(payload);
     } else if (normalizedType === "zone_update") {
       useCrowdStore.getState().setZoneUpdate?.(payload);
       if (payload?.zone_code) {

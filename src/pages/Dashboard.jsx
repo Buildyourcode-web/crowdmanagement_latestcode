@@ -9,6 +9,7 @@ import { useDashboardStore } from "../store/useDashboardStore.js";
 import { useEventStore } from "../store/useEventStore.js";
 import { useAppStore } from "../store/useAppStore.js";
 import { getChartTheme } from "../utils/chartTheme.js";
+import { getBackendUrl } from "../utils/urlConfig.js";
 
 const DATE_RANGE_OPTIONS = [
   { id: "today", label: "TODAY" },
@@ -97,15 +98,16 @@ export default function Dashboard() {
     if (!silent) store.setIsRefreshing(true);
 
     try {
-      const [res, festRes] = await Promise.allSettled([
-        getDashboardSummary(range, true, dayNum),
-        getFestival10DaysAnalytics(),
-      ]);
+      const calls = [getDashboardSummary(range, true, dayNum)];
+      if (!fest10Data || range === "festival") {
+        calls.push(getFestival10DaysAnalytics());
+      }
+      const [res, festRes] = await Promise.allSettled(calls);
       if (!isMountedRef.current) return;
       if (res.status === "fulfilled" && res.value) {
         store.setDashboardData(res.value, range, dayNum);
       }
-      if (festRes.status === "fulfilled" && festRes.value) {
+      if (festRes && festRes.status === "fulfilled" && festRes.value) {
         setFest10Data(festRes.value?.data || festRes.value);
       }
     } catch (err) {
@@ -176,21 +178,17 @@ export default function Dashboard() {
 
       if (
         type === "crowd_telemetry" ||
-        type === "crowd_update" ||
-        type === "crowd_metrics" ||
-        type === "crowd_metrics_updated" ||
         type === "line_crossing"
       ) {
-        useDashboardStore.getState().patchDashboardCrossing(dataPayload);
-        if (dataPayload?.today_entries === undefined || dataPayload?.today_exits === undefined) {
-          // Debounce fetch from PostgreSQL canonical ledger
-          if (wsDebounceTimer) clearTimeout(wsDebounceTimer);
-          wsDebounceTimer = setTimeout(() => {
+        // Debounce fetch from PostgreSQL canonical ledger so all laptops stay perfectly in sync
+        if (wsDebounceTimer) clearTimeout(wsDebounceTimer);
+        wsDebounceTimer = setTimeout(() => {
+          if (isMountedRef.current) {
             const curRange = useDashboardStore.getState().dateRange || "today";
             const curDay = useDashboardStore.getState().selectedDayNumber;
             loadData(true, curRange, curDay);
-          }, 1500);
-        }
+          }
+        }, 1500);
       } else if (type === "zone_update") {
         if (dataPayload?.zone_code) {
           useDashboardStore.getState().patchZoneDensity(
@@ -1111,7 +1109,15 @@ export default function Dashboard() {
                 >
                   <div style={{ width: 44, height: 44, borderRadius: 4, overflow: "hidden", background: "#050e18", flexShrink: 0, border: "1px solid var(--cc-border)" }}>
                     {c.detected_image ? (
-                      <img src={c.detected_image} alt="Detected" style={{ width: "100%", height: "100%", objectFit: "cover" }} />
+                      <img
+                        src={
+                          c.detected_image.startsWith("data:") || c.detected_image.startsWith("http")
+                            ? c.detected_image
+                            : `${getBackendUrl()}${c.detected_image.startsWith("/") ? "" : "/"}${c.detected_image}`
+                        }
+                        alt="Detected"
+                        style={{ width: "100%", height: "100%", objectFit: "cover" }}
+                      />
                     ) : (
                       <div style={{ width: "100%", height: "100%", display: "flex", alignItems: "center", justifyContent: "center", color: "var(--cc-text-muted)" }}>
                         <i className="bi bi-person" />

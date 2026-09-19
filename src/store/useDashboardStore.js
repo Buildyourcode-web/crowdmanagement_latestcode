@@ -150,82 +150,11 @@ export const useDashboardStore = create((set, get) => ({
     });
   },
 
-  // Authoritative real-time count updates
-  patchDashboardCrossing: (payload) =>
-    set((state) => {
-      if (!state.data) return state;
-      const inDelta = Number(
-        payload?.inflow_delta ??
-        payload?.delta_in ??
-        payload?.in_delta ??
-        (payload?.crossing === "IN" ? 1 : 0)
-      );
-      const outDelta = Number(
-        payload?.outflow_delta ??
-        payload?.delta_out ??
-        payload?.out_delta ??
-        (payload?.crossing === "OUT" ? 1 : 0)
-      );
-
-      const curTodayIn = Number(state.data.today_entries || 0);
-      const curTodayOut = Number(state.data.today_exits || 0);
-      const curFestIn = Number(
-        state.data.total_visitors_festival !== undefined
-          ? state.data.total_visitors_festival
-          : (state.data.festival_total_entries || curTodayIn)
-      );
-
-      const incomingTodayIn = payload?.today_entries !== undefined && payload?.today_entries !== null
-        ? Number(payload.today_entries)
-        : null;
-      const incomingTodayOut = payload?.today_exits !== undefined && payload?.today_exits !== null
-        ? Number(payload.today_exits)
-        : null;
-
-      const nextTodayIn = inDelta > 0 ? curTodayIn + inDelta : curTodayIn;
-      const nextTodayOut = outDelta > 0 ? curTodayOut + outDelta : curTodayOut;
-
-      const diffIn = nextTodayIn - curTodayIn;
-      const diffOut = nextTodayOut - curTodayOut;
-      const nextFestIn = curFestIn + (diffIn > 0 ? diffIn : 0);
-
-      // Real-time patch current hour bucket in 24-hour hourly_flow chart
-      let updatedHourly = state.data.hourly_flow;
-      if (Array.isArray(updatedHourly) && updatedHourly.length > 0 && (diffIn > 0 || diffOut > 0)) {
-        const nowUtc = new Date();
-        const istOffsetMs = 5.5 * 3600 * 1000;
-        const istDate = new Date(nowUtc.getTime() + istOffsetMs);
-        const currentHourStr = `${String(istDate.getUTCHours()).padStart(2, "0")}:00`;
-
-        updatedHourly = updatedHourly.map((bucket) => {
-          if (bucket.hour === currentHourStr) {
-            const bIn = (bucket.entry || 0) + (diffIn > 0 ? diffIn : 0);
-            const bOut = (bucket.exit || 0) + (diffOut > 0 ? diffOut : 0);
-            return {
-              ...bucket,
-              entry: bIn,
-              exit: bOut,
-              net_flow: bIn - bOut,
-            };
-          }
-          return bucket;
-        });
-      }
-
-      return {
-        data: {
-          ...state.data,
-          today_entries: nextTodayIn,
-          today_exits: nextTodayOut,
-          current_occupancy: Math.max(0, nextTodayIn - nextTodayOut),
-          net_flow: nextTodayIn - nextTodayOut,
-          total_visitors_festival: nextFestIn,
-          festival_total_entries: nextFestIn,
-          hourly_flow: updatedHourly,
-        },
-        lastUpdated: new Date().toISOString(),
-      };
-    }),
+  // Canonical ledger sync: Never speculatively inflate counts on client to avoid bounce/fluctuation.
+  patchDashboardCrossing: () =>
+    set((state) => ({
+      lastUpdated: new Date().toISOString(),
+    })),
 
   // Partial real-time patch from WebSocket events
   patchDashboardMetrics: (patch) =>
