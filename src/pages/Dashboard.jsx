@@ -291,7 +291,7 @@ export default function Dashboard() {
         !isYesterday &&
         (p.hour?.toLowerCase().includes("today") ||
           (dateRange === "7DAYS" && idx === data.hourly_flow.length - 1) ||
-          (dateRange === "FESTIVAL" && p.hour?.includes("Day 1")));
+          (dateRange === "FESTIVAL" && (p.hour?.includes(`Day ${data.current_day_number || 6}`) || idx === (data.current_day_number ? data.current_day_number - 1 : data.hourly_flow.length - 1))));
 
       const isHighlighted = isCurrent || isYesterdayPeak || isCurrentDay;
 
@@ -299,6 +299,16 @@ export default function Dashboard() {
         value: p.entry,
         exitValue: p.exit,
         isCurrent: isHighlighted,
+        label: isHighlighted
+          ? {
+              show: true,
+              position: "top",
+              color: "#fbbf24",
+              fontSize: 10,
+              fontWeight: "bold",
+              formatter: (params) => (params.value > 0 ? params.value.toLocaleString() : ""),
+            }
+          : undefined,
         itemStyle: isHighlighted
           ? {
               color: {
@@ -735,7 +745,7 @@ export default function Dashboard() {
               Loading Person Count Distribution...
             </div>
           ) : hourlyChartOption ? (
-            <ReactECharts option={hourlyChartOption} style={{ height: 260, width: "100%" }} notMerge={true} lazyUpdate={true} />
+            <ReactECharts option={hourlyChartOption} style={{ height: 260, width: "100%" }} notMerge={true} lazyUpdate={false} />
           ) : (
             <div style={{ height: 250, display: "flex", alignItems: "center", justifyContent: "center", color: "var(--cc-text-muted)" }}>
               NO DATA FOR SELECTED PERIOD

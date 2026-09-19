@@ -173,6 +173,73 @@ export const useDashboardStore = create((set, get) => ({
       const nextTodayOut = curTodayOut + outDelta;
       const nextFestIn = curFestIn + inDelta;
 
+      // Real-time update to the live current-hour / day bar in hourly_flow
+      let updatedHourly = state.data.hourly_flow;
+      if (Array.isArray(updatedHourly) && updatedHourly.length > 0) {
+        const istDate = new Date(Date.now() + 5.5 * 3600 * 1000);
+        const curIstH = istDate.getUTCHours();
+        const curHStr = `${String(curIstH).padStart(2, "0")}:00`;
+
+        const isTodayView =
+          !state.dateRange ||
+          state.dateRange.toUpperCase() === "TODAY" ||
+          (state.selectedDayNumber &&
+            state.data.current_day_number &&
+            Number(state.selectedDayNumber) === Number(state.data.current_day_number));
+
+        if (isTodayView) {
+          updatedHourly = updatedHourly.map((bucket, idx) => {
+            const matchesHour =
+              bucket.hour === curHStr ||
+              (!updatedHourly.some((b) => b.hour === curHStr) && idx === curIstH);
+            if (matchesHour) {
+              const bIn = (Number(bucket.entry) || 0) + inDelta;
+              const bOut = (Number(bucket.exit) || 0) + outDelta;
+              return {
+                ...bucket,
+                entry: bIn,
+                exit: bOut,
+                net_flow: bIn - bOut,
+              };
+            }
+            return bucket;
+          });
+        } else if (state.dateRange.toUpperCase() === "FESTIVAL") {
+          const curDayNum = state.data.current_day_number || 6;
+          updatedHourly = updatedHourly.map((bucket, idx) => {
+            const matchesDay =
+              bucket.hour?.includes(`Day ${curDayNum}`) ||
+              (!updatedHourly.some((b) => b.hour?.includes(`Day ${curDayNum}`)) && idx === updatedHourly.length - 1);
+            if (matchesDay) {
+              const bIn = (Number(bucket.entry) || 0) + inDelta;
+              const bOut = (Number(bucket.exit) || 0) + outDelta;
+              return {
+                ...bucket,
+                entry: bIn,
+                exit: bOut,
+                net_flow: bIn - bOut,
+              };
+            }
+            return bucket;
+          });
+        } else if (state.dateRange.toUpperCase() === "7DAYS") {
+          const lastIdx = updatedHourly.length - 1;
+          updatedHourly = updatedHourly.map((bucket, idx) => {
+            if (idx === lastIdx || bucket.hour?.toLowerCase().includes("today")) {
+              const bIn = (Number(bucket.entry) || 0) + inDelta;
+              const bOut = (Number(bucket.exit) || 0) + outDelta;
+              return {
+                ...bucket,
+                entry: bIn,
+                exit: bOut,
+                net_flow: bIn - bOut,
+              };
+            }
+            return bucket;
+          });
+        }
+      }
+
       return {
         data: {
           ...state.data,
@@ -182,6 +249,7 @@ export const useDashboardStore = create((set, get) => ({
           net_flow: nextTodayIn - nextTodayOut,
           total_visitors_festival: nextFestIn,
           festival_total_entries: nextFestIn,
+          hourly_flow: updatedHourly,
         },
         lastUpdated: new Date().toISOString(),
       };
