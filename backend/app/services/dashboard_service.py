@@ -313,7 +313,13 @@ class DashboardService:
         # 3. Canonical Festival Totals & Selected Range Aggregation
         # -------------------------------------------------------------------
         if target_event_id:
-            fest_total_in, fest_total_out, fest_occ = await self.counting_service.get_festival_totals(target_event_id)
+            # Use get_festival_daily_breakdown for accurate festival total:
+            # per-day max(LCE, snapshot) summed across all days.
+            # This correctly handles days where LCE lost writes (pool exhaustion)
+            # by falling back to snapshot for those days, while using LCE for days
+            # where it's higher (more recent, after pool fixes).
+            _pre_days_breakdown, fest_total_in, fest_total_out, _ = await self.counting_service.get_festival_daily_breakdown(target_event_id)
+            fest_occ = max(0, fest_total_in - fest_total_out)
             range_in, range_out, range_occ, _, _ = await self.counting_service.get_event_day_counts(
                 target_event_id, day_number=day_number, date_range=date_range
             )
@@ -321,6 +327,7 @@ class DashboardService:
                 target_event_id, day_number=cur_day_num
             )
         else:
+            _pre_days_breakdown = []
             fest_total_in, fest_total_out, fest_occ = 0, 0, 0
             range_in, range_out, range_occ = 0, 0, 0
             today_in, today_out, today_occ = 0, 0, 0
@@ -579,7 +586,7 @@ class DashboardService:
         # -------------------------------------------------------------------
         daily_trend: List[DailyTrendPoint] = []
         if target_event_id:
-            days_breakdown, _, _, _ = await self.counting_service.get_festival_daily_breakdown(target_event_id)
+            days_breakdown = _pre_days_breakdown  # Reuse result from section 3 — no second DB call
             for d_item in days_breakdown:
                 ent_val = d_item.entry_count
                 ext_val = d_item.exit_count
