@@ -127,57 +127,103 @@ export default function TopBar() {
             <i className={`bi bi-chevron-${eventMenuOpen ? "up" : "down"}`} style={{ fontSize: 10, color: "var(--cc-text-muted)" }} />
           </button>
           {eventMenuOpen && (
-            <ul
-              className="dropdown-menu dropdown-menu-dark shadow show"
+            <div
               style={{
                 display: "block",
                 position: "absolute",
                 top: "100%",
                 left: 0,
-                marginTop: 4,
-                background: "var(--cc-card-bg)",
-                borderColor: "var(--cc-border)",
+                marginTop: 6,
+                background: "var(--cc-bg-card)",
+                border: "1px solid var(--cc-border)",
+                boxShadow: "0 10px 28px rgba(0,0,0,0.35)",
+                borderRadius: 8,
                 fontSize: 12,
-                minWidth: 260,
+                minWidth: 280,
                 zIndex: 1060,
+                padding: "6px 0",
               }}
             >
-              <li className="dropdown-header text-muted" style={{ fontSize: 10, letterSpacing: 0.5 }}>
-                ACCESSIBLE FESTIVALS & EVENTS
-              </li>
-              {events.map((evt) => (
-                <li key={evt.id}>
-                  <button
-                    className={`dropdown-item d-flex justify-content-between align-items-center py-2 ${evt.id === activeEventId ? "active" : ""}`}
-                    onClick={() => {
-                      setActiveEvent(evt);
-                      setEventMenuOpen(false);
-                    }}
-                  >
-                    <div>
-                      <div style={{ fontWeight: 600 }}>{evt.name}</div>
-                      <small style={{ color: "var(--cc-text-muted)" }}>
-                        {evt.code} • {evt.site_count || 0} Sites
-                      </small>
-                    </div>
-                    <span className={`badge ${evt.status === "ACTIVE" || evt.status === "LIVE" ? "bg-success" : "bg-secondary"}`} style={{ fontSize: 9 }}>
-                      {evt.status}
-                    </span>
-                  </button>
-                </li>
-              ))}
-              <li><hr className="dropdown-divider" style={{ borderColor: "var(--cc-border)" }} /></li>
-              <li>
-                <Link
-                  to="/events"
-                  className="dropdown-item py-2 text-primary d-flex align-items-center gap-2"
-                  onClick={() => setEventMenuOpen(false)}
-                >
-                  <i className="bi bi-gear" />
-                  Manage All Events
-                </Link>
-              </li>
-            </ul>
+              <div
+                style={{
+                  fontSize: 10,
+                  letterSpacing: 0.5,
+                  fontWeight: 700,
+                  color: "var(--cc-text-muted)",
+                  padding: "6px 14px",
+                  textTransform: "uppercase",
+                }}
+              >
+                Accessible Festivals & Events
+              </div>
+              <div style={{ maxHeight: 320, overflowY: "auto" }}>
+                {events.map((evt) => {
+                  const isActive = evt.id === activeEventId;
+                  return (
+                    <button
+                      key={evt.id}
+                      type="button"
+                      style={{
+                        width: "100%",
+                        display: "flex",
+                        justifyContent: "space-between",
+                        alignItems: "center",
+                        padding: "8px 14px",
+                        background: isActive ? "var(--cc-accent)" : "transparent",
+                        color: isActive ? "#ffffff" : "var(--cc-text-primary)",
+                        border: "none",
+                        textAlign: "left",
+                        cursor: "pointer",
+                        transition: "background 0.15s ease",
+                      }}
+                      onMouseEnter={(e) => {
+                        if (!isActive) e.currentTarget.style.background = "var(--cc-bg-card-hover)";
+                      }}
+                      onMouseLeave={(e) => {
+                        if (!isActive) e.currentTarget.style.background = "transparent";
+                      }}
+                      onClick={() => {
+                        setActiveEvent(evt);
+                        setEventMenuOpen(false);
+                      }}
+                    >
+                      <div>
+                        <div style={{ fontWeight: 600, color: isActive ? "#ffffff" : "var(--cc-text-primary)" }}>
+                          {evt.name}
+                        </div>
+                        <small style={{ color: isActive ? "rgba(255,255,255,0.8)" : "var(--cc-text-muted)" }}>
+                          {evt.code} • {evt.site_count || 0} Sites
+                        </small>
+                      </div>
+                      <span
+                        className={`badge ${evt.status === "ACTIVE" || evt.status === "LIVE" ? "bg-success" : "bg-secondary"}`}
+                        style={{ fontSize: 9 }}
+                      >
+                        {evt.status}
+                      </span>
+                    </button>
+                  );
+                })}
+              </div>
+              <div style={{ height: 1, background: "var(--cc-border)", margin: "6px 0" }} />
+              <Link
+                to="/events"
+                style={{
+                  display: "flex",
+                  alignItems: "center",
+                  gap: 8,
+                  padding: "8px 14px",
+                  fontSize: 12,
+                  color: "var(--cc-accent)",
+                  textDecoration: "none",
+                  fontWeight: 600,
+                }}
+                onClick={() => setEventMenuOpen(false)}
+              >
+                <i className="bi bi-gear" />
+                Manage All Events
+              </Link>
+            </div>
           )}
         </div>
 
@@ -205,49 +251,92 @@ export default function TopBar() {
               <i className={`bi bi-chevron-${siteMenuOpen ? "up" : "down"}`} style={{ fontSize: 10 }} />
             </button>
             {siteMenuOpen && (
-              <ul
-                className="dropdown-menu dropdown-menu-dark shadow show"
+              <div
                 style={{
                   display: "block",
                   position: "absolute",
                   top: "100%",
                   left: 0,
-                  marginTop: 4,
-                  background: "var(--cc-card-bg)",
-                  borderColor: "var(--cc-border)",
+                  marginTop: 6,
+                  background: "var(--cc-bg-card)",
+                  border: "1px solid var(--cc-border)",
+                  boxShadow: "0 10px 28px rgba(0,0,0,0.35)",
+                  borderRadius: 8,
                   fontSize: 12,
-                  minWidth: 200,
+                  minWidth: 220,
                   zIndex: 1060,
+                  padding: "6px 0",
                 }}
               >
-                <li>
-                  <button
-                    className={`dropdown-item py-2 ${!activeSiteId ? "active" : ""}`}
-                    onClick={() => {
-                      setActiveSiteId(null);
-                      setSiteMenuOpen(false);
-                    }}
-                  >
-                    <i className="bi bi-grid me-2" />
-                    All Sites (Full Event)
-                  </button>
-                </li>
-                <li><hr className="dropdown-divider" style={{ borderColor: "var(--cc-border)" }} /></li>
-                {sites.map((s) => (
-                  <li key={s.id}>
-                    <button
-                      className={`dropdown-item py-2 ${s.id === activeSiteId ? "active" : ""}`}
-                      onClick={() => {
-                        setActiveSiteId(s.id);
-                        setSiteMenuOpen(false);
-                      }}
-                    >
-                      <div style={{ fontWeight: 600 }}>{s.site_name}</div>
-                      <small style={{ color: "var(--cc-text-muted)" }}>{s.site_code}</small>
-                    </button>
-                  </li>
-                ))}
-              </ul>
+                <button
+                  type="button"
+                  style={{
+                    width: "100%",
+                    display: "flex",
+                    alignItems: "center",
+                    gap: 8,
+                    padding: "8px 14px",
+                    background: !activeSiteId ? "var(--cc-accent)" : "transparent",
+                    color: !activeSiteId ? "#ffffff" : "var(--cc-text-primary)",
+                    border: "none",
+                    textAlign: "left",
+                    cursor: "pointer",
+                  }}
+                  onMouseEnter={(e) => {
+                    if (activeSiteId) e.currentTarget.style.background = "var(--cc-bg-card-hover)";
+                  }}
+                  onMouseLeave={(e) => {
+                    if (activeSiteId) e.currentTarget.style.background = "transparent";
+                  }}
+                  onClick={() => {
+                    setActiveSiteId(null);
+                    setSiteMenuOpen(false);
+                  }}
+                >
+                  <i className="bi bi-grid" />
+                  All Sites (Full Event)
+                </button>
+                <div style={{ height: 1, background: "var(--cc-border)", margin: "6px 0" }} />
+                <div style={{ maxHeight: 280, overflowY: "auto" }}>
+                  {sites.map((s) => {
+                    const isActive = s.id === activeSiteId;
+                    return (
+                      <button
+                        key={s.id}
+                        type="button"
+                        style={{
+                          width: "100%",
+                          display: "flex",
+                          flexDirection: "column",
+                          padding: "8px 14px",
+                          background: isActive ? "var(--cc-accent)" : "transparent",
+                          color: isActive ? "#ffffff" : "var(--cc-text-primary)",
+                          border: "none",
+                          textAlign: "left",
+                          cursor: "pointer",
+                        }}
+                        onMouseEnter={(e) => {
+                          if (!isActive) e.currentTarget.style.background = "var(--cc-bg-card-hover)";
+                        }}
+                        onMouseLeave={(e) => {
+                          if (!isActive) e.currentTarget.style.background = "transparent";
+                        }}
+                        onClick={() => {
+                          setActiveSiteId(s.id);
+                          setSiteMenuOpen(false);
+                        }}
+                      >
+                        <div style={{ fontWeight: 600, color: isActive ? "#ffffff" : "var(--cc-text-primary)" }}>
+                          {s.site_name}
+                        </div>
+                        <small style={{ color: isActive ? "rgba(255,255,255,0.8)" : "var(--cc-text-muted)" }}>
+                          {s.site_code}
+                        </small>
+                      </button>
+                    );
+                  })}
+                </div>
+              </div>
             )}
           </div>
         )}
