@@ -2,10 +2,12 @@ import { useEffect, useState } from "react";
 import { Link, useNavigate } from "react-router-dom";
 import { useEventStore } from "../store/useEventStore";
 import { eventService } from "../services/eventService";
+import { locationService } from "../services/locationService";
 
 export default function Events() {
   const navigate = useNavigate();
-  const { events, activeEventId, setActiveEvent, fetchEvents, isLoadingEvents } = useEventStore();
+  const { events, activeEventId, setActiveEvent, fetchEvents, isLoadingEvents, activeLocationId } = useEventStore();
+  const [locations, setLocations] = useState([]);
   const [showCreateModal, setShowCreateModal] = useState(false);
   const [isSubmitting, setIsSubmitting] = useState(false);
   const [formError, setFormError] = useState("");
@@ -39,6 +41,7 @@ export default function Events() {
     start_date: initialStart,
     end_date: initialEnd,
     status: computeStatusFromTimings(initialStart, initialEnd),
+    location_id: activeLocationId || "",
     location: "",
     city: "Hyderabad",
     state: "Telangana",
@@ -67,6 +70,7 @@ export default function Events() {
   const openCreateModal = () => {
     const s = new Date().toISOString().slice(0, 16);
     const e = new Date(Date.now() + 10 * 86400000).toISOString().slice(0, 16);
+    const defaultLoc = locations.find((l) => l.id === activeLocationId);
     setFormData({
       name: "",
       code: "",
@@ -74,9 +78,10 @@ export default function Events() {
       start_date: s,
       end_date: e,
       status: computeStatusFromTimings(s, e),
-      location: "",
-      city: "Hyderabad",
-      state: "Telangana",
+      location_id: activeLocationId || "",
+      location: defaultLoc?.name || "",
+      city: defaultLoc?.city || "Hyderabad",
+      state: defaultLoc?.state || "Telangana",
       country: "India",
       description: "",
     });
@@ -86,6 +91,7 @@ export default function Events() {
 
   useEffect(() => {
     fetchEvents();
+    locationService.getLocations().then((locs) => setLocations(locs || [])).catch(console.error);
   }, []);
 
   const handleCreate = async (e) => {
@@ -112,6 +118,7 @@ export default function Events() {
     try {
       await eventService.createEvent({
         ...formData,
+        location_id: formData.location_id || null,
         code: trimmedCode,
         year: parseInt(formData.year),
         start_date: new Date(formData.start_date).toISOString(),
@@ -286,7 +293,15 @@ export default function Events() {
                     <div style={{ fontSize: 12, color: "var(--cc-text-muted)", marginBottom: 16 }}>
                       <div className="d-flex align-items-center gap-2 mb-1">
                         <i className="bi bi-geo-alt text-primary" />
-                        <span>{evt.location ? `${evt.location}, ${evt.city}` : evt.city || "India"}</span>
+                        <span>
+                          {(() => {
+                            const matchedLoc = locations.find((l) => l.id === evt.location_id);
+                            if (matchedLoc) {
+                              return `${matchedLoc.name}${evt.location ? ` • ${evt.location}` : ""} (${matchedLoc.city || evt.city || "Hyderabad"})`;
+                            }
+                            return evt.location ? `${evt.location}, ${evt.city}` : evt.city || "India";
+                          })()}
+                        </span>
                       </div>
                       <div className="d-flex align-items-center gap-2">
                         <i className="bi bi-calendar3 text-primary" />
@@ -405,12 +420,24 @@ export default function Events() {
           tabIndex="-1"
         >
           <div className="modal-dialog modal-dialog-centered modal-lg">
-            <div className="modal-content" style={{ background: "var(--cc-card-bg)", borderColor: "var(--cc-border)" }}>
+            <div
+              className="modal-content"
+              style={{
+                background: "var(--cc-bg-card, #191f27)",
+                borderColor: "var(--cc-border)",
+                boxShadow: "0 16px 48px rgba(0,0,0,0.6)",
+                borderRadius: 10,
+              }}
+            >
               <div className="modal-header" style={{ borderColor: "var(--cc-border)" }}>
-                <h5 className="modal-title text-white">Create New Event / Festival</h5>
+                <h5 className="modal-title" style={{ color: "var(--cc-text-primary)", fontWeight: 700 }}>
+                  <i className="bi bi-calendar-plus me-2 text-primary" />
+                  Create New Event / Festival
+                </h5>
                 <button
                   type="button"
-                  className="btn-close btn-close-white"
+                  className="btn-close"
+                  style={{ filter: "var(--cc-btn-close-filter, invert(1))" }}
                   onClick={() => setShowCreateModal(false)}
                 />
               </div>
@@ -473,6 +500,49 @@ export default function Events() {
                       )}
                     </div>
 
+                    {/* Location Selection Dropdown */}
+                    <div className="col-md-6">
+                      <label className="form-label text-muted small d-flex justify-content-between align-items-center">
+                        <span>Physical Location</span>
+                        <Link to="/locations" className="text-primary text-decoration-none" style={{ fontSize: 11 }}>
+                          <i className="bi bi-geo-alt me-1" />+ Manage Locations
+                        </Link>
+                      </label>
+                      <select
+                        className="form-select"
+                        value={formData.location_id || ""}
+                        onChange={(e) => {
+                          const locId = e.target.value;
+                          const sel = locations.find((l) => l.id === locId);
+                          setFormData((prev) => ({
+                            ...prev,
+                            location_id: locId || null,
+                            location: sel ? sel.name : prev.location,
+                            city: sel?.city || prev.city || "Hyderabad",
+                            state: sel?.state || prev.state || "Telangana",
+                          }));
+                        }}
+                      >
+                        <option value="">-- Select Location --</option>
+                        {locations.map((loc) => (
+                          <option key={loc.id} value={loc.id}>
+                            {loc.name} {loc.city ? `(${loc.city})` : ""}
+                          </option>
+                        ))}
+                      </select>
+                    </div>
+
+                    <div className="col-md-6">
+                      <label className="form-label text-muted small">Venue / Specific Landmark</label>
+                      <input
+                        type="text"
+                        className="form-control"
+                        placeholder="e.g. NTR Grounds, Temple Complex, Tank Bund"
+                        value={formData.location}
+                        onChange={(e) => setFormData({ ...formData, location: e.target.value })}
+                      />
+                    </div>
+
                     <div className="col-md-4">
                       <label className="form-label text-muted small">Year</label>
                       <input
@@ -504,17 +574,7 @@ export default function Events() {
                       />
                     </div>
 
-                    <div className="col-md-6">
-                      <label className="form-label text-muted small">Location Name</label>
-                      <input
-                        type="text"
-                        className="form-control"
-                        placeholder="e.g. NTR Grounds, Tank Bund"
-                        value={formData.location}
-                        onChange={(e) => setFormData({ ...formData, location: e.target.value })}
-                      />
-                    </div>
-                    <div className="col-md-3">
+                    <div className="col-md-4">
                       <label className="form-label text-muted small">City</label>
                       <input
                         type="text"
@@ -523,7 +583,16 @@ export default function Events() {
                         onChange={(e) => setFormData({ ...formData, city: e.target.value })}
                       />
                     </div>
-                    <div className="col-md-3">
+                    <div className="col-md-4">
+                      <label className="form-label text-muted small">State</label>
+                      <input
+                        type="text"
+                        className="form-control"
+                        value={formData.state}
+                        onChange={(e) => setFormData({ ...formData, state: e.target.value })}
+                      />
+                    </div>
+                    <div className="col-md-4">
                       <label className="form-label text-muted small d-flex justify-content-between align-items-center">
                         <span>Status</span>
                         {formData.status === "ACTIVE" && (
@@ -597,15 +666,24 @@ export default function Events() {
           tabIndex="-1"
         >
           <div className="modal-dialog modal-dialog-centered">
-            <div className="modal-content" style={{ background: "var(--cc-card-bg)", borderColor: "var(--cc-border)" }}>
+            <div
+              className="modal-content"
+              style={{
+                background: "var(--cc-bg-card, #191f27)",
+                borderColor: "var(--cc-border)",
+                boxShadow: "0 16px 48px rgba(0,0,0,0.6)",
+                borderRadius: 10,
+              }}
+            >
               <div className="modal-header" style={{ borderColor: "var(--cc-border)" }}>
-                <h5 className="modal-title text-warning">
+                <h5 className="modal-title text-warning" style={{ fontWeight: 700 }}>
                   <i className="bi bi-archive me-2" />
                   Archive Event?
                 </h5>
                 <button
                   type="button"
-                  className="btn-close btn-close-white"
+                  className="btn-close"
+                  style={{ filter: "var(--cc-btn-close-filter, invert(1))" }}
                   onClick={() => setArchiveTarget(null)}
                 />
               </div>
@@ -649,15 +727,24 @@ export default function Events() {
           tabIndex="-1"
         >
           <div className="modal-dialog modal-dialog-centered">
-            <div className="modal-content" style={{ background: "var(--cc-card-bg)", borderColor: "var(--cc-border)" }}>
+            <div
+              className="modal-content"
+              style={{
+                background: "var(--cc-bg-card, #191f27)",
+                borderColor: "var(--cc-border)",
+                boxShadow: "0 16px 48px rgba(0,0,0,0.6)",
+                borderRadius: 10,
+              }}
+            >
               <div className="modal-header" style={{ borderColor: "var(--cc-border)" }}>
-                <h5 className="modal-title text-white">
-                  <i className="bi bi-arrow-repeat me-2" />
+                <h5 className="modal-title" style={{ color: "var(--cc-text-primary)", fontWeight: 700 }}>
+                  <i className="bi bi-arrow-repeat me-2 text-warning" />
                   Change Event Status
                 </h5>
                 <button
                   type="button"
-                  className="btn-close btn-close-white"
+                  className="btn-close"
+                  style={{ filter: "var(--cc-btn-close-filter, invert(1))" }}
                   onClick={() => setStatusTarget(null)}
                 />
               </div>

@@ -21,6 +21,7 @@ class EventBase(BaseSchema):
     country: Optional[str] = Field(default="India", max_length=100)
     latitude: Optional[float] = None
     longitude: Optional[float] = None
+    location_id: Optional[uuid.UUID] = None
 
 
 class EventCreate(EventBase):
@@ -42,6 +43,7 @@ class EventUpdate(BaseModel):
     country: Optional[str] = None
     latitude: Optional[float] = None
     longitude: Optional[float] = None
+    location_id: Optional[uuid.UUID] = None
 
 
 class EventRead(EventBase):
