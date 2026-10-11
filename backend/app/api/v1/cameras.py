@@ -68,10 +68,10 @@ async def list_cameras(
     # Calculate effective site scoping:
     effective_sites = [site_id] if site_id else ctx.allowed_site_ids
 
-    # When location_id is provided, use location-scoping only.
-    # Cameras in a location can span multiple events (e.g. KHB-2026 COMPLETED + 1234 ACTIVE),
-    # so filtering by a single resolved event_id would hide cameras from other events.
-    effective_event_id = None if ctx.location_id else ctx.event_id
+    # When a specific event is selected, always filter cameras by that event_id.
+    # This enables strict per-event camera isolation for multi-event locations.
+    # Only fall back to location-only scoping when no event_id is resolved.
+    effective_event_id = ctx.event_id if ctx.event_id else None
 
     cameras, total = await service.get_cameras(
         zone_code=zone,
