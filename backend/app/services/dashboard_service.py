@@ -654,9 +654,10 @@ class DashboardService:
             stmt_frs = (
                 select(FRSCandidate)
                 .options(selectinload(FRSCandidate.reference_profile))
-                .order_by(FRSCandidate.detected_at.desc())
-                .limit(2)
             )
+            if target_event_id:
+                stmt_frs = stmt_frs.where(FRSCandidate.event_id == target_event_id)
+            stmt_frs = stmt_frs.order_by(FRSCandidate.detected_at.desc()).limit(2)
             res_frs = await self.db.execute(stmt_frs)
             for c in res_frs.scalars().all():
                 p_name = c.reference_profile.display_name if c.reference_profile else "Watchlist Candidate"

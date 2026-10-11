@@ -1,5 +1,5 @@
 from functools import lru_cache
-from typing import List
+from typing import List, Optional
 from pydantic_settings import BaseSettings, SettingsConfigDict
 from pydantic import Field, field_validator, model_validator
 
@@ -26,8 +26,8 @@ class Settings(BaseSettings):
     # JWT Authentication
     JWT_SECRET_KEY: str = "byc_super_secret_jwt_key_khairatabad_2026_production_change_me"
     JWT_ALGORITHM: str = "HS256"
-    ACCESS_TOKEN_EXPIRE_MINUTES: int = 30
-    REFRESH_TOKEN_EXPIRE_DAYS: int = 7
+    ACCESS_TOKEN_EXPIRE_MINUTES: int = 1440   # 24 hours — users stay logged in all day
+    REFRESH_TOKEN_EXPIRE_DAYS: int = 30        # 30-day sliding refresh window
 
     # Internal AI Service API Key
     AI_SERVICE_API_KEY: str = "byc_ai_internal_service_token_2026"
@@ -51,6 +51,14 @@ class Settings(BaseSettings):
     FRS_MIN_FACE_SIZE: int = 60
     FRS_MIN_SHARPNESS: float = 45.0
     FRS_MAX_YAW_ANGLE: float = 35.0
+
+    # SMTP Email Configuration
+    SMTP_HOST: Optional[str] = "smtp.gmail.com"
+    SMTP_PORT: int = 587
+    SMTP_USER: Optional[str] = None
+    SMTP_PASSWORD: Optional[str] = None
+    SMTP_FROM: str = "BYC AI Command Center <buildyourcode.tech@gmail.com>"
+    SMTP_TLS: bool = True
 
     model_config = SettingsConfigDict(
         env_file=".env",

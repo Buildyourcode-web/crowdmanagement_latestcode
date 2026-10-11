@@ -25,6 +25,7 @@ from app.models.ai_deployment import AIPipelineDeployment
 from app.models.camera_ai_assignment import CameraAIProfileAssignment
 from app.models.camera_roi import CameraROIConfiguration
 from app.models.line_crossing import LineCrossingEvent
+from app.models.location import Location, LocationVerification
 import app.models.settings
 
 __all__ = [
@@ -56,5 +57,7 @@ __all__ = [
     "FRSCandidate",
     "FRSReferenceProfile",
     "AuditLog",
+    "Location",
+    "LocationVerification",
 ]
 

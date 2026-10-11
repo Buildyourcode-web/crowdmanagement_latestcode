@@ -39,30 +39,64 @@ export function getApiBaseUrl() {
 }
 
 /**
- * Returns the WebSocket endpoint URL.
- * 
+ * Returns the WebSocket endpoint URL with authentication and context query params.
+ *
+ * The backend uses these params to:
+ *  1. Validate the JWT token and identify the user.
+ *  2. Place the socket into the correct isolated location/event room.
+ *  3. Reject the connection if the token is invalid or context is mismatched.
+ *
  * - On production server (e.g. http://13.233.154.239):
- *   Connects to ws://13.233.154.239/ws/v1/events (via Nginx reverse proxy on port 80).
+ *   Connects to ws://13.233.154.239/ws/v1/events?token=...&... (via Nginx reverse proxy).
  * - On HTTPS server (e.g. https://domain.com):
- *   Connects to wss://domain.com/ws/v1/events (via Nginx reverse proxy on port 443).
+ *   Connects to wss://domain.com/ws/v1/events?token=...&... (via Nginx reverse proxy).
  * - On local development:
- *   Connects to ws://localhost:5173/ws/v1/events (via Vite proxy).
+ *   Connects to ws://localhost:5173/ws/v1/events?token=...&... (via Vite proxy).
  */
 export function getWsUrl() {
   const configuredWs = (import.meta.env.VITE_WS_URL || "").trim();
+
+  let baseUrl = "";
 
   if (typeof window !== "undefined") {
     const hostname = window.location.hostname;
     const isLocal = hostname === "localhost" || hostname === "127.0.0.1";
 
     if (configuredWs && (isLocal || !configuredWs.includes("localhost"))) {
-      return `${configuredWs.replace(/\/+$/, "")}/ws/v1/events`;
+      baseUrl = `${configuredWs.replace(/\/+$/, "")}/ws/v1/events`;
+    } else {
+      const protocol = window.location.protocol === "https:" ? "wss:" : "ws:";
+      baseUrl = `${protocol}//${window.location.host}/ws/v1/events`;
     }
-
-    const protocol = window.location.protocol === "https:" ? "wss:" : "ws:";
-    // window.location.host includes hostname and port (e.g. "13.233.154.239" or "localhost:5173")
-    return `${protocol}//${window.location.host}/ws/v1/events`;
   }
 
-  return "";
+  if (!baseUrl) return "";
+
+  // Append authentication + context query params for server-side room isolation
+  const params = new URLSearchParams();
+
+  try {
+    // JWT access token — stored by the auth service on login
+    const token =
+      localStorage.getItem("byc_access_token") ||
+      localStorage.getItem("access_token") ||
+      localStorage.getItem("token");
+    if (token) params.set("token", token);
+
+    // Active context — set by useEventStore on location/event selection
+    const locationId = localStorage.getItem("byc_active_location_id");
+    if (locationId) params.set("location_id", locationId);
+
+    const eventId = localStorage.getItem("byc_active_event_id");
+    if (eventId) params.set("event_id", eventId);
+
+    const siteId = localStorage.getItem("byc_active_site_id");
+    if (siteId) params.set("site_id", siteId);
+  } catch (e) {
+    // localStorage unavailable (SSR / private mode) — continue without params
+  }
+
+  const queryString = params.toString();
+  return queryString ? `${baseUrl}?${queryString}` : baseUrl;
 }
+

@@ -3,6 +3,8 @@ import { create } from "zustand";
 import { eventService } from "../services/eventService";
 import { invalidateApiCache } from "../services/apiClient";
 import { useDashboardStore } from "./useDashboardStore";
+import { realtimeService } from "../services/realtimeService";
+
 
 export const useEventStore = create((set, get) => ({
   events: [],
@@ -10,6 +12,9 @@ export const useEventStore = create((set, get) => ({
   activeEventId: localStorage.getItem("byc_active_event_id") || null,
   sites: [],
   activeSiteId: localStorage.getItem("byc_active_site_id") || null,
+  activeLocation: null,
+  activeLocationId: localStorage.getItem("byc_active_location_id") || null,
+  activeLocationName: localStorage.getItem("byc_active_location_name") || null,
   isLoadingEvents: false,
   isLoadingSites: false,
   error: null,
@@ -21,12 +26,22 @@ export const useEventStore = create((set, get) => ({
       set({ events, isLoadingEvents: false });
 
       const currentActiveId = get().activeEventId || localStorage.getItem("byc_active_event_id");
+      const currentLocationId = get().activeLocationId || localStorage.getItem("byc_active_location_id");
+
       let matched = events.find((e) => e.id === currentActiveId);
 
-      // If no valid active event currently selected, pick default
+      // If no valid active event, respect the active location
       if (!matched) {
-        const khbEvent = events.find((e) => e.code === "KHB-2026" || e.name?.toLowerCase().includes("khairatabad"));
-        matched = khbEvent || events.find((e) => e.status === "ACTIVE" || e.status === "LIVE") || events[0];
+        if (currentLocationId) {
+          // Pick the ACTIVE/LIVE event that belongs to this location first
+          matched =
+            events.find((e) => e.location_id === currentLocationId && (e.status === "ACTIVE" || e.status === "LIVE")) ||
+            events.find((e) => e.location_id === currentLocationId);
+        }
+        // Only fall back to any global event when NO location is selected
+        if (!matched && !currentLocationId) {
+          matched = events.find((e) => e.status === "ACTIVE" || e.status === "LIVE") || events[0];
+        }
       }
 
       if (matched && (!get().activeEvent || get().activeEvent.id !== matched.id)) {
@@ -68,7 +83,14 @@ export const useEventStore = create((set, get) => ({
     invalidateApiCache();
 
     get().fetchSites(eventId);
+
+    // Reconnect WebSocket with new event context so backend places this
+    // connection in the correct isolated room immediately.
+    try {
+      realtimeService.reconnectWithContext();
+    } catch (e) {}
   },
+
 
   fetchSites: async (eventId = null) => {
     const targetEventId = eventId || get().activeEventId;
@@ -95,5 +117,62 @@ export const useEventStore = create((set, get) => ({
       } catch (e) {}
     }
     set({ activeSiteId: siteId || null });
+  },
+
+  setActiveLocation: (loc) => {
+    invalidateApiCache();
+    if (!loc) {
+      try {
+        localStorage.removeItem("byc_active_location_id");
+        localStorage.removeItem("byc_active_location_name");
+        localStorage.removeItem("byc_active_event_id");
+        localStorage.removeItem("byc_user_explicit_event");
+        localStorage.removeItem("byc_active_site_id");
+      } catch (e) {}
+      set({
+        activeLocation: null,
+        activeLocationId: null,
+        activeLocationName: null,
+        activeEvent: null,
+        activeEventId: null,
+        activeSiteId: null,
+      });
+      return;
+    }
+    const locId = loc.id;
+    const locName = loc.name;
+    // Clear stale event/site from previous location so the backend
+    // resolves a fresh event for the new location (no X-Event-ID header sent).
+    try {
+      localStorage.setItem("byc_active_location_id", locId);
+      localStorage.setItem("byc_active_location_name", locName);
+      localStorage.removeItem("byc_active_event_id");
+      localStorage.removeItem("byc_user_explicit_event");
+      localStorage.removeItem("byc_active_site_id");
+    } catch (e) {}
+    set({
+      activeLocation: loc,
+      activeLocationId: locId,
+      activeLocationName: locName,
+      activeEvent: null,
+      activeEventId: null,
+      activeSiteId: null,
+    });
+
+    // Reconnect WebSocket with new location context (event_id cleared above,
+    // the new event will be fetched + WS reconnected again from setActiveEvent).
+    try {
+      realtimeService.reconnectWithContext();
+    } catch (e) {}
+  },
+
+
+  clearActiveLocation: () => {
+    invalidateApiCache();
+    try {
+      localStorage.removeItem("byc_active_location_id");
+      localStorage.removeItem("byc_active_location_name");
+    } catch (e) {}
+    set({ activeLocation: null, activeLocationId: null, activeLocationName: null });
   },
 }));

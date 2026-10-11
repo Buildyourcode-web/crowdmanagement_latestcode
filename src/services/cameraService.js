@@ -89,3 +89,31 @@ export async function getZones() {
   const res = await apiClient.get("/api/v1/zones");
   return res.data;
 }
+
+/**
+ * Freeze or resume official entry count commits on an ENTRY camera worker.
+ * Video, detection, and tracking continue regardless of this flag.
+ */
+export async function setCameraCountingActive(cameraId, active) {
+  const cleanId = String(cameraId).replace(/-FRS$/i, "").replace(/-CROWD$/i, "");
+  const res = await apiClient.patch(
+    `/api/v1/frs-engine/cameras/${cleanId}/counting-active`,
+    null,
+    { params: { active } }
+  );
+  return res?.data || res;
+}
+
+/**
+ * Set the count multiplier for an ENTRY camera worker.
+ * mode=1 → +1 per crossing (default), mode=2 → +2 per crossing.
+ */
+export async function setCameraCountMode(cameraId, mode) {
+  const cleanId = String(cameraId).replace(/-FRS$/i, "").replace(/-CROWD$/i, "");
+  const res = await apiClient.patch(
+    `/api/v1/frs-engine/cameras/${cleanId}/count-mode`,
+    null,
+    { params: { mode } }
+  );
+  return res?.data || res;
+}

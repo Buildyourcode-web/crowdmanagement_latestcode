@@ -42,6 +42,7 @@ class CameraRead(BaseSchema):
     removed_at: Optional[datetime] = None
     event_id: Optional[uuid.UUID] = None
     site_id: Optional[uuid.UUID] = None
+    location_id: Optional[uuid.UUID] = None
     
     # Capabilities & Metrics
     is_frs: bool = Field(..., alias="is_frs_camera")
@@ -99,6 +100,7 @@ class CameraCreate(BaseModel):
     fps: int = 25
     event_id: Optional[uuid.UUID] = None
     site_id: Optional[uuid.UUID] = None
+    location_id: Optional[uuid.UUID] = None
     is_active: bool = True
 
 
@@ -116,6 +118,7 @@ class CameraUpdate(BaseModel):
     zone_id: Optional[uuid.UUID] = None
     event_id: Optional[uuid.UUID] = None
     site_id: Optional[uuid.UUID] = None
+    location_id: Optional[uuid.UUID] = None
     location_name: Optional[str] = None
     latitude: Optional[float] = None
     longitude: Optional[float] = None

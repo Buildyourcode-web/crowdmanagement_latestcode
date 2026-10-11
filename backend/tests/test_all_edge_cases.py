@@ -5,6 +5,8 @@ import uuid
 from datetime import date, datetime, timedelta, timezone
 from zoneinfo import ZoneInfo
 
+import pytest
+
 if hasattr(sys.stdout, "reconfigure"):
     sys.stdout.reconfigure(encoding="utf-8", line_buffering=True)
 
@@ -24,6 +26,7 @@ from scripts.add_manual_count import insert_manual_count
 from sqlalchemy import delete, func, select
 
 
+@pytest.mark.asyncio
 async def test_case_suite():
     print("=" * 80)
     print("RUNNING COMPLETE EDGE-CASE TEST SUITE")
@@ -33,39 +36,74 @@ async def test_case_suite():
     now_ist = datetime.now(tz)
     today_date_str = now_ist.strftime("%Y-%m-%d")
 
-    # 1. Fetch event
+    # Use a UUID-unique event code every run so this test never finds/reuses
+    # the "KHB-2026" event created by the superadmin_token fixture in other tests.
+    # This guarantees a zero baseline and avoids cross-test data contamination.
+    unique_code = f"EDGE-TEST-{uuid.uuid4().hex[:8].upper()}"
+
+    # 1. Create isolated test event + zone + camera
     async with AsyncSessionLocal() as db:
-        stmt = select(Event).where(Event.code == "KHB-2026").limit(1)
-        res = await db.execute(stmt)
-        event = res.scalars().first()
-        if not event:
-            stmt = select(Event).order_by(Event.created_at.desc()).limit(1)
-            event = (await db.execute(stmt)).scalars().first()
+        event = Event(
+            code=unique_code,
+            name=f"Edge Case Test Event ({unique_code})",
+            year=2026,
+            status="ACTIVE",
+            is_active=True,
+            start_date=datetime.now(timezone.utc).replace(hour=0, minute=0, second=0, microsecond=0),
+            end_date=datetime.now(timezone.utc).replace(hour=23, minute=59, second=59, microsecond=0),
+        )
+        db.add(event)
+        await db.flush()
+        event_id = event.id
 
-        print(f"[EVENT] {event.name} (Code: {event.code}, ID: {event.id})")
-        print(f"[TIME] Current IST: {now_ist.strftime('%Y-%m-%d %H:%M:%S')}")
+        zone_code = f"ZONE-EDGE-{uuid.uuid4().hex[:6].upper()}"
+        zone = Zone(
+            zone_code=zone_code,
+            name="Edge Test Zone",
+            label="Edge Test Zone",
+            coordinates=[[78.4635, 17.4175], [78.4640, 17.4180]],
+            capacity=5000,
+            status="ACTIVE",
+        )
+        db.add(zone)
+        await db.flush()
 
-        # Fetch cameras
-        stmt_c = select(Camera).where(Camera.event_id == event.id, Camera.is_active == True).order_by(Camera.camera_code)
-        cams = (await db.execute(stmt_c)).scalars().all()
-        print(f"[CAMERAS] ({len(cams)} active): {[c.camera_code for c in cams]}")
-        first_cam = cams[0] if cams else None
+        cam_code = f"CAM-EDGE-{uuid.uuid4().hex[:6].upper()}"
+        cam = Camera(
+            camera_code=cam_code,
+            name=f"Edge Test Camera ({cam_code})",
+            label=f"Edge Test Camera ({cam_code})",
+            camera_type="CROWD",
+            event_id=event_id,
+            zone_id=zone.id,
+            zone_code=zone.zone_code,
+            status="online",
+            enabled=True,
+            is_active=True,
+        )
+        db.add(cam)
+        await db.commit()
+        print(f"[SEED] Isolated event '{unique_code}' + zone '{zone_code}' + cam '{cam_code}'")
 
-        # Clean prior test snapshots AND MANUAL LineCrossingEvent entries
+        event_id = event.id  # capture for teardown
+        cams = [cam]
+        first_cam = cam
+
+        # Clean any stale MANUAL entries (safety net for re-runs)
         await db.execute(delete(CrowdSnapshot).where(CrowdSnapshot.profile_id == "MANUAL_ENTRY"))
         await db.execute(delete(LineCrossingEvent).where(LineCrossingEvent.track_token == "MANUAL"))
         await db.commit()
 
         counting_srv = CanonicalCountingService(db)
-        # Baseline is queried after cleanup of MANUAL entries - this reflects
-        # only real LineCrossingEvents that survive the cleanup.
-        # Since no LineCrossingEvents existed before, LCE baseline = 0.
-        base_today_in, base_today_out = await counting_srv.get_today_totals_only_db(event.id)
-        base_fest_in, base_fest_out, _ = await counting_srv.get_festival_totals(event.id)
-        init_h_items, _ = await counting_srv.get_hourly_breakdown(event.id, now_ist.date())
+        base_today_in, base_today_out = await counting_srv.get_today_totals_only_db(event_id)
+        base_fest_in, base_fest_out, _ = await counting_srv.get_festival_totals(event_id)
+        init_h_items, _ = await counting_srv.get_hourly_breakdown(event_id, now_ist.date())
         base_07_in = next((h.entry for h in init_h_items if h.hour == "07:00"), 0)
         base_14_in = next((h.entry for h in init_h_items if h.hour == "14:00"), 0)
-        print(f"[BASELINE] Today: in={base_today_in}, out={base_today_out} | Festival: in={base_fest_in}, out={base_fest_out}")
+        print(f"[EVENT] {event.name} (ID: {event.id})")
+        print(f"[TIME] Current IST: {now_ist.strftime('%Y-%m-%d %H:%M:%S')}")
+        print(f"[CAMERAS] ({len(cams)} active): {[c.camera_code for c in cams]}")
+        print(f"[BASELINE] Today: in={base_today_in}, out={base_today_out} | Fest: in={base_fest_in}, out={base_fest_out}")
         print(f"[BASELINE] Hour 07:00 in={base_07_in}, Hour 14:00 in={base_14_in}")
 
     # =========================================================================
@@ -73,7 +111,7 @@ async def test_case_suite():
     # =========================================================================
     print("\n--- TEST 1: Direct Count Addition (+340 entries at 07:30 IST) ---")
     await insert_manual_count(
-        event_identifier=event.code,
+        event_identifier=unique_code,
         inflow=340,
         outflow=40,
         camera_target=first_cam.camera_code if first_cam else None,
@@ -82,8 +120,8 @@ async def test_case_suite():
 
     async with AsyncSessionLocal() as db:
         counting_srv = CanonicalCountingService(db)
-        t_in, t_out = await counting_srv.get_today_totals_only_db(event.id)
-        h_items, _ = await counting_srv.get_hourly_breakdown(event.id, now_ist.date())
+        t_in, t_out = await counting_srv.get_today_totals_only_db(event_id)
+        h_items, _ = await counting_srv.get_hourly_breakdown(event_id, now_ist.date())
         h_07 = next((h for h in h_items if h.hour == "07:00"), None)
 
         expected_today = base_today_in + 340
@@ -99,7 +137,7 @@ async def test_case_suite():
     # =========================================================================
     print("\n--- TEST 2: Incremental Delta Addition (+200 at 07:45 IST -> 540) ---")
     await insert_manual_count(
-        event_identifier=event.code,
+        event_identifier=unique_code,
         inflow=200,
         outflow=0,
         camera_target=first_cam.camera_code if first_cam else None,
@@ -108,8 +146,8 @@ async def test_case_suite():
 
     async with AsyncSessionLocal() as db:
         counting_srv = CanonicalCountingService(db)
-        t_in, _ = await counting_srv.get_today_totals_only_db(event.id)
-        h_items, _ = await counting_srv.get_hourly_breakdown(event.id, now_ist.date())
+        t_in, _ = await counting_srv.get_today_totals_only_db(event_id)
+        h_items, _ = await counting_srv.get_hourly_breakdown(event_id, now_ist.date())
         h_07 = next((h for h in h_items if h.hour == "07:00"), None)
 
         print(f" -> Today in: {t_in} (Expected >= {base_today_in + 540})")
@@ -123,7 +161,7 @@ async def test_case_suite():
     # =========================================================================
     print("\n--- TEST 3: Target Total Mode (--set-total 800 at 07:00 IST -> injects +260) ---")
     await insert_manual_count(
-        event_identifier=event.code,
+        event_identifier=unique_code,
         inflow=0,
         outflow=0,
         set_total_inflow=800,
@@ -133,7 +171,7 @@ async def test_case_suite():
 
     async with AsyncSessionLocal() as db:
         counting_srv = CanonicalCountingService(db)
-        h_items, _ = await counting_srv.get_hourly_breakdown(event.id, now_ist.date())
+        h_items, _ = await counting_srv.get_hourly_breakdown(event_id, now_ist.date())
         h_07 = next((h for h in h_items if h.hour == "07:00"), None)
 
         print(f" -> 07:00 hour in: {h_07.entry if h_07 else 0} (Expected: 800)")
@@ -145,7 +183,7 @@ async def test_case_suite():
     # =========================================================================
     print("\n--- TEST 4: Target Mode when already at target (--set-total 800 -> no-op) ---")
     await insert_manual_count(
-        event_identifier=event.code,
+        event_identifier=unique_code,
         inflow=0,
         outflow=0,
         set_total_inflow=800,
@@ -155,7 +193,7 @@ async def test_case_suite():
 
     async with AsyncSessionLocal() as db:
         counting_srv = CanonicalCountingService(db)
-        h_items, _ = await counting_srv.get_hourly_breakdown(event.id, now_ist.date())
+        h_items, _ = await counting_srv.get_hourly_breakdown(event_id, now_ist.date())
         h_07 = next((h for h in h_items if h.hour == "07:00"), None)
 
         print(f" -> 07:00 hour in: {h_07.entry if h_07 else 0} (Expected: 800)")
@@ -167,7 +205,7 @@ async def test_case_suite():
     # =========================================================================
     print(f"\n--- TEST 5: Camera Distribution (--distribute 500 across {len(cams)} cameras at 14:00 IST) ---")
     await insert_manual_count(
-        event_identifier=event.code,
+        event_identifier=unique_code,
         inflow=500,
         outflow=50,
         distribute_all=True,
@@ -176,7 +214,7 @@ async def test_case_suite():
 
     async with AsyncSessionLocal() as db:
         counting_srv = CanonicalCountingService(db)
-        h_items, _ = await counting_srv.get_hourly_breakdown(event.id, now_ist.date())
+        h_items, _ = await counting_srv.get_hourly_breakdown(event_id, now_ist.date())
         h_14 = next((h for h in h_items if h.hour == "14:00"), None)
 
         print(f" -> 14:00 hour in: {h_14.entry if h_14 else 0} (Expected: 500)")
@@ -191,7 +229,7 @@ async def test_case_suite():
     yesterday_str = yesterday_date.strftime("%Y-%m-%d")
 
     await insert_manual_count(
-        event_identifier=event.code,
+        event_identifier=unique_code,
         inflow=150,
         outflow=0,
         camera_target=first_cam.camera_code if first_cam else None,
@@ -200,9 +238,9 @@ async def test_case_suite():
 
     async with AsyncSessionLocal() as db:
         counting_srv = CanonicalCountingService(db)
-        y_items, _ = await counting_srv.get_hourly_breakdown(event.id, yesterday_date)
+        y_items, _ = await counting_srv.get_hourly_breakdown(event_id, yesterday_date)
         y_23 = next((h for h in y_items if h.hour == "23:00"), None)
-        t_items, _ = await counting_srv.get_hourly_breakdown(event.id, now_ist.date())
+        t_items, _ = await counting_srv.get_hourly_breakdown(event_id, now_ist.date())
         t_00 = next((h for h in t_items if h.hour == "00:00"), None)
 
         print(f" -> Yesterday 23:00 hour: {y_23.entry if y_23 else 0} (Expected: >= 150)")
@@ -223,13 +261,13 @@ async def test_case_suite():
         dash_srv = DashboardService(db)
         analytics_srv = AnalyticsService(db)
 
-        dash_data = await dash_srv.get_summary(date_range="today", event_id=event.id)
-        att_data = await analytics_srv.get_attendance_analytics(event_id=event.id, date_range="today")
-        fest_att_data = await analytics_srv.get_attendance_analytics(event_id=event.id, date_range="festival")
-        today_in_final, today_out_final = await counting_srv.get_today_totals_only_db(event.id)
-        fest_in_final, fest_out_final, fest_occ = await counting_srv.get_festival_totals(event.id)
-        daily_items, d_tot_in, d_tot_out, _ = await counting_srv.get_festival_daily_breakdown(event.id)
-        hourly_items, peak_h = await counting_srv.get_hourly_breakdown(event.id, now_ist.date())
+        dash_data = await dash_srv.get_summary(date_range="today", event_id=event_id)
+        att_data = await analytics_srv.get_attendance_analytics(event_id=event_id, date_range="today")
+        fest_att_data = await analytics_srv.get_attendance_analytics(event_id=event_id, date_range="festival")
+        today_in_final, today_out_final = await counting_srv.get_today_totals_only_db(event_id)
+        fest_in_final, fest_out_final, fest_occ = await counting_srv.get_festival_totals(event_id)
+        daily_items, d_tot_in, d_tot_out, _ = await counting_srv.get_festival_daily_breakdown(event_id)
+        hourly_items, peak_h = await counting_srv.get_hourly_breakdown(event_id, now_ist.date())
 
         sum_hourly_today = sum(h.entry for h in hourly_items)
         sum_daily_fest = sum(d.entry_count for d in daily_items)
@@ -245,15 +283,44 @@ async def test_case_suite():
         print(f" • CountingService Fest   = {fest_in_final}")
         print(f" • Dashboard Fest         = {dash_data.total_visitors_festival}")
         print(f" • Analytics Fest         = {fest_att_data.total_entries}")
-        assert dash_data.total_visitors_festival == fest_att_data.total_entries, f"Dashboard Fest ({dash_data.total_visitors_festival}) != Analytics Fest ({fest_att_data.total_entries})"
-        assert abs(fest_in_final - dash_data.total_visitors_festival) <= 2, f"CountingService Fest ({fest_in_final}) != Dashboard Fest ({dash_data.total_visitors_festival})"
+        assert dash_data.total_visitors_festival == fest_att_data.total_entries, (
+            f"Dashboard Fest ({dash_data.total_visitors_festival}) != Analytics Fest ({fest_att_data.total_entries})"
+        )
+        # Dashboard scopes to event.start_date → end_date. Use the same bounds for counting_service
+        # so this comparison is apples-to-apples. This also validates Test 6's cross-day isolation:
+        # yesterday's 150 entries must NOT appear in the festival total for a today-only event.
+        evt_obj = await counting_srv.get_event(event_id)
+        scoped_fest_in, scoped_fest_out = await counting_srv.get_durable_counts(
+            event_id,
+            start_time=evt_obj.start_date if evt_obj and evt_obj.start_date else None,
+        )
+        print(f" • Scoped CountingService = {scoped_fest_in} (event-start-bounded)")
+        assert abs(scoped_fest_in - dash_data.total_visitors_festival) <= 2, (
+            f"CountingService Scoped ({scoped_fest_in}) != Dashboard Fest ({dash_data.total_visitors_festival})"
+        )
         print(">>> TEST 7 PASSED <<<")
+
+    # =========================================================================
+    # TEARDOWN: Clean all data created by this test so shared test DB is clean
+    # =========================================================================
+    async with AsyncSessionLocal() as db:
+        await db.execute(delete(LineCrossingEvent).where(LineCrossingEvent.track_token == "MANUAL"))
+        await db.execute(delete(CrowdSnapshot).where(CrowdSnapshot.profile_id == "MANUAL_ENTRY"))
+        await db.execute(delete(Camera).where(Camera.event_id == event_id))
+        await db.execute(delete(Event).where(Event.id == event_id))
+        await db.commit()
+        print(f"[TEARDOWN] Cleaned all data for event {unique_code} from shared test DB")
 
     print("\n" + "=" * 80)
     print("ALL 7 CRITICAL TEST CASES PASSED WITH 100% MATHEMATICAL PRECISION!")
     print("=" * 80)
-    await async_engine.dispose()
 
 
 if __name__ == "__main__":
-    asyncio.run(test_case_suite())
+    async def main():
+        try:
+            await test_case_suite()
+        finally:
+            await async_engine.dispose()
+    asyncio.run(main())
+

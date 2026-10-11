@@ -58,12 +58,21 @@ def _detect_gpu_count() -> int:
         pass
 
     # 2. onnxruntime provider list
+    has_cuda = False
     try:
         import onnxruntime as ort
         providers = ort.get_available_providers()
-        if "CUDAExecutionProvider" not in providers:
+        if "CUDAExecutionProvider" in providers:
+            has_cuda = True
+        elif "DmlExecutionProvider" in providers:
+            logger.info("[GPU-Allocator] Detected DirectML GPU provider (DmlExecutionProvider) for RTX 3050")
+            return 1
+        else:
             return 0
     except Exception:
+        return 0
+
+    if not has_cuda:
         return 0
 
     # 3. Ask nvidia-smi
@@ -114,37 +123,40 @@ class GPUSessionEntry:
         try:
             import onnxruntime as ort
 
-            # CUDA provider options: pin to specific device
-            cuda_opts: dict = {
-                "device_id": self.gpu_id,
-                "arena_extend_strategy": "kNextPowerOfTwo",
-                "cudnn_conv_algo_search": "EXHAUSTIVE",
-                "do_copy_in_default_stream": True,
-            }
-
-            # Dynamically query GPU VRAM and reserve 80% for YOLO inference.
-            # The remaining 20% stays available for InsightFace FRS sessions
-            # sharing the same physical GPU.
-            vram_bytes = self._query_vram_bytes(self.gpu_id)
-            if vram_bytes and vram_bytes > 0:
-                cuda_opts["gpu_mem_limit"] = int(vram_bytes * 0.80)
-                logger.info(
-                    f"[GPU-Allocator] GPU-{self.gpu_id}: {vram_bytes // (1024**3):.1f} GB VRAM detected, "
-                    f"reserving {cuda_opts['gpu_mem_limit'] // (1024**3):.1f} GB (80%) for YOLO"
-                )
-            # If VRAM cannot be queried, omit gpu_mem_limit — ONNX manages memory naturally.
-
-            providers = [("CUDAExecutionProvider", cuda_opts), "CPUExecutionProvider"]
+            avail_providers = ort.get_available_providers()
             sess_opts = ort.SessionOptions()
             sess_opts.intra_op_num_threads = 2  # don't over-subscribe CPU per session
             sess_opts.graph_optimization_level = ort.GraphOptimizationLevel.ORT_ENABLE_ALL
+
+            if "CUDAExecutionProvider" in avail_providers:
+                # CUDA provider options: pin to specific device
+                cuda_opts: dict = {
+                    "device_id": self.gpu_id,
+                    "arena_extend_strategy": "kNextPowerOfTwo",
+                    "cudnn_conv_algo_search": "EXHAUSTIVE",
+                    "do_copy_in_default_stream": True,
+                }
+                vram_bytes = self._query_vram_bytes(self.gpu_id)
+                if vram_bytes and vram_bytes > 0:
+                    cuda_opts["gpu_mem_limit"] = int(vram_bytes * 0.80)
+                    logger.info(
+                        f"[GPU-Allocator] GPU-{self.gpu_id}: {vram_bytes // (1024**3):.1f} GB VRAM detected, "
+                        f"reserving {cuda_opts['gpu_mem_limit'] // (1024**3):.1f} GB (80%) for YOLO"
+                    )
+                providers = [("CUDAExecutionProvider", cuda_opts), "CPUExecutionProvider"]
+            elif "DmlExecutionProvider" in avail_providers:
+                dml_opts = {"device_id": 1}
+                providers = [("DmlExecutionProvider", dml_opts), "CPUExecutionProvider"]
+                logger.info(f"[GPU-Allocator] Configuring DirectML session on device_id=1 (RTX 3050)")
+            else:
+                providers = ["CPUExecutionProvider"]
 
             self.session = ort.InferenceSession(
                 self.model_path, sess_options=sess_opts, providers=providers
             )
             logger.info(
                 f"[GPU-Allocator] ONNX session created on GPU-{self.gpu_id} "
-                f"from {self.model_path}"
+                f"from {self.model_path} with active providers: {self.session.get_providers()}"
             )
         except Exception as e:
             logger.warning(

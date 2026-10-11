@@ -26,7 +26,7 @@ export default function TopBar() {
   const { sidebarCollapsed, toggleSidebar, toggleFullscreen, user, theme, toggleTheme, logout } = useAppStore();
   const { criticalCount } = useAlertStore();
   const { cpu, gpu } = useSystemStore();
-  const { events, activeEvent, activeEventId, setActiveEvent, fetchEvents, sites, activeSiteId, setActiveSiteId } = useEventStore();
+  const { events, activeEvent, activeEventId, setActiveEvent, fetchEvents, sites, activeSiteId, setActiveSiteId, activeLocationName } = useEventStore();
   const [userMenuOpen, setUserMenuOpen] = useState(false);
   const userMenuRef = useRef(null);
   const [eventMenuOpen, setEventMenuOpen] = useState(false);
@@ -92,6 +92,17 @@ export default function TopBar() {
 
       {/* Event & Site Selector in Header */}
       <div style={{ display: "flex", alignItems: "center", gap: 8, marginLeft: 12 }}>
+        {activeLocationName && (
+          <span
+            className="badge bg-primary text-uppercase d-none d-md-inline-flex align-items-center gap-1"
+            style={{ fontSize: 11, padding: "5px 8px", fontWeight: 700, letterSpacing: 0.5, borderRadius: 6 }}
+            title={`Active Location: ${activeLocationName}`}
+          >
+            <i className="bi bi-geo-alt-fill" style={{ fontSize: 10 }} />
+            {activeLocationName}
+          </span>
+        )}
+
         {/* Event Dropdown */}
         <div className="dropdown" ref={eventMenuRef} style={{ position: "relative" }}>
           <button

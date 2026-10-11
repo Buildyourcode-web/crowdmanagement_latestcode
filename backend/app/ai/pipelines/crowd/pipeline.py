@@ -33,7 +33,7 @@ from app.ai.pipelines.crowd.health import PipelineHealthMonitor, PipelineHealthS
 from app.ai.pipelines.crowd.queue_engine import QueueMetricsResult, QueueMovementEngine
 from app.ai.pipelines.crowd.risk import CrowdRiskEngine
 from app.ai.pipelines.crowd.tracker import PersonTracker, TrackedPerson
-from app.db.session import AsyncSessionLocal
+from app.db import session as db_session
 from app.models.line_crossing import LineCrossingEvent
 from app.redis.event_bus import event_bus
 
@@ -193,7 +193,7 @@ class CrowdPipeline:
             return
 
         try:
-            async with AsyncSessionLocal() as session:
+            async with db_session.AsyncSessionLocal() as session:
                 bind = session.bind or session.get_bind()
                 if bind and "sqlite" in bind.dialect.name:
                     from sqlalchemy.dialects.sqlite import insert as dialect_insert

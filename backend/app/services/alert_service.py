@@ -96,8 +96,8 @@ class AlertService:
             metadata_json=alert.metadata_json,
         )
 
-    async def get_stats(self) -> AlertStatsResponse:
-        alerts, total = await self.alert_repo.list_alerts(limit=1000)
+    async def get_stats(self, event_id: Optional[uuid.UUID] = None) -> AlertStatsResponse:
+        alerts, total = await self.alert_repo.list_alerts(event_id=event_id, limit=1000)
         critical = sum(1 for a in alerts if a.severity == "critical")
         high = sum(1 for a in alerts if a.severity == "high")
         medium = sum(1 for a in alerts if a.severity == "medium")

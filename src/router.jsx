@@ -20,6 +20,7 @@ const Events          = lazy(() => import("./pages/Events.jsx"));
 const EventAccess     = lazy(() => import("./pages/EventAccess.jsx"));
 const Sites           = lazy(() => import("./pages/Sites.jsx"));
 const CrowdManagement = lazy(() => import("./pages/CrowdManagement.jsx"));
+const Locations       = lazy(() => import("./pages/Locations.jsx"));
 
 const PageWrapper = ({ children }) => (
   <Suspense fallback={<div className="cc-page"><LoadingState /></div>}>
@@ -45,6 +46,7 @@ export const router = createBrowserRouter([
       { path: "alerts",                element: <PageWrapper><Alerts /></PageWrapper> },
       { path: "analytics",             element: <PageWrapper><Analytics /></PageWrapper> },
       { path: "reports",               element: <PageWrapper><Reports /></PageWrapper> },
+      { path: "locations",             element: <PageWrapper><Locations /></PageWrapper> },
       { path: "events",                element: <PageWrapper><Events /></PageWrapper> },
       { path: "events/:eventId/access",element: <PageWrapper><EventAccess /></PageWrapper> },
       { path: "sites",                 element: <PageWrapper><Sites /></PageWrapper> },

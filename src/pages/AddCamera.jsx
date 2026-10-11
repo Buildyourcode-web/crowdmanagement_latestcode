@@ -27,14 +27,20 @@ export default function AddCamera() {
   const theme = useAppStore((s) => s.theme);
   const isLight = theme === "light";
   const activeEventId = useEventStore((s) => s.activeEventId);
+  const activeLocationId = useEventStore((s) => s.activeLocationId);
+  const activeLocationName = useEventStore((s) => s.activeLocationName);
 
   const [currentStep, setCurrentStep] = useState(1);
   const [zones, setZones] = useState([]);
   const [zonesLoading, setZonesLoading] = useState(false);
 
-  // Form state
+  // Form state — prefix adapted to active location
+  const defaultPrefix = activeLocationName?.toLowerCase().includes("balapur")
+    ? "CAM-BLP-"
+    : "CAM-KHB-";
+
   const [form, setForm] = useState({
-    camera_id: "CAM-KHB-",
+    camera_id: defaultPrefix,
     name: "",
     description: "",
     // RTSP
@@ -47,7 +53,7 @@ export default function AddCamera() {
     protocol: "rtsp",
     // Zone & Purpose
     zone_code: "",
-    location_name: "",
+    location_name: activeLocationName || "",
     latitude: "",
     longitude: "",
     camera_type: "CROWD",
@@ -166,6 +172,7 @@ export default function AddCamera() {
       resolution: testResult?.resolution || "1080p",
       fps: testResult?.fps || 25,
       event_id: activeEventId || null,
+      location_id: activeLocationId || null,
     };
 
     try {
@@ -208,7 +215,27 @@ export default function AddCamera() {
           <button className="cc-btn" onClick={() => navigate("/cameras")} style={{ marginBottom: 6 }}>
             <i className="bi bi-arrow-left" /> Back to Cameras
           </button>
-          <div className="cc-page-title">Onboard New IP Camera</div>
+          <div className="cc-page-title" style={{ display: "flex", alignItems: "center", gap: 10 }}>
+            <span>Onboard New IP Camera</span>
+            {activeLocationName && (
+              <span
+                style={{
+                  fontSize: 11,
+                  padding: "3px 10px",
+                  background: "rgba(88, 166, 255, 0.15)",
+                  border: "1px solid rgba(88, 166, 255, 0.4)",
+                  borderRadius: "var(--cc-radius-sm)",
+                  color: "#58a6ff",
+                  fontWeight: 700,
+                  display: "inline-flex",
+                  alignItems: "center",
+                  gap: 4,
+                }}
+              >
+                <i className="bi bi-geo-alt-fill" /> {activeLocationName}
+              </span>
+            )}
+          </div>
           <div className="cc-page-subtitle">
             Configure RTSP stream, inspect connectivity, and assign operational zone
           </div>

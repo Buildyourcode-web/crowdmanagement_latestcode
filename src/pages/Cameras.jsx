@@ -66,6 +66,8 @@ export const ZONE_PRESETS = [
 export default function Cameras() {
   const navigate = useNavigate();
   const activeEventId = useEventStore((s) => s.activeEventId);
+  const activeLocationId = useEventStore((s) => s.activeLocationId);
+  const activeLocationName = useEventStore((s) => s.activeLocationName);
   const [dbCameras, setDbCameras] = useState([]);
   const [engineCameras, setEngineCameras] = useState([]);
   const [stats, setStats] = useState(null);
@@ -81,7 +83,7 @@ export default function Cameras() {
     rtsp_url: "",
     camera_type: "CROWD",
     is_frs: false,
-    ai_purposes: ["ENTRY"],
+    ai_purposes: [],
     zone_code: "ZONE-A",
   });
 
@@ -123,7 +125,12 @@ export default function Cameras() {
     if (engineInFlightRef.current) return;
     engineInFlightRef.current = true;
     try {
-      const res = await fetch(`${BACKEND}/api/v1/frs-engine/cameras`);
+      const activeLoc = useEventStore.getState().activeLocationId;
+      const activeEvt = useEventStore.getState().activeEventId;
+      const headers = {};
+      if (activeLoc) headers["X-Location-ID"] = activeLoc;
+      if (activeEvt) headers["X-Event-ID"] = activeEvt;
+      const res = await fetch(`${BACKEND}/api/v1/frs-engine/cameras`, { headers });
       if (res.ok && isMountedRef.current) {
         const data = await res.json();
         const list = Array.isArray(data) ? data : [data];
@@ -142,7 +149,7 @@ export default function Cameras() {
             zone_code: c.zone_code || (c.is_frs ? "ZONE-A" : "ZONE-B"),
             detections_count: c.detections_count || 0,
             ai_status: c.status === "online" ? "online" : "offline",
-            ai_purposes: (c.ai_purposes || (c.is_frs ? [] : ["ENTRY"])).filter((p) => p !== "ENTRY_EXIT"),
+            ai_purposes: (c.ai_purposes || (c.is_frs ? ["FRS"] : [])).filter((p) => p !== "ENTRY_EXIT"),
             // Analytics fields
             in_count: c.in_count ?? 0,
             out_count: c.out_count ?? 0,
@@ -164,9 +171,15 @@ export default function Cameras() {
   const loadDbCameras = useCallback(async (skipCache = false) => {
     try {
       const activeEvt = useEventStore.getState().activeEventId;
+      const activeLoc = useEventStore.getState().activeLocationId;
       const [camsRes, statsRes] = await Promise.allSettled([
         getCameras(
-          { page_size: 200, enabled_only: true, ...(activeEvt ? { event_id: activeEvt } : {}) },
+          {
+            page_size: 200,
+            enabled_only: true,
+            ...(activeEvt ? { event_id: activeEvt } : {}),
+            ...(activeLoc ? { location_id: activeLoc } : {}),
+          },
           skipCache
         ),
         getCameraStats(),
@@ -186,6 +199,15 @@ export default function Cameras() {
       if (isMountedRef.current) setLoading(false);
     }
   }, []);
+
+  // When active Location or Event changes: clear stale cameras immediately and reload
+  useEffect(() => {
+    setDbCameras([]); // Prevent stale camera leakage during transition
+    setEngineCameras([]);
+    setLoading(true);
+    loadDbCameras(true);
+    loadEngineCameras();
+  }, [activeLocationId, activeEventId, loadDbCameras, loadEngineCameras]);
 
   useEffect(() => {
     isMountedRef.current = true;
@@ -393,15 +415,18 @@ export default function Cameras() {
     setAddError("");
     try {
       const activeEvt = useEventStore.getState().activeEventId;
+      const activeLoc = useEventStore.getState().activeLocationId;
       const res = await fetch(`${BACKEND}/api/v1/frs-engine/cameras`, {
         method: "POST",
         headers: {
           "Content-Type": "application/json",
           ...(activeEvt ? { "X-Event-ID": activeEvt } : {}),
+          ...(activeLoc ? { "X-Location-ID": activeLoc } : {}),
         },
         body: JSON.stringify({
           ...addForm,
           event_id: activeEvt || undefined,
+          location_id: activeLoc || undefined,
         }),
       });
       if (!res.ok) {
@@ -420,24 +445,26 @@ export default function Cameras() {
             camera_code: data.camera_id,
             stream_url: data.stream_url,
             name: data.name,
-            ai_purposes: addForm.ai_purposes || ["ENTRY"],
+            ai_purposes: addForm.ai_purposes || [],
           };
-          const firstPurpose = (addForm.ai_purposes && addForm.ai_purposes[0]) || "ENTRY";
-          const meta = PURPOSE_META[firstPurpose] || PURPOSE_META.ENTRY;
-          setActiveROIEditor({
-            camera: createdCam,
-            profile_id: meta.profile_id,
-            profile_name: meta.profile_name,
-            initial_tool: meta.initial_tool,
-            initial_objective: firstPurpose,
-          });
+          const firstPurpose = (addForm.ai_purposes && addForm.ai_purposes[0]) || "";
+          const meta = firstPurpose ? (PURPOSE_META[firstPurpose] || PURPOSE_META.ENTRY) : null;
+          if (firstPurpose && meta) {
+            setActiveROIEditor({
+              camera: createdCam,
+              profile_id: meta.profile_id,
+              profile_name: meta.profile_name,
+              initial_tool: meta.initial_tool,
+              initial_objective: firstPurpose,
+            });
+          }
         }
         setAddForm({
           name: "",
           rtsp_url: "",
           camera_type: "CROWD",
           is_frs: false,
-          ai_purposes: ["ENTRY"],
+          ai_purposes: [],
           zone_code: "ZONE-A",
         });
       }
@@ -694,6 +721,24 @@ export default function Cameras() {
         <div>
           <div className="cc-page-title" style={{ display: "flex", alignItems: "center", gap: 10 }}>
             <span>Working CCTV Surveillance Wall</span>
+            {activeLocationName && (
+              <span
+                style={{
+                  fontSize: 11,
+                  padding: "2px 10px",
+                  background: "rgba(88, 166, 255, 0.15)",
+                  border: "1px solid rgba(88, 166, 255, 0.4)",
+                  borderRadius: "var(--cc-radius-sm)",
+                  color: "#58a6ff",
+                  fontWeight: 700,
+                  display: "inline-flex",
+                  alignItems: "center",
+                  gap: 4,
+                }}
+              >
+                <i className="bi bi-geo-alt-fill" /> {activeLocationName}
+              </span>
+            )}
             <span
               style={{
                 fontSize: 10,
@@ -709,7 +754,8 @@ export default function Cameras() {
             </span>
           </div>
           <div className="cc-page-subtitle">
-            Khairatabad Ganesh Festival 2026 — {allWorkingCameras.length} Active Operational Video Channels
+            {activeLocationName ? `${activeLocationName} — ` : ""}
+            {allWorkingCameras.length} Active Operational Video Channels
           </div>
         </div>
 
@@ -1065,8 +1111,8 @@ export default function Cameras() {
                   }}
                 >
                   {crowdCameras.map((cam) => {
-                    const currentPurp = (cam.ai_purposes && cam.ai_purposes[0]) || "ENTRY";
-                    const meta = PURPOSE_META[currentPurp] || PURPOSE_META.ENTRY;
+                    const currentPurp = (cam.ai_purposes && cam.ai_purposes[0]) || "";
+                    const meta = currentPurp ? (PURPOSE_META[currentPurp] || PURPOSE_META.ENTRY) : PURPOSE_META.ENTRY;
                     return (
                       <CameraCard
                         key={cam.id}
@@ -1083,7 +1129,7 @@ export default function Cameras() {
                           profile_id: meta.profile_id,
                           profile_name: meta.profile_name,
                           initial_tool: meta.initial_tool,
-                          initial_objective: currentPurp,
+                          initial_objective: currentPurp || "ENTRY",
                         })}
                       />
                     );

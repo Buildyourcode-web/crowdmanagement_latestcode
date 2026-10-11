@@ -10,6 +10,7 @@ const NAV_GROUPS = [
     label: "Overview",
     items: [
       { path: "/dashboard", icon: "bi-grid-fill", label: "Dashboard" },
+      { path: "/locations", icon: "bi-geo-alt-fill", label: "Locations" },
       { path: "/events", icon: "bi-calendar-event-fill", label: "Festivals & Events" },
     ],
   },

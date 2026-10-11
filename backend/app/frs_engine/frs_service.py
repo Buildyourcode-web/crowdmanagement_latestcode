@@ -112,8 +112,11 @@ class CameraWorkerState:
         self.name = name
         self.is_frs = is_frs
         self.camera_type = camera_type
-        self.ai_purposes = ai_purposes or (["ENTRY"] if camera_type == "CROWD" else ["FRS"])
+        self.ai_purposes = ai_purposes if ai_purposes is not None else ([] if camera_type == "CROWD" else ["FRS"])
         self.zone_code = zone_code or "ZONE-A"
+        self.event_id: Optional[str] = None
+        self.location_id: Optional[str] = None
+        self.site_id: Optional[str] = None
         self.thread: Optional[threading.Thread] = None
         self.running = False
         self.latest_frame: Optional[bytes] = None  # JPEG bytes for MJPEG (annotated if AI active)
@@ -153,6 +156,16 @@ def set_main_event_loop(loop: asyncio.AbstractEventLoop):
     global _main_loop
     _main_loop = loop
 
+_ROI_SYNC_CACHE: dict[str, tuple[list, list, list, float]] = {}
+
+def invalidate_roi_sync_cache(camera_id: Optional[str] = None):
+    if camera_id:
+        clean = camera_id.replace("-FRS", "").replace("-CROWD", "")
+        _ROI_SYNC_CACHE.pop(camera_id, None)
+        _ROI_SYNC_CACHE.pop(clean, None)
+    else:
+        _ROI_SYNC_CACHE.clear()
+
 def _fetch_rois_sync(state) -> tuple:
     """Synchronously fetch ROI configs from DB. Safe to call from any background thread."""
     from app.db.session import SyncSessionLocal
@@ -163,6 +176,14 @@ def _fetch_rois_sync(state) -> tuple:
         return [], []
 
     clean_id = state.camera_id.replace("-FRS", "").replace("-CROWD", "")
+    now_m = time.monotonic()
+    cached = _ROI_SYNC_CACHE.get(state.camera_id) or _ROI_SYNC_CACHE.get(clean_id)
+    if cached and now_m < cached[3]:
+        lines, polygons, derived_purposes, _ = cached
+        if derived_purposes:
+            state.ai_purposes = derived_purposes
+        return lines, polygons
+
     all_valid_types = [
         "COUNTING_LINE", "ENTRY_LINE", "EXIT_LINE",
         "CROWD_ROI", "EXCLUSION_ZONE", "ZONE_BOUNDARY",
@@ -231,20 +252,9 @@ def _fetch_rois_sync(state) -> tuple:
             # This prevents ZONE cameras from retaining stale ENTRY/ENTRY_EXIT from initialization.
             state.ai_purposes = derived_purposes
 
-        # Fallback default virtual counting line across middle of frame if none configured
-        if not lines and (getattr(state, "camera_type", "") == "CROWD" or not getattr(state, "is_frs", False)):
-            purps = getattr(state, "ai_purposes", None) or ["ENTRY"]
-            line_type = "ENTRY_LINE" if "ENTRY" in purps and "EXIT" not in purps else ("EXIT_LINE" if "EXIT" in purps and "ENTRY" not in purps else "COUNTING_LINE")
-            lines.append({
-                "id": f"default-line-{state.camera_id}",
-                "name": "Gate Counting Line",
-                "type": line_type,
-                "start": {"x": 0.05, "y": 0.55},
-                "end": {"x": 0.95, "y": 0.55},
-                "direction": "BOTH" if line_type == "COUNTING_LINE" else ("IN" if line_type == "ENTRY_LINE" else "OUT"),
-            })
-
+        _ROI_SYNC_CACHE[state.camera_id] = (lines, polygons, derived_purposes, now_m + 60.0)
         return lines, polygons
+
 
 
 
@@ -252,9 +262,15 @@ def _emit_frs_event_threadsafe(event_type: str, payload: dict):
     mgr = _get_ws_manager()
     if mgr:
         try:
+            evt_id = payload.get("event_id")
+            st_id = payload.get("site_id")
+            loc_id = payload.get("location_id")
             global _main_loop
             if _main_loop and _main_loop.is_running():
-                asyncio.run_coroutine_threadsafe(mgr.broadcast_event(event_type, payload), _main_loop)
+                asyncio.run_coroutine_threadsafe(
+                    mgr.broadcast_event(event_type, payload, event_id=evt_id, site_id=st_id, location_id=loc_id),
+                    _main_loop
+                )
             else:
                 curr_loop = None
                 try:
@@ -262,7 +278,9 @@ def _emit_frs_event_threadsafe(event_type: str, payload: dict):
                 except RuntimeError:
                     pass
                 if curr_loop and curr_loop.is_running():
-                    asyncio.create_task(mgr.broadcast_event(event_type, payload))
+                    asyncio.create_task(
+                        mgr.broadcast_event(event_type, payload, event_id=evt_id, site_id=st_id, location_id=loc_id)
+                    )
         except Exception as e:
             logger.debug(f"[FRS-Engine] WS broadcast error: {e}")
 
@@ -531,20 +549,11 @@ def _persist_crowd_snapshot_threadsafe(camera_code: str, inflow_delta: int, outf
 
                 evt_id = cam.event_id if cam else None
                 if not evt_id:
-                    from sqlalchemy import case, or_
+                    # Prefer ACTIVE/LIVE events, most recently created first.
+                    # No hardcoded location names — works for any location.
                     evt_stmt = select(Event).where(
-                        or_(
-                            Event.code.ilike("%KHB%"),
-                            Event.name.ilike("%Khairatabad%"),
-                            Event.status.in_(["ACTIVE", "LIVE"]),
-                        )
-                    ).order_by(
-                        case(
-                            (or_(Event.code.ilike("%KHB%"), Event.name.ilike("%Khairatabad%")), 1),
-                            else_=2,
-                        ),
-                        Event.created_at.desc(),
-                    ).limit(1)
+                        Event.status.in_(["ACTIVE", "LIVE"])
+                    ).order_by(Event.created_at.desc()).limit(1)
                     evt_res = await session.execute(evt_stmt)
                     evt = evt_res.scalars().first()
                     if not evt:
@@ -636,22 +645,13 @@ def _persist_line_crossing_event_threadsafe(
                 evt_id = cam.event_id if cam else None
                 site_id = cam.site_id if cam else None
 
-                # 1. Resolve event_id if not present
+                # 1. Resolve event_id if not present on camera
                 if not evt_id:
-                    from sqlalchemy import case, or_
+                    # Prefer ACTIVE/LIVE events, most recently created first.
+                    # No hardcoded location names — works for any location.
                     evt_stmt = select(Event).where(
-                        or_(
-                            Event.code.ilike("%KHB%"),
-                            Event.name.ilike("%Khairatabad%"),
-                            Event.status.in_(["ACTIVE", "LIVE"]),
-                        )
-                    ).order_by(
-                        case(
-                            (or_(Event.code.ilike("%KHB%"), Event.name.ilike("%Khairatabad%")), 1),
-                            else_=2,
-                        ),
-                        Event.created_at.desc(),
-                    ).limit(1)
+                        Event.status.in_(["ACTIVE", "LIVE"])
+                    ).order_by(Event.created_at.desc()).limit(1)
                     evt_res = await session.execute(evt_stmt)
                     evt = evt_res.scalars().first()
                     if not evt:
@@ -1238,7 +1238,7 @@ class RTSPCameraWorker:
                     self.state.occupancy_count = 0
                 self.state._active_date = cur_day_str
 
-            _refresh_interval = 5.0 if not self._cached_roi_lines else 60.0
+            _refresh_interval = 30.0 if not self._cached_roi_lines else 60.0
             if (now - self._roi_lines_last_fetch) > _refresh_interval:
                 self._roi_lines_last_fetch = now
                 self._refresh_roi_lines()
@@ -1290,8 +1290,8 @@ class RTSPCameraWorker:
 
                 preds = np.squeeze(outputs[0]).T  # (8400, 84)
                 person_scores = preds[:, 4]
-                # Dual-threshold detection: low threshold (0.16) for existing track continuity, high (0.26) for new tracks
-                mask = person_scores > 0.16
+                # Dual-threshold detection: sensitive threshold (0.10) keeps continuous tracks alive; 0.18 for new tracks
+                mask = person_scores > 0.10
                 filtered_preds = preds[mask]
 
                 sx = w_orig / 640.0
@@ -1305,7 +1305,7 @@ class RTSPCameraWorker:
                     raw_boxes.append([x1, y1, int(bw * sx), int(bh * sy)])
                     raw_scores.append(float(row[4]))
 
-                indices = cv2.dnn.NMSBoxes(raw_boxes, raw_scores, score_threshold=0.16, nms_threshold=0.45)
+                indices = cv2.dnn.NMSBoxes(raw_boxes, raw_scores, score_threshold=0.10, nms_threshold=0.45)
                 high_detections = []
                 low_detections = []
 
@@ -1327,7 +1327,7 @@ class RTSPCameraWorker:
                             "bottom_center": det_bc,
                             "confidence": conf,
                         }
-                        if conf >= 0.26:
+                        if conf >= 0.18:
                             high_detections.append(det_obj)
                         else:
                             low_detections.append(det_obj)
@@ -1342,9 +1342,15 @@ class RTSPCameraWorker:
                 # 1. Predict next positions for all existing active tracks based on velocity
                 for trk in self._crowd_tracks.values():
                     vx, vy = trk.get("velocity", (0.0, 0.0))
-                    decay = 0.88 if trk.get("misses", 0) > 0 else 1.0
-                    vx *= decay
-                    vy *= decay
+                    misses = trk.get("misses", 0)
+                    v_mag = math.hypot(vx, vy)
+                    # If person is stationary, slow, or has missed frames, lock velocity to 0 to prevent box drift!
+                    if v_mag < 8.0 or misses > 1:
+                        vx, vy = 0.0, 0.0
+                    else:
+                        decay = 0.70
+                        vx *= decay
+                        vy *= decay
                     trk["velocity"] = (vx, vy)
 
                     bw = trk["bbox"][2] - trk["bbox"][0]
@@ -1360,7 +1366,7 @@ class RTSPCameraWorker:
                     trk["pred_centroid"] = (pred_cx, pred_cy)
 
                 # 2. Greedy bipartite matching helper
-                def _match_tracks(track_ids, detections, min_iou=0.15, max_dist_mult=1.4):
+                def _match_tracks(track_ids, detections, min_iou=0.10, max_dist_mult=1.8):
                     matches = []
                     unmatched_t = set(track_ids)
                     unmatched_d = set(range(len(detections)))
@@ -1369,14 +1375,20 @@ class RTSPCameraWorker:
                         trk = self._crowd_tracks[tid]
                         p_box = trk["pred_bbox"]
                         p_c = trk["pred_centroid"]
-                        bw = p_box[2] - p_box[0]
-                        bh = p_box[3] - p_box[1]
-                        max_d = max(160.0, max(bw, bh) * max_dist_mult)
+                        last_box = trk["bbox"]
+                        last_c = trk["centroid"]
+                        bw = last_box[2] - last_box[0]
+                        bh = last_box[3] - last_box[1]
+                        max_d = max(180.0, max(bw, bh) * max_dist_mult)
                         for d_idx, det in enumerate(detections):
-                            iou = _box_iou(p_box, det["bbox"])
-                            dist = math.hypot(det["centroid"][0] - p_c[0], det["centroid"][1] - p_c[1])
-                            if iou >= min_iou or dist <= max_d:
-                                score = (iou * 2.5) + max(0.0, 1.0 - (dist / max_d))
+                            # Check IoU against both predicted AND last confirmed position (great for stationary/stopped persons)
+                            best_iou = max(_box_iou(p_box, det["bbox"]), _box_iou(last_box, det["bbox"]))
+                            best_dist = min(
+                                math.hypot(det["centroid"][0] - p_c[0], det["centroid"][1] - p_c[1]),
+                                math.hypot(det["centroid"][0] - last_c[0], det["centroid"][1] - last_c[1])
+                            )
+                            if best_iou >= min_iou or best_dist <= max_d:
+                                score = (best_iou * 3.0) + max(0.0, 1.0 - (best_dist / max_d))
                                 candidates.append((tid, d_idx, score))
                     candidates.sort(key=lambda x: x[2], reverse=True)
                     for tid, d_idx, _ in candidates:
@@ -1388,9 +1400,9 @@ class RTSPCameraWorker:
 
                 all_tids = list(self._crowd_tracks.keys())
                 # Pass 1: Match against high-confidence detections
-                high_matches, unassigned_t, unassigned_high_d = _match_tracks(all_tids, high_detections, min_iou=0.15, max_dist_mult=1.4)
+                high_matches, unassigned_t, unassigned_high_d = _match_tracks(all_tids, high_detections, min_iou=0.10, max_dist_mult=1.8)
                 # Pass 2: Match remaining tracks against low-confidence detections (keeps occluded/sitting humans alive!)
-                low_matches, still_unmatched_t, _ = _match_tracks(unassigned_t, low_detections, min_iou=0.10, max_dist_mult=1.2)
+                low_matches, still_unmatched_t, _ = _match_tracks(unassigned_t, low_detections, min_iou=0.08, max_dist_mult=1.5)
 
                 matched_det_map = {}
                 for tid, d_idx in high_matches:
@@ -1398,7 +1410,7 @@ class RTSPCameraWorker:
                 for tid, d_idx in low_matches:
                     matched_det_map[tid] = low_detections[d_idx]
 
-                # Update matched tracks with smooth bounding box and velocity
+                # Update matched tracks with responsive position and velocity
                 for tid, det in matched_det_map.items():
                     trk = self._crowd_tracks[tid]
                     trk["misses"] = 0
@@ -1407,10 +1419,13 @@ class RTSPCameraWorker:
                     det_c = det["centroid"]
                     inst_vx = (det_c[0] - trk["centroid"][0]) / dt
                     inst_vy = (det_c[1] - trk["centroid"][1]) / dt
-                    trk["velocity"] = (0.5 * trk.get("velocity", (0.0, 0.0))[0] + 0.5 * inst_vx, 0.5 * trk.get("velocity", (0.0, 0.0))[1] + 0.5 * inst_vy)
-                    # Smooth box (75% new detection, 25% previous box)
-                    trk["bbox"] = [0.75 * d + 0.25 * b for d, b in zip(det["bbox"], trk["bbox"])]
-                    trk["centroid"] = ((trk["bbox"][0] + trk["bbox"][2]) / 2.0, (trk["bbox"][1] + trk["bbox"][3]) / 2.0)
+                    trk["velocity"] = (
+                        0.25 * trk.get("velocity", (0.0, 0.0))[0] + 0.75 * inst_vx,
+                        0.25 * trk.get("velocity", (0.0, 0.0))[1] + 0.75 * inst_vy,
+                    )
+                    # Snap directly to detection coordinates — zero lag!
+                    trk["bbox"] = list(det["bbox"])
+                    trk["centroid"] = (det_c[0], det_c[1])
                     trk["top_center"] = (trk["centroid"][0], trk["bbox"][1])
                     trk["bottom_center"] = (trk["centroid"][0], trk["bbox"][3])
                     trk["last_seen"] = curr_time
@@ -1478,11 +1493,11 @@ class RTSPCameraWorker:
                         "stopped_frames": 0,
                     }
 
-                # Prune tracks inactive for > 18 frames (~2.5s) or off-screen
+                # Prune tracks ONLY when they leave camera bounds or remain unseen for > 60 frames (>15s)
                 stale_tids = [
                     tid for tid, trk in self._crowd_tracks.items()
-                    if trk.get("misses", 0) > 18 or (curr_time - trk.get("last_seen", curr_time)) > 3.0
-                    or trk["bbox"][2] < 0 or trk["bbox"][3] < 0 or trk["bbox"][0] > w_orig or trk["bbox"][1] > h_orig
+                    if (trk.get("misses", 0) > 60 and (curr_time - trk.get("last_seen", curr_time)) > 15.0)
+                    or trk["bbox"][2] < 5 or trk["bbox"][3] < 5 or trk["bbox"][0] > (w_orig - 5) or trk["bbox"][1] > (h_orig - 5)
                 ]
                 for tid in stale_tids:
                     del self._crowd_tracks[tid]
@@ -1931,20 +1946,20 @@ class RTSPCameraWorker:
                             "bottom_center": [int(round(trk["bottom_center"][0])), int(round(trk["bottom_center"][1]))],
                             "label": f"PERSON #{trk['track_id']} {round(trk.get('confidence', 0.85) * 100)}%",
                             "confidence": trk.get("confidence", 0.85),
-                            "expiry": curr_time + 1.8,
+                            "expiry": curr_time + 10.0,
                             "in_queue": trk.get("in_queue", False),
                             "movement_state": trk.get("movement_state", "STOPPED"),
                             "misses": trk.get("misses", 0),
                         }
                         for trk in self._crowd_tracks.values()
-                        if trk.get("misses", 0) <= 6 and trk.get("hits", 0) >= 1
+                        if trk.get("misses", 0) <= 50 and trk.get("hits", 0) >= 1
                     ]
                 self.state.detections_count = len(self._crowd_boxes)
 
             except Exception as e:
                 logger.warning(f"[Crowd-AI-Worker:{self.state.camera_id}] Inference loop warning: {type(e).__name__}: {e}")
 
-            time.sleep(0.18)
+            time.sleep(0.02)
 
     def run(self):
         (FaceModel, IdentityMatcher, FaceQualityAssessor, FaceTracker, RTSPReader, db) = _load_frs_components()
@@ -2055,18 +2070,20 @@ class RTSPCameraWorker:
                         cboxes = [b for b in self._crowd_boxes if b.get("expiry", 0) > now]
 
                     purposes = self.state.ai_purposes or ["ENTRY_EXIT"]
+                    boxes_drawn = False
 
                     # Helper to calculate continuous interpolated box position at 25 FPS
                     def _get_continuous_box(cb):
-                        extrap_dt = min(0.35, max(0.0, now - cb.get("updated_at", now)))
+                        extrap_dt = min(0.20, max(0.0, now - cb.get("updated_at", now)))
                         vx, vy = cb.get("velocity", (0.0, 0.0))
                         misses = cb.get("misses", 0)
-                        if misses > 0:
-                            decay = max(0.25, 1.0 - misses * 0.12)
-                            vx *= decay
-                            vy *= decay
-                        dx = int(vx * extrap_dt)
-                        dy = int(vy * extrap_dt)
+                        v_mag = math.hypot(vx, vy)
+                        if misses > 1 or v_mag < 8.0:
+                            dx, dy = 0, 0
+                        else:
+                            decay = max(0.2, 1.0 - misses * 0.3)
+                            dx = int(round(vx * decay * extrap_dt))
+                            dy = int(round(vy * decay * extrap_dt))
                         bx1 = max(0, min(w - 4, cb["bbox"][0] + dx))
                         by1 = max(0, min(h - 4, cb["bbox"][1] + dy))
                         bx2 = max(bx1 + 4, min(w, cb["bbox"][2] + dx))
@@ -2079,6 +2096,7 @@ class RTSPCameraWorker:
                     is_entry = "ENTRY" in purposes and "EXIT" not in purposes
                     is_exit = "EXIT" in purposes and "ENTRY" not in purposes
                     if is_entry or is_exit or "ENTRY_EXIT" in purposes:
+                        boxes_drawn = True
                         # Draw continuous person boxes
                         box_col = (46, 204, 113) if is_entry else ((0, 80, 245) if is_exit else (46, 204, 113))
                         for cb in cboxes:
@@ -2158,6 +2176,7 @@ class RTSPCameraWorker:
 
                         # 2. Draw continuous person bounding boxes in Zone mode (if not already drawn by Entry/Exit)
                         if not (is_entry or is_exit or "ENTRY_EXIT" in purposes):
+                            boxes_drawn = True
                             z_box_col = (46, 204, 113) if worst_status == "NORMAL" else ((0, 140, 255) if worst_status == "WARNING" else (0, 0, 235))
                             for cb in cboxes:
                                 x1, y1, x2, y2 = _get_continuous_box(cb)
@@ -2183,6 +2202,7 @@ class RTSPCameraWorker:
                     # C. QUEUE MANAGEMENT OVERLAY (Queue Box + Speed Flow)
                     # -------------------------------------------------------
                     if "QUEUE" in purposes:
+                        boxes_drawn = True
                         # Draw Queue Polygons / Area Box in Amber
                         for poly in self._cached_roi_polygons:
                             if poly.get("type") not in ("QUEUE_ROI", "QUEUE_AREA"):
@@ -2231,7 +2251,7 @@ class RTSPCameraWorker:
                             cv2.rectangle(bgr_crowd, (x1, y1), (x2, y2), box_color, 2)
                             (tw, th), _ = cv2.getTextSize(tag, cv2.FONT_HERSHEY_SIMPLEX, 0.42, 1)
                             top_y = max(th + 6, y1)
-                            cv2.rectangle(bgr_crowd, (x1, top_y - th - 6), (x1 + tw + 6, top_y + 2), box_color, -1)
+                            cv2.rectangle(bgr_crowd, (x1, top_y - lh - 6), (x1 + tw + 6, top_y + 2), box_color, -1)
                             cv2.putText(bgr_crowd, tag, (x1 + 3, top_y - 2), cv2.FONT_HERSHEY_SIMPLEX, 0.42, (0, 0, 0), 1, cv2.LINE_AA)
 
                             # Head indicator
@@ -2242,6 +2262,17 @@ class RTSPCameraWorker:
                             if in_q:
                                 gx, gy = cb.get("bottom_center", ((x1 + x2) // 2, y2))
                                 cv2.circle(bgr_crowd, (gx, gy), 4, box_color, -1, cv2.LINE_AA)
+
+                    # Safety fallback: Always draw continuous person boxes if not already rendered by specific purpose
+                    if not boxes_drawn:
+                        for cb in cboxes:
+                            x1, y1, x2, y2 = _get_continuous_box(cb)
+                            cv2.rectangle(bgr_crowd, (x1, y1), (x2, y2), (46, 204, 113), 2)
+                            clbl = cb["label"]
+                            (lw, lh), _ = cv2.getTextSize(clbl, cv2.FONT_HERSHEY_SIMPLEX, 0.42, 1)
+                            top_y = max(lh + 6, y1)
+                            cv2.rectangle(bgr_crowd, (x1, top_y - lh - 6), (x1 + lw + 6, top_y + 2), (46, 204, 113), -1)
+                            cv2.putText(bgr_crowd, clbl, (x1 + 3, top_y - 3), cv2.FONT_HERSHEY_SIMPLEX, 0.42, (0, 0, 0), 1, cv2.LINE_AA)
 
                     # -------------------------------------------------------
                     # D. CONSOLIDATED MULTI-PURPOSE TOP HUD BAR
@@ -2335,8 +2366,8 @@ class CameraInfo(BaseModel):
 # ── POST /cameras ────────────────────────────────────────────────────────────
 
 @router.post("/cameras", response_model=CameraInfo, status_code=201)
-async def add_frs_camera(req: AddCameraRequest, request: Request):
-    if not req.event_id:
+async def add_frs_camera(req: AddCameraRequest, request: Request = None):
+    if not req.event_id and request is not None:
         h_evt = request.headers.get("X-Event-ID")
         if h_evt:
             req.event_id = h_evt
@@ -2353,7 +2384,7 @@ async def add_frs_camera(req: AddCameraRequest, request: Request):
         cam_id = candidate
 
     is_frs = req.is_frs if req.camera_type == "FRS" else False
-    ai_purp = req.ai_purposes or (["ENTRY"] if req.camera_type == "CROWD" else ["FRS"])
+    ai_purp = req.ai_purposes if req.ai_purposes is not None else ([] if req.camera_type == "CROWD" else ["FRS"])
     if req.camera_type == "CROWD" and isinstance(ai_purp, list):
         ai_purp = ai_purp[:2]
     zone_cd = (req.zone_code or "ZONE-A").upper().strip()
@@ -2673,9 +2704,11 @@ def get_worker_for_camera(camera_code_or_id: str, auto_revive: bool = False) -> 
                             name=cam_rec.name or cam_rec.label or f"Camera {camera_code_or_id}",
                             is_frs=is_frs,
                             camera_type=c_type,
-                            ai_purposes=["FRS"] if is_frs else ["ENTRY", "ZONE"],
+                            ai_purposes=["FRS"] if is_frs else [],
                             zone_code=cam_rec.zone_code or "ZONE-A",
                         )
+                        c_state.event_id = str(cam_rec.event_id) if cam_rec.event_id else None
+                        c_state.site_id = str(cam_rec.site_id) if cam_rec.site_id else None
                         c_worker = RTSPCameraWorker(c_state)
                         c_state.running = True
                         t = threading.Thread(

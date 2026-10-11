@@ -889,9 +889,14 @@ def test_no_queue_interaction():
 # ── Test 29: Credential Non-Leakage ───────────────────────────────────────────
 
 @pytest.mark.asyncio
-async def test_credential_non_leakage(client: AsyncClient, frs_tokens: Dict[str, str], frs_test_camera: Camera):
-    """Verifies camera passwords are never exposed in FRS API responses."""
-    headers = {"Authorization": f"Bearer {frs_tokens['ROLE_FRS_READER']}"}
+async def test_credential_non_leakage(client: AsyncClient, superadmin_token: str, frs_test_camera: Camera):
+    """Verifies camera passwords are never exposed in FRS API responses.
+
+    Uses superadmin token so that get_event_context auto-resolves the active
+    event from the test DB without requiring UserEventAccess rows.
+    FRS RBAC permission enforcement is covered by test_frs_authorization_* tests.
+    """
+    headers = {"Authorization": f"Bearer {superadmin_token}"}
     res = await client.get("/api/v1/frs/cameras", headers=headers)
     assert res.status_code == 200
     res_text = res.text

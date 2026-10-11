@@ -3,7 +3,7 @@ from fastapi import APIRouter, Depends, Query, status
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.ai.pipelines.frs.registry import FRSPipelineRegistry
-from app.dependencies import get_current_user, get_db, require_permission
+from app.dependencies import get_current_user, get_db, get_event_context, require_permission, EventContext
 from app.models.user import User
 from app.schemas.camera import CameraRead
 from app.schemas.common import StandardResponse
@@ -63,23 +63,31 @@ async def get_frs_fleet_health(
 
 @router.get("/dashboard", response_model=StandardResponse[FRSDashboardKPIs])
 async def get_frs_dashboard(
+    ctx: EventContext = Depends(get_event_context),
     db: AsyncSession = Depends(get_db),
     current_user: User = Depends(require_permission(Permissions.FRS_READ)),
 ):
     """Retrieve FRS operational dashboard KPIs (authorized access only)."""
     service = FRSService(db)
-    kpis = await service.get_dashboard_kpis()
+    kpis = await service.get_dashboard_kpis(event_id=ctx.event_id, location_id=ctx.location_id)
     return success_response(kpis)
 
 
 @router.get("/cameras", response_model=StandardResponse[List[CameraRead]])
 async def get_frs_cameras(
+    ctx: EventContext = Depends(get_event_context),
     db: AsyncSession = Depends(get_db),
     current_user: User = Depends(require_permission(Permissions.FRS_READ)),
 ):
     """Retrieve dedicated 16-channel FRS cameras."""
     cam_service = CameraService(db)
-    cameras, total = await cam_service.get_cameras(is_frs=True, page_size=100)
+    cameras, total = await cam_service.get_cameras(
+        is_frs=True,
+        event_id=ctx.event_id,
+        location_id=ctx.location_id,
+        allowed_site_ids=ctx.allowed_site_ids,
+        page_size=100,
+    )
     return success_response(cameras)
 
 
@@ -94,6 +102,7 @@ async def list_frs_candidates(
     search: Optional[str] = Query(None, description="Search candidate code or location"),
     page: int = Query(1, ge=1),
     page_size: int = Query(50, ge=1, le=100),
+    ctx: EventContext = Depends(get_event_context),
     db: AsyncSession = Depends(get_db),
     current_user: User = Depends(require_permission(Permissions.FRS_READ)),
 ):
@@ -105,6 +114,7 @@ async def list_frs_candidates(
         zone=zone,
         min_score=min_score,
         search=search,
+        event_id=ctx.event_id,
         page=page,
         page_size=page_size,
     )
@@ -155,6 +165,7 @@ async def get_frs_history(
     search: Optional[str] = Query(None),
     page: int = Query(1, ge=1),
     page_size: int = Query(50, ge=1, le=100),
+    ctx: EventContext = Depends(get_event_context),
     db: AsyncSession = Depends(get_db),
     current_user: User = Depends(require_permission(Permissions.FRS_READ)),
 ):
@@ -166,6 +177,7 @@ async def get_frs_history(
         zone=zone,
         min_score=min_score,
         search=search,
+        event_id=ctx.event_id,
         page=page,
         page_size=page_size,
     )

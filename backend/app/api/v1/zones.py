@@ -1,7 +1,7 @@
 from typing import List, Optional
 from fastapi import APIRouter, Depends, status
 from sqlalchemy.ext.asyncio import AsyncSession
-from app.dependencies import get_current_user, get_db, require_permission
+from app.dependencies import get_current_user, get_db, get_event_context, require_permission, EventContext
 from app.models.user import User
 from app.schemas.common import StandardResponse
 from app.schemas.gate import GateRead
@@ -15,12 +15,13 @@ router = APIRouter(prefix="/zones", tags=["Zones"])
 
 @router.get("", response_model=StandardResponse[List[ZoneRead]])
 async def list_zones(
+    ctx: EventContext = Depends(get_event_context),
     db: AsyncSession = Depends(get_db),
     current_user: User = Depends(require_permission(Permissions.ZONE_READ)),
 ):
-    """Retrieve all operational zones with GIS geometries, capacities, and risk levels."""
+    """Retrieve all operational zones with GIS geometries, capacities, and risk levels scoped by location/event."""
     service = ZoneService(db)
-    zones = await service.list_zones()
+    zones = await service.list_zones(event_id=ctx.event_id, location_id=ctx.location_id)
     return success_response(zones)
 
 

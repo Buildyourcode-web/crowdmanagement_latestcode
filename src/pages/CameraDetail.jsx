@@ -28,11 +28,32 @@ function getAllPurposes(camera, liveData) {
   if (t === "QUEUE") return ["QUEUE"];
   if (t === "ZONE") return ["ZONE"];
   if (t === "EXIT") return ["EXIT"];
-  return ["ENTRY"];
+  if (t === "ENTRY") return ["ENTRY"];
+  return [];
 }
 
 function PurposeBadge({ camera, liveData }) {
   const purposes = getAllPurposes(camera, liveData);
+  if (purposes.length === 0) {
+    return (
+      <span
+        style={{
+          padding: "4px 10px",
+          borderRadius: 4,
+          fontSize: 11,
+          fontWeight: 700,
+          background: "rgba(210, 153, 34, 0.15)",
+          color: "#d29922",
+          border: "1px solid rgba(210, 153, 34, 0.4)",
+          display: "flex",
+          alignItems: "center",
+          gap: 6,
+        }}
+      >
+        <i className="bi bi-gear-wide-connected" /> CONFIGURATION REQUIRED
+      </span>
+    );
+  }
   return (
     <div style={{ display: "flex", flexWrap: "wrap", gap: 6 }}>
       {purposes.map((key) => {

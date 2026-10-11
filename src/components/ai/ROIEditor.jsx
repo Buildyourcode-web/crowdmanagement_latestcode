@@ -73,11 +73,14 @@ export default function ROIEditor({
 
   const BACKEND = getBackendUrl();
   const camCode = camera?.camera_code || camera?.id;
-  const effectiveStreamUrl =
+  const rawStreamUrl =
     streamUrl ||
     (camera?.stream_url
       ? (camera.stream_url.startsWith("http") ? camera.stream_url : `${BACKEND}${camera.stream_url}`)
       : (camCode ? `${BACKEND}/api/v1/frs-engine/cameras/${camCode}/stream` : ""));
+  const effectiveStreamUrl = rawStreamUrl
+    ? (rawStreamUrl.includes("mode=clean") ? rawStreamUrl : `${rawStreamUrl}${rawStreamUrl.includes("?") ? "&" : "?"}mode=clean`)
+    : "";
 
   const [streamLoading, setStreamLoading] = useState(true);
   const [streamError, setStreamError] = useState(false);

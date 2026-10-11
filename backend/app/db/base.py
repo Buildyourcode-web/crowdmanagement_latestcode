@@ -3,6 +3,7 @@ from app.models.base import Base
 from app.models.role import Role, Permission, role_permissions
 from app.models.user import User
 from app.models.event import Event
+from app.models.location import Location, LocationVerification
 from app.models.zone import Zone
 from app.models.camera import Camera
 from app.models.gate import Gate
@@ -33,6 +34,8 @@ __all__ = [
     "role_permissions",
     "User",
     "Event",
+    "Location",
+    "LocationVerification",
     "Zone",
     "Camera",
     "Gate",

@@ -1,3 +1,4 @@
+import time
 import uuid
 from datetime import datetime, timezone
 from typing import List, Optional
@@ -13,6 +14,12 @@ from app.models.crowd import CrowdSnapshot
 from app.models.user import User
 from app.models.user_access import UserEventAccess
 from app.schemas.event import EventCreate, EventRead, EventSummary, EventUpdate
+
+# In-process TTL cache for event listing
+_EVENTS_CACHE: dict[tuple, tuple[list, float]] = {}
+
+def invalidate_events_cache():
+    _EVENTS_CACHE.clear()
 
 
 def _normalize_dt(dt: Optional[datetime]) -> Optional[datetime]:
@@ -59,6 +66,12 @@ class EventService:
 
     async def list_accessible_events(self, user: User) -> List[EventRead]:
         """Lists events the user has explicit or superadmin access to."""
+        cache_key = (user.id, user.is_super_admin)
+        now_mono = time.monotonic()
+        cached = _EVENTS_CACHE.get(cache_key)
+        if cached and now_mono < cached[1]:
+            return cached[0]
+
         is_super = user.is_super_admin
 
         if is_super:
@@ -152,6 +165,7 @@ class EventService:
             )
             results.append(read_item)
 
+        _EVENTS_CACHE[cache_key] = (results, now_mono + 30.0)
         return results
 
     async def get_event_by_id(self, event_id: uuid.UUID, user: User) -> EventRead:

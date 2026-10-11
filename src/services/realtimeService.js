@@ -73,17 +73,23 @@ class RealtimeService {
     const eventType = msg.type || msg.event_type;
     const payload = msg.payload || msg.data || msg;
 
-    // Multi-Event & Multi-Site Isolation Filter:
+    // Multi-Location, Multi-Event & Multi-Site Isolation Filter:
+    const activeLocationId = localStorage.getItem("byc_active_location_id");
     const activeEventId = localStorage.getItem("byc_active_event_id");
     const activeSiteId = localStorage.getItem("byc_active_site_id");
 
+    const msgLocId = msg.location_id || payload?.location_id;
+    if (activeLocationId && msgLocId && String(msgLocId) !== String(activeLocationId)) {
+      return; // Discard message from another location
+    }
+
     const msgEventId = msg.event_id || payload?.event_id;
-    if (activeEventId && msgEventId && msgEventId !== activeEventId) {
+    if (activeEventId && msgEventId && String(msgEventId) !== String(activeEventId)) {
       return; // Discard message from another event
     }
 
     const msgSiteId = msg.site_id || payload?.site_id;
-    if (activeSiteId && msgSiteId && msgSiteId !== activeSiteId) {
+    if (activeSiteId && msgSiteId && String(msgSiteId) !== String(activeSiteId)) {
       return; // Discard message from another site when filtered
     }
 
@@ -188,6 +194,30 @@ class RealtimeService {
     }
     this.setStatus("OFFLINE");
   }
+
+  /**
+   * Force a fresh WebSocket connection with the current active context
+   * (location_id, event_id, site_id, token) from localStorage.
+   *
+   * Call this whenever the user changes their active location or event so that
+   * the backend places the new socket into the correct isolated room immediately.
+   * The old socket is cleanly closed first.
+   */
+  reconnectWithContext() {
+    this.isExplicitlyClosed = false;
+    this.reconnectAttempts = 0;
+    this.stopHeartbeat();
+    if (this.reconnectTimer) {
+      clearTimeout(this.reconnectTimer);
+      this.reconnectTimer = null;
+    }
+    if (this.ws) {
+      try { this.ws.close(); } catch (_) {}
+      this.ws = null;
+    }
+    this.connect();
+  }
 }
 
 export const realtimeService = new RealtimeService();
+

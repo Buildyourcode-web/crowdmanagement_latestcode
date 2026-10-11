@@ -3,6 +3,7 @@ from typing import List, Optional, Tuple
 from sqlalchemy import func, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 from app.models.camera import Camera
+from app.models.event import Event
 from app.repositories.base_repository import BaseRepository
 
 
@@ -10,40 +11,63 @@ class CameraRepository(BaseRepository[Camera]):
     def __init__(self, db: AsyncSession):
         super().__init__(Camera, db)
 
-    async def get_by_code(self, camera_code: str, active_only: bool = True) -> Optional[Camera]:
-        """Find camera by camera_code or by primary UUID id."""
+    async def get_by_code(
+        self,
+        camera_code: str,
+        active_only: bool = True,
+        location_id: Optional[uuid.UUID] = None,
+    ) -> Optional[Camera]:
+        """Find camera by camera_code or by primary UUID id with optional location scoping."""
+        cam: Optional[Camera] = None
         stmt = select(Camera).where(Camera.camera_code == camera_code)
         if active_only:
             stmt = stmt.where(Camera.is_active == True, Camera.status != "removed")
         result = await self.db.execute(stmt)
         cam = result.scalars().first()
-        if cam:
-            return cam
 
-        if isinstance(camera_code, str) and ("-FRS" in camera_code or "-CROWD" in camera_code):
+        if not cam and isinstance(camera_code, str) and ("-FRS" in camera_code or "-CROWD" in camera_code):
             base_code = camera_code.replace("-FRS", "").replace("-CROWD", "")
             stmt_base = select(Camera).where(Camera.camera_code == base_code)
             if active_only:
                 stmt_base = stmt_base.where(Camera.is_active == True, Camera.status != "removed")
             res_base = await self.db.execute(stmt_base)
             cam = res_base.scalars().first()
-            if cam:
-                return cam
 
         # Fallback: check if camera_code is a valid UUID
-        try:
-            val_uuid = uuid.UUID(camera_code)
-            stmt_uuid = select(Camera).where(Camera.id == val_uuid)
-            if active_only:
-                stmt_uuid = stmt_uuid.where(Camera.is_active == True, Camera.status != "removed")
-            res_uuid = await self.db.execute(stmt_uuid)
-            return res_uuid.scalars().first()
-        except (ValueError, TypeError):
-            return None
+        if not cam:
+            try:
+                val_uuid = uuid.UUID(camera_code)
+                stmt_uuid = select(Camera).where(Camera.id == val_uuid)
+                if active_only:
+                    stmt_uuid = stmt_uuid.where(Camera.is_active == True, Camera.status != "removed")
+                res_uuid = await self.db.execute(stmt_uuid)
+                cam = res_uuid.scalars().first()
+            except (ValueError, TypeError):
+                cam = None
 
-    async def get_by_camera_code(self, camera_code: str, active_only: bool = True) -> Optional[Camera]:
+        if cam:
+            if location_id is not None:
+                if not cam.event_id:
+                    return None
+                evt = await self.db.get(Event, cam.event_id)
+                if not evt or evt.location_id != location_id:
+                    return None
+                cam.location_id = location_id
+            elif cam.event_id and getattr(cam, "location_id", None) is None:
+                evt = await self.db.get(Event, cam.event_id)
+                if evt and evt.location_id:
+                    cam.location_id = evt.location_id
+
+        return cam
+
+    async def get_by_camera_code(
+        self,
+        camera_code: str,
+        active_only: bool = True,
+        location_id: Optional[uuid.UUID] = None,
+    ) -> Optional[Camera]:
         """Alias for get_by_code."""
-        return await self.get_by_code(camera_code, active_only=active_only)
+        return await self.get_by_code(camera_code, active_only=active_only, location_id=location_id)
 
     async def get_by_ip(self, ip: str) -> Optional[Camera]:
         """Find camera by its private IP address."""
@@ -105,6 +129,7 @@ class CameraRepository(BaseRepository[Camera]):
         enabled_only: Optional[bool] = None,
         event_id: Optional[uuid.UUID] = None,
         allowed_site_ids: Optional[List[uuid.UUID]] = None,
+        location_id: Optional[uuid.UUID] = None,
         skip: int = 0,
         limit: int = 100,
         include_removed: bool = False,
@@ -120,6 +145,10 @@ class CameraRepository(BaseRepository[Camera]):
             stmt = stmt.where(Camera.event_id == event_id)
         if allowed_site_ids is not None:
             stmt = stmt.where(Camera.site_id.in_(allowed_site_ids))
+
+        # 3. Strict Location Scoping: Join Event to isolate cameras by physical Location
+        if location_id is not None:
+            stmt = stmt.join(Event, Camera.event_id == Event.id).where(Event.location_id == location_id)
 
         if zone_code and zone_code.upper() != "ALL":
             stmt = stmt.where(Camera.zone_code == zone_code)
@@ -155,4 +184,8 @@ class CameraRepository(BaseRepository[Camera]):
 
         stmt = stmt.order_by(Camera.camera_code.asc()).offset(skip).limit(limit)
         result = await self.db.execute(stmt)
-        return list(result.scalars().all()), total
+        cameras = list(result.scalars().all())
+        if location_id is not None:
+            for c in cameras:
+                c.location_id = location_id
+        return cameras, total

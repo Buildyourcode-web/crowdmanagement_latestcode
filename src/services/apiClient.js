@@ -6,12 +6,13 @@ const API_BASE_URL = getApiBaseUrl();
 
 const apiClient = axios.create({
   baseURL: API_BASE_URL,
-  timeout: 30000,
+  timeout: 60000,
   headers: {
     "Content-Type": "application/json",
     Accept: "application/json",
   },
 });
+
 
 
 // Request interceptor — attach JWT access token, active event ID, and active site ID
@@ -28,6 +29,10 @@ apiClient.interceptors.request.use(
     const activeSiteId = localStorage.getItem("byc_active_site_id");
     if (activeSiteId) {
       config.headers["X-Site-ID"] = activeSiteId;
+    }
+    const activeLocationId = localStorage.getItem("byc_active_location_id");
+    if (activeLocationId) {
+      config.headers["X-Location-ID"] = activeLocationId;
     }
     return config;
   },
@@ -106,13 +111,14 @@ const inFlight = new Map();
 const DEFAULT_CACHE_TTL = 30_000; // 30 seconds
 
 function getCacheKey(url, params) {
+  const activeLocationId = localStorage.getItem("byc_active_location_id") || "all";
   const activeEventId = localStorage.getItem("byc_active_event_id") || "default";
   const activeSiteId = localStorage.getItem("byc_active_site_id") || "all";
   const now = new Date();
   const utc = now.getTime() + now.getTimezoneOffset() * 60000;
   const ist = new Date(utc + 3600000 * 5.5);
   const dateStr = `${ist.getFullYear()}-${String(ist.getMonth() + 1).padStart(2, "0")}-${String(ist.getDate()).padStart(2, "0")}`;
-  const prefix = `[evt:${activeEventId}|site:${activeSiteId}|date:${dateStr}]`;
+  const prefix = `[loc:${activeLocationId}|evt:${activeEventId}|site:${activeSiteId}|date:${dateStr}]`;
   if (!params) return `${prefix}${url}`;
   try {
     const sorted = Object.keys(params).sort().reduce((acc, k) => {

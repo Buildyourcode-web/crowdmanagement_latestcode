@@ -52,12 +52,13 @@ async def list_alerts(
 
 @router.get("/stats", response_model=StandardResponse[AlertStatsResponse])
 async def get_alert_stats(
+    ctx: EventContext = Depends(get_event_context),
     db: AsyncSession = Depends(get_db),
     current_user: User = Depends(require_permission(Permissions.ALERT_READ)),
 ):
-    """Retrieve counts of critical, high, medium, and active alerts."""
+    """Retrieve counts of critical, high, medium, and active alerts scoped to event."""
     service = AlertService(db)
-    stats = await service.get_stats()
+    stats = await service.get_stats(event_id=ctx.event_id)
     return success_response(stats)
 
 

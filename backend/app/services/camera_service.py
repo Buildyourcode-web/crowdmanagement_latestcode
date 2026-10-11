@@ -123,6 +123,7 @@ class CameraService:
             removed_at=getattr(c, "removed_at", None),
             event_id=getattr(c, "event_id", None),
             site_id=getattr(c, "site_id", None),
+            location_id=getattr(c, "location_id", None),
             is_frs_camera=c.is_frs_camera,
             is_ptz=c.is_ptz,
             resolution=c.resolution or "1080p",
@@ -152,6 +153,7 @@ class CameraService:
         enabled_only: Optional[bool] = None,
         event_id: Optional[uuid.UUID] = None,
         allowed_site_ids: Optional[List[uuid.UUID]] = None,
+        location_id: Optional[uuid.UUID] = None,
         page: int = 1,
         page_size: int = 100,
     ) -> Tuple[List[CameraRead], int]:
@@ -165,14 +167,20 @@ class CameraService:
             enabled_only=enabled_only,
             event_id=event_id,
             allowed_site_ids=allowed_site_ids,
+            location_id=location_id,
             skip=skip,
             limit=page_size,
         )
         return [self._build_camera_read(c) for c in cameras], total
 
 
-    async def get_camera_by_code(self, camera_code: str, active_only: bool = True) -> CameraRead:
-        camera = await self.camera_repo.get_by_code(camera_code, active_only=active_only)
+    async def get_camera_by_code(
+        self,
+        camera_code: str,
+        active_only: bool = True,
+        location_id: Optional[uuid.UUID] = None,
+    ) -> CameraRead:
+        camera = await self.camera_repo.get_by_code(camera_code, active_only=active_only, location_id=location_id)
         if not camera:
             raise HTTPException(
                 status_code=status.HTTP_404_NOT_FOUND,
@@ -180,8 +188,13 @@ class CameraService:
             )
         return self._build_camera_read(camera)
 
-    async def get_camera_model(self, camera_code: str, active_only: bool = True) -> Camera:
-        camera = await self.camera_repo.get_by_code(camera_code, active_only=active_only)
+    async def get_camera_model(
+        self,
+        camera_code: str,
+        active_only: bool = True,
+        location_id: Optional[uuid.UUID] = None,
+    ) -> Camera:
+        camera = await self.camera_repo.get_by_code(camera_code, active_only=active_only, location_id=location_id)
         if not camera:
             raise HTTPException(
                 status_code=status.HTTP_404_NOT_FOUND,
@@ -212,8 +225,12 @@ class CameraService:
         _stats_cache_time = time.time()
         return res
 
-    async def get_camera_stats(self, event_id: Optional[uuid.UUID] = None) -> CameraStatsResponse:
-        cameras, total = await self.camera_repo.list_cameras(limit=2000, event_id=event_id)
+    async def get_camera_stats(
+        self,
+        event_id: Optional[uuid.UUID] = None,
+        location_id: Optional[uuid.UUID] = None,
+    ) -> CameraStatsResponse:
+        cameras, total = await self.camera_repo.list_cameras(limit=2000, event_id=event_id, location_id=location_id)
         online = sum(1 for c in cameras if (c.status == "online" or c.stream_status == "ONLINE"))
         degraded = sum(1 for c in cameras if (c.status == "degraded" or c.stream_status == "DEGRADED"))
         offline = sum(1 for c in cameras if (c.status == "offline" or c.stream_status == "OFFLINE"))
@@ -316,7 +333,39 @@ class CameraService:
             zone_id = zone_obj.id
             zone_code = zone_obj.zone_code
 
-        # 3. RTSP URL & Credential Preparation
+        # 3. Validate event, site, and location consistency
+        if data.event_id:
+            from app.models.event import Event
+            evt = await self.db.get(Event, data.event_id)
+            if not evt:
+                raise HTTPException(
+                    status_code=status.HTTP_400_BAD_REQUEST,
+                    detail={"code": "EVENT_NOT_FOUND", "message": f"Event {data.event_id} does not exist"},
+                )
+            if data.location_id and evt.location_id and evt.location_id != data.location_id:
+                raise HTTPException(
+                    status_code=status.HTTP_400_BAD_REQUEST,
+                    detail={
+                        "code": "EVENT_LOCATION_MISMATCH",
+                        "message": f"Event '{evt.name}' does not belong to selected location",
+                    },
+                )
+            if not data.location_id and evt.location_id:
+                data.location_id = evt.location_id
+
+        if data.site_id and data.event_id:
+            from app.models.site import Site
+            site = await self.db.get(Site, data.site_id)
+            if not site or site.event_id != data.event_id:
+                raise HTTPException(
+                    status_code=status.HTTP_400_BAD_REQUEST,
+                    detail={
+                        "code": "SITE_EVENT_MISMATCH",
+                        "message": f"Site does not belong to event {data.event_id}",
+                    },
+                )
+
+        # 4. RTSP URL & Credential Preparation
         final_rtsp_url = data.rtsp_url
         if final_rtsp_url and (data.username or data.password):
             final_rtsp_url = build_authenticated_rtsp_url(
@@ -384,6 +433,7 @@ class CameraService:
         self.db.add(new_cam)
         await self.db.commit()
         await self.db.refresh(new_cam)
+        new_cam.location_id = data.location_id
 
         # 6. Publish event
         safe_read = self._build_camera_read(new_cam)

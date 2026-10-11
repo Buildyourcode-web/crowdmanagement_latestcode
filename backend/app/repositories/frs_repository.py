@@ -23,11 +23,14 @@ class FRSRepository(BaseRepository[FRSCandidate]):
         zone: Optional[str] = None,
         min_score: Optional[float] = None,
         search: Optional[str] = None,
+        event_id: Optional[uuid.UUID] = None,
         skip: int = 0,
         limit: int = 50,
     ) -> Tuple[List[FRSCandidate], int]:
         stmt = select(FRSCandidate)
 
+        if event_id is not None:
+            stmt = stmt.where(FRSCandidate.event_id == event_id)
         if status and status.upper() != "ALL":
             stmt = stmt.where(FRSCandidate.status == status.upper())
         if camera_id and camera_id.upper() != "ALL":

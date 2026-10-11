@@ -300,20 +300,7 @@ class CanonicalCountingService:
                 0,
             ).label("tot_out"),
         ).where(
-            or_(
-                LineCrossingEvent.event_id == event_id,
-                LineCrossingEvent.event_id.is_(None),
-                LineCrossingEvent.event_id.in_(
-                    select(Event.id).where(
-                        or_(
-                            Event.code.ilike("%KHB%"),
-                            Event.code.ilike("%VIGNESHWARA%"),
-                            Event.name.ilike("%Khairatabad%"),
-                            Event.name.ilike("%vigneshwara%"),
-                        )
-                    )
-                ),
-            )
+            LineCrossingEvent.event_id == event_id,
         )
 
         if camera_id:
@@ -333,20 +320,7 @@ class CanonicalCountingService:
             func.coalesce(func.sum(CrowdSnapshot.inflow_rate), 0).label("snap_in"),
             func.coalesce(func.sum(CrowdSnapshot.outflow_rate), 0).label("snap_out"),
         ).where(
-            or_(
-                CrowdSnapshot.event_id == event_id,
-                CrowdSnapshot.event_id.is_(None),
-                CrowdSnapshot.event_id.in_(
-                    select(Event.id).where(
-                        or_(
-                            Event.code.ilike("%KHB%"),
-                            Event.code.ilike("%VIGNESHWARA%"),
-                            Event.name.ilike("%Khairatabad%"),
-                            Event.name.ilike("%vigneshwara%"),
-                        )
-                    )
-                ),
-            )
+            CrowdSnapshot.event_id == event_id,
         )
 
         if camera_id:
@@ -458,7 +432,7 @@ class CanonicalCountingService:
                     direction,
                     COALESCE(SUM(count_delta), 0) AS c_delta
                 FROM line_crossing_events
-                WHERE (event_id = :event_id OR event_id IS NULL)
+                WHERE event_id = :event_id
                   AND crossing_timestamp >= :start_utc
                   AND crossing_timestamp < :end_utc
                 GROUP BY 1, 2
@@ -483,7 +457,7 @@ class CanonicalCountingService:
                     COALESCE(SUM(inflow_rate), 0) AS in_delta,
                     COALESCE(SUM(outflow_rate), 0) AS out_delta
                 FROM crowd_snapshots
-                WHERE (event_id = :event_id OR event_id IS NULL)
+                WHERE event_id = :event_id
                   AND timestamp >= :start_utc
                   AND timestamp < :end_utc
                 GROUP BY 1
@@ -507,10 +481,7 @@ class CanonicalCountingService:
                     LineCrossingEvent.count_delta,
                 )
                 .where(
-                    or_(
-                        LineCrossingEvent.event_id == event_id,
-                        LineCrossingEvent.event_id.is_(None),
-                    ),
+                    LineCrossingEvent.event_id == event_id,
                     LineCrossingEvent.crossing_timestamp >= start_utc,
                     LineCrossingEvent.crossing_timestamp < end_utc,
                 )
@@ -538,10 +509,7 @@ class CanonicalCountingService:
                     CrowdSnapshot.outflow_rate,
                 )
                 .where(
-                    or_(
-                        CrowdSnapshot.event_id == event_id,
-                        CrowdSnapshot.event_id.is_(None),
-                    ),
+                    CrowdSnapshot.event_id == event_id,
                     CrowdSnapshot.timestamp >= start_utc,
                     CrowdSnapshot.timestamp < end_utc,
                 )
@@ -627,7 +595,7 @@ class CanonicalCountingService:
                     direction,
                     COALESCE(SUM(count_delta), 0) AS c_delta
                 FROM line_crossing_events
-                WHERE (event_id = :event_id OR event_id IS NULL)
+                WHERE event_id = :event_id
                   AND crossing_timestamp >= :start_utc
                   AND crossing_timestamp < :end_utc
                 GROUP BY 1, 2, 3
@@ -660,7 +628,7 @@ class CanonicalCountingService:
                     COALESCE(SUM(inflow_rate), 0) AS in_delta,
                     COALESCE(SUM(outflow_rate), 0) AS out_delta
                 FROM crowd_snapshots
-                WHERE (event_id = :event_id OR event_id IS NULL)
+                WHERE event_id = :event_id
                   AND timestamp >= :start_utc
                   AND timestamp < :end_utc
                 GROUP BY 1, 2
@@ -726,7 +694,7 @@ class CanonicalCountingService:
                     CrowdSnapshot.outflow_rate,
                 )
                 .where(
-                    or_(CrowdSnapshot.event_id == event_id, CrowdSnapshot.event_id.is_(None)),
+                    CrowdSnapshot.event_id == event_id,
                     CrowdSnapshot.timestamp >= start_fest_utc,
                     CrowdSnapshot.timestamp < end_fest_utc,
                 )

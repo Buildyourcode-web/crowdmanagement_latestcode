@@ -10,23 +10,13 @@ from app.schemas.zone import ZonePrediction, ZoneRead
 import asyncio
 import time
 
-_zones_cache: Optional[List[ZoneRead]] = None
-_zones_cache_time: float = 0.0
-_is_refreshing_zones = False
+from typing import Dict, List, Optional, Tuple
+import asyncio
+import time
+import uuid
+
+_zones_cache: Dict[str, Tuple[List[ZoneRead], float]] = {}
 _ZONES_TTL: float = 10.0
-
-
-async def _background_refresh_zones():
-    global _is_refreshing_zones
-    try:
-        from app.db.session import AsyncSessionLocal
-        async with AsyncSessionLocal() as session:
-            srv = ZoneService(session)
-            await srv._fetch_and_cache_direct()
-    except Exception:
-        pass
-    finally:
-        _is_refreshing_zones = False
 
 
 class ZoneService:
@@ -34,63 +24,59 @@ class ZoneService:
         self.db = db
         self.zone_repo = ZoneRepository(db)
 
-    async def _fetch_and_cache_direct(self) -> List[ZoneRead]:
-        global _zones_cache, _zones_cache_time
-        zones = await self.zone_repo.list_all_zones()
-        results = []
-        for z in zones:
-            cam_ids = [c.camera_code for c in z.cameras] if z.cameras else []
-            gate_ids = [g.gate_code for g in z.gates] if z.gates else []
-            occupancy = round((z.current_people / z.capacity * 100), 1) if z.capacity > 0 else 0.0
+    def _build_zone_read(self, z: Zone) -> ZoneRead:
+        cam_ids = [c.camera_code for c in z.cameras] if z.cameras else []
+        gate_ids = [g.gate_code for g in z.gates] if z.gates else []
+        occupancy = round((z.current_people / z.capacity * 100), 1) if z.capacity > 0 else 0.0
 
-            prediction = None
-            if z.risk_level == "HIGH" or z.risk_level == "CRITICAL":
-                prediction = ZonePrediction(
-                    critical_in_minutes=12 if z.risk_level == "HIGH" else 0,
-                    next_level="CRITICAL" if z.risk_level == "HIGH" else "MAXIMUM",
-                    next_level_in_minutes=12,
-                )
+        prediction = None
+        if z.risk_level == "HIGH" or z.risk_level == "CRITICAL":
+            prediction = ZonePrediction(
+                critical_in_minutes=12 if z.risk_level == "HIGH" else 0,
+                next_level="CRITICAL" if z.risk_level == "HIGH" else "MAXIMUM",
+                next_level_in_minutes=12,
+            )
 
-            results.append(ZoneRead(
-                id=z.zone_code,
-                zone_code=z.zone_code,
-                name=z.name,
-                label=z.label,
-                description=z.description,
-                current_people=z.current_people,
-                capacity=z.capacity,
-                occupancy_pct=occupancy,
-                density=z.density,
-                density_label=z.density_label,
-                risk_level=z.risk_level,
-                coordinates=z.coordinates if isinstance(z.coordinates, list) else [],
-                center=z.center,
-                cameras=cam_ids,
-                gates=gate_ids,
-                color=z.color,
-                inflow=round(z.current_people * 0.03),
-                outflow=round(z.current_people * 0.02),
-                prediction=prediction,
-            ))
-        _zones_cache = results
-        _zones_cache_time = time.time()
-        return results
+        return ZoneRead(
+            id=z.zone_code,
+            zone_code=z.zone_code,
+            name=z.name,
+            label=z.label,
+            description=z.description,
+            current_people=z.current_people,
+            capacity=z.capacity,
+            occupancy_pct=occupancy,
+            density=z.density,
+            density_label=z.density_label,
+            risk_level=z.risk_level,
+            coordinates=z.coordinates if isinstance(z.coordinates, list) else [],
+            center=z.center,
+            cameras=cam_ids,
+            gates=gate_ids,
+            color=z.color,
+            inflow=round(z.current_people * 0.03),
+            outflow=round(z.current_people * 0.02),
+            prediction=prediction,
+        )
 
-    async def list_zones(self) -> List[ZoneRead]:
-        global _zones_cache, _zones_cache_time, _is_refreshing_zones
+    async def list_zones(
+        self,
+        event_id: Optional[uuid.UUID] = None,
+        location_id: Optional[uuid.UUID] = None,
+    ) -> List[ZoneRead]:
+        global _zones_cache
+        cache_key = f"{location_id}:{event_id}"
         now = time.time()
 
-        if _zones_cache is not None:
-            if (now - _zones_cache_time) > _ZONES_TTL and not _is_refreshing_zones:
-                _is_refreshing_zones = True
-                asyncio.create_task(_background_refresh_zones())
-            return _zones_cache
+        if cache_key in _zones_cache:
+            data, cache_time = _zones_cache[cache_key]
+            if (now - cache_time) < _ZONES_TTL:
+                return data
 
-        _zones_cache = []
-        if not _is_refreshing_zones:
-            _is_refreshing_zones = True
-            asyncio.create_task(_background_refresh_zones())
-        return _zones_cache
+        zones = await self.zone_repo.list_all_zones(event_id=event_id, location_id=location_id)
+        results = [self._build_zone_read(z) for z in zones]
+        _zones_cache[cache_key] = (results, now)
+        return results
 
     async def get_zone_by_code(self, zone_code: str) -> ZoneRead:
         zone = await self.zone_repo.get_by_code(zone_code)

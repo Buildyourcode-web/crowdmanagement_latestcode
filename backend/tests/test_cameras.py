@@ -102,3 +102,9 @@ async def test_delete_camera(client: AsyncClient, db_session: AsyncSession, supe
     # CRITICAL: Verify snapshot STILL references this camera with zero FK nullification
     await db_session.refresh(snapshot)
     assert snapshot.camera_id == cam.id
+
+    # Clean up test data so subsequent counting tests see a clean database
+    await db_session.delete(snapshot)
+    await db_session.delete(cam)
+    await db_session.commit()
+

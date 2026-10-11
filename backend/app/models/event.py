@@ -1,8 +1,13 @@
+import uuid
 from datetime import datetime
-from typing import List, Optional
-from sqlalchemy import DateTime, Float, Integer, String
+from typing import TYPE_CHECKING, List, Optional
+from sqlalchemy import DateTime, Float, ForeignKey, Integer, String
+from sqlalchemy.dialects.postgresql import UUID
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 from app.models.base import Base, TimestampMixin, UUIDMixin
+
+if TYPE_CHECKING:
+    from app.models.location import Location
 
 
 # Event lifecycle: DRAFT → SCHEDULED → LIVE → PAUSED → COMPLETED → ARCHIVED
@@ -38,5 +43,14 @@ class Event(Base, UUIDMixin, TimestampMixin):
     created_by: Mapped[Optional[str]] = mapped_column(String(100), nullable=True)
     updated_by: Mapped[Optional[str]] = mapped_column(String(100), nullable=True)
 
+    # Location Foreign Key (Optional / Backward Compatible)
+    location_id: Mapped[Optional[uuid.UUID]] = mapped_column(
+        UUID(as_uuid=True),
+        ForeignKey("locations.id", ondelete="SET NULL"),
+        nullable=True,
+        index=True,
+    )
+
     # Relationships
     sites: Mapped[List["Site"]] = relationship("Site", back_populates="event", cascade="all, delete-orphan", lazy="noload")
+    location_ref: Mapped[Optional["Location"]] = relationship("Location", back_populates="events", lazy="noload")

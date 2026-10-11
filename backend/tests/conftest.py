@@ -14,14 +14,6 @@ sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..")
 
 from app.config import settings
 settings.APP_ENV = "testing"
-from app.db.base import Base
-from app.dependencies import get_db
-from app.main import app
-from app.models.role import Permission, Role
-from app.models.user import User
-from app.security.jwt import create_access_token
-from app.security.password import get_password_hash
-from app.security.permissions import DEFAULT_ROLE_PERMISSIONS
 
 # SQLite async in-memory with StaticPool so all connections share the same memory database
 test_engine = create_async_engine(
@@ -38,10 +30,19 @@ TestSessionLocal = async_sessionmaker(
     autoflush=False,
 )
 
-# Bind app.db.session so background tasks and engine calls use the test db
+# Bind app.db.session before importing app so all submodules use test db
 from app.db import session as db_session_module
 db_session_module.AsyncSessionLocal = TestSessionLocal
 db_session_module.async_engine = test_engine
+
+from app.db.base import Base
+from app.dependencies import get_db
+from app.main import app
+from app.models.role import Permission, Role
+from app.models.user import User
+from app.security.jwt import create_access_token
+from app.security.password import get_password_hash
+from app.security.permissions import DEFAULT_ROLE_PERMISSIONS
 
 
 @pytest_asyncio.fixture(scope="session")

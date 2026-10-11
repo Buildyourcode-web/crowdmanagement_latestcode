@@ -1,6 +1,7 @@
 import { useState, useEffect } from "react";
 import StatusBadge from "../common/StatusBadge.jsx";
 import { getBackendUrl } from "../../utils/urlConfig.js";
+import { setCameraCountingActive, setCameraCountMode } from "../../services/cameraService.js";
 
 const BACKEND = getBackendUrl();
 
@@ -76,17 +77,24 @@ export default function CameraCard({ camera, onSelect, onToggleFrs, onFullscreen
   );
   const [visibilityTick, setVisibilityTick] = useState(() => Date.now());
 
+  // ── Entry Camera Count Controls local state ────────────────────────────────
+  const [countingActive, setCountingActive] = useState(() => camera?.counting_active !== false);
+  const [countMode, setCountMode] = useState(() => camera?.count_mode === 2 ? 2 : 1);
+
   if (!camera) return null;
 
   const isFrs = Boolean(camera.is_frs_camera || camera.isFRS || camera.is_frs || camera.camera_type === "FRS");
   const isRunning = (camera.status === "online" || camera.status === "running") && Boolean(camera.stream_url) && !["stopped", "disconnected", "offline"].includes(camera.status);
 
-  const purposes = (Array.isArray(camera.ai_purposes) && camera.ai_purposes.length > 0)
+  const hasConfiguredPurposes = Array.isArray(camera.ai_purposes) && camera.ai_purposes.length > 0;
+  const purposes = hasConfiguredPurposes
     ? camera.ai_purposes
-    : [isFrs ? "FRS" : "ENTRY"];
+    : (isFrs ? ["FRS"] : []);
   const hasExit = purposes.includes("EXIT") && !purposes.includes("ENTRY");
   const hasZone = (purposes.includes("ZONE") || purposes.includes("CROWD_ROI")) && !purposes.includes("ENTRY") && !purposes.includes("EXIT");
-  const hasEntry = !isFrs && !hasExit && !hasZone;
+  const hasEntry = (purposes.includes("ENTRY") || purposes.includes("ENTRY_EXIT")) && !isFrs;
+  const isUnconfigured = !isFrs && !hasConfiguredPurposes;
+  const isEntryCamera = hasEntry && !isFrs;
 
   // Listen for tab switching to prevent background frame accumulation in browser TCP buffer
   useEffect(() => {
@@ -290,7 +298,7 @@ export default function CameraCard({ camera, onSelect, onToggleFrs, onFullscreen
 
       <div style={{ padding: "10px 12px" }}>
         <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", marginBottom: 4 }}>
-          <span style={{ fontFamily: "var(--cc-font-mono)", fontSize: 12, fontWeight: 700, color: isFrs ? "var(--cc-accent)" : (hasExit ? "#f85149" : (hasZone ? "#58a6ff" : "#3fb950")) }}>
+          <span style={{ fontFamily: "var(--cc-font-mono)", fontSize: 12, fontWeight: 700, color: isFrs ? "var(--cc-accent)" : (isUnconfigured ? "#d29922" : (hasExit ? "#f85149" : (hasZone ? "#58a6ff" : "#3fb950"))) }}>
             {camera.id}
           </span>
           <div style={{ display: "flex", gap: 4, alignItems: "center" }}>
@@ -299,13 +307,13 @@ export default function CameraCard({ camera, onSelect, onToggleFrs, onFullscreen
                 fontSize: 9,
                 fontWeight: 800,
                 padding: "2px 7px",
-                background: isFrs ? "var(--cc-blue-dim)" : (hasExit ? "rgba(248,81,73,0.15)" : (hasZone ? "rgba(88,166,255,0.15)" : "rgba(63,185,80,0.15)")),
-                border: isFrs ? "1px solid var(--cc-blue-border)" : (hasExit ? "1px solid rgba(248,81,73,0.3)" : (hasZone ? "1px solid rgba(88,166,255,0.3)" : "1px solid rgba(63,185,80,0.3)")),
+                background: isFrs ? "var(--cc-blue-dim)" : (isUnconfigured ? "rgba(210,153,34,0.15)" : (hasExit ? "rgba(248,81,73,0.15)" : (hasZone ? "rgba(88,166,255,0.15)" : "rgba(63,185,80,0.15)"))),
+                border: isFrs ? "1px solid var(--cc-blue-border)" : (isUnconfigured ? "1px solid rgba(210,153,34,0.4)" : (hasExit ? "1px solid rgba(248,81,73,0.3)" : (hasZone ? "1px solid rgba(88,166,255,0.3)" : "1px solid rgba(63,185,80,0.3)"))),
                 borderRadius: "var(--cc-radius-sm)",
-                color: isFrs ? "var(--cc-accent)" : (hasExit ? "#f85149" : (hasZone ? "#58a6ff" : "#3fb950")),
+                color: isFrs ? "var(--cc-accent)" : (isUnconfigured ? "#d29922" : (hasExit ? "#f85149" : (hasZone ? "#58a6ff" : "#3fb950"))),
               }}
             >
-              {isFrs ? "FRS BIOMETRIC" : (hasExit ? "EXIT GATE" : (hasZone ? `ZONE DENSITY (${camera.zone_code || 'ZONE-A'})` : "ENTRY GATE"))}
+              {isFrs ? "FRS BIOMETRIC" : (isUnconfigured ? "CONFIGURATION REQUIRED" : (hasExit ? "EXIT GATE" : (hasZone ? `ZONE DENSITY (${camera.zone_code || 'ZONE-A'})` : "ENTRY GATE")))}
             </span>
             <StatusBadge
               status={isRunning ? "online" : "stopped"}
@@ -410,42 +418,151 @@ export default function CameraCard({ camera, onSelect, onToggleFrs, onFullscreen
               })()}
             </div>
           </div>
+        ) : isUnconfigured ? (
+          <div style={{ padding: "12px 6px", borderTop: "1px solid rgba(255,255,255,0.06)", textAlign: "center" }}>
+            <div style={{ fontSize: 11, color: "var(--cc-yellow)", fontWeight: 700, marginBottom: 3, display: "flex", alignItems: "center", justifyContent: "center", gap: 5 }}>
+              <i className="bi bi-gear-wide-connected" />
+              <span>CONFIGURATION REQUIRED</span>
+            </div>
+            <div style={{ fontSize: 10, color: "var(--cc-text-muted)" }}>
+              Please click "Configure ROI" below to assign Entry, Exit, or Zone function.
+            </div>
+          </div>
         ) : (
-          <div style={{ display: "grid", gridTemplateColumns: "1.2fr 1fr", gap: 8, padding: "8px 0", borderTop: "1px solid rgba(255,255,255,0.06)", alignItems: "center" }}>
-            <div>
-              <div className="cc-label" style={{ color: "#3fb950", fontSize: 11, fontWeight: 700 }}>↑ Entry Count (Today)</div>
-              <div style={{ fontFamily: "var(--cc-font-mono)", fontSize: 20, fontWeight: 800, color: "#3fb950" }}>
-                {(camera.in_count ?? 0).toLocaleString()}
+          <div style={{ padding: "8px 0", borderTop: "1px solid rgba(255,255,255,0.06)" }}>
+            <div style={{ display: "grid", gridTemplateColumns: "1.2fr 1fr", gap: 8, alignItems: "center" }}>
+              <div>
+                <div className="cc-label" style={{ color: "#3fb950", fontSize: 11, fontWeight: 700 }}>↑ Entry Count (Today)</div>
+                <div style={{ fontFamily: "var(--cc-font-mono)", fontSize: 20, fontWeight: 800, color: "#3fb950" }}>
+                  {(camera.in_count ?? 0).toLocaleString()}
+                </div>
+              </div>
+              <div>
+                <div className="cc-label" style={{ fontSize: 10 }}>Queue Status</div>
+                {(() => {
+                  const qStatus = camera.queue_movement_status || "MOVING";
+                  const qConfig = {
+                    STOPPED: { label: "● STOPPED", color: "#f85149", bg: "rgba(248,81,73,0.15)", border: "#f85149" },
+                    SLOW: { label: "● SLOW", color: "#d29922", bg: "rgba(210,153,34,0.15)", border: "#d29922" },
+                    EMPTY: { label: "● EMPTY", color: "var(--cc-text-muted)", bg: "rgba(255,255,255,0.05)", border: "var(--cc-border)" },
+                    MOVING: { label: "● MOVING", color: "#3fb950", bg: "rgba(63,185,80,0.15)", border: "#3fb950" },
+                  }[qStatus] || { label: "● MOVING", color: "#3fb950", bg: "rgba(63,185,80,0.15)", border: "#3fb950" };
+                  return (
+                    <div style={{
+                      display: "inline-block",
+                      fontSize: 10.5,
+                      fontWeight: 800,
+                      fontFamily: "var(--cc-font-mono)",
+                      padding: "3px 8px",
+                      borderRadius: 4,
+                      background: qConfig.bg,
+                      color: qConfig.color,
+                      border: `1px solid ${qConfig.border}`,
+                      marginTop: 2,
+                    }}>
+                      {qConfig.label}
+                    </div>
+                  );
+                })()}
               </div>
             </div>
-            <div>
-              <div className="cc-label" style={{ fontSize: 10 }}>Queue Status</div>
-              {(() => {
-                const qStatus = camera.queue_movement_status || "MOVING";
-                const qConfig = {
-                  STOPPED: { label: "● STOPPED", color: "#f85149", bg: "rgba(248,81,73,0.15)", border: "#f85149" },
-                  SLOW: { label: "● SLOW", color: "#d29922", bg: "rgba(210,153,34,0.15)", border: "#d29922" },
-                  EMPTY: { label: "● EMPTY", color: "var(--cc-text-muted)", bg: "rgba(255,255,255,0.05)", border: "var(--cc-border)" },
-                  MOVING: { label: "● MOVING", color: "#3fb950", bg: "rgba(63,185,80,0.15)", border: "#3fb950" },
-                }[qStatus] || { label: "● MOVING", color: "#3fb950", bg: "rgba(63,185,80,0.15)", border: "#3fb950" };
-                return (
-                  <div style={{
-                    display: "inline-block",
-                    fontSize: 10.5,
+
+            {/* ── Entry Camera Count Controls — strict add-on, ENTRY cameras only ── */}
+            {isEntryCamera && (
+              <div
+                style={{
+                  display: "flex",
+                  alignItems: "center",
+                  gap: 4,
+                  marginTop: 7,
+                  paddingTop: 5,
+                  borderTop: "1px solid rgba(255,255,255,0.05)",
+                }}
+                onClick={(e) => e.stopPropagation()}
+              >
+                {/* ▶ / ⏸  Count gate */}
+                <button
+                  className="cc-btn"
+                  title={countingActive ? "Stop Count (freeze official count commits)" : "Start Count (resume official count commits)"}
+                  style={{
+                    fontSize: 10,
+                    padding: "2px 6px",
+                    display: "flex",
+                    alignItems: "center",
+                    gap: 2,
+                    fontWeight: 700,
+                    background: countingActive ? "rgba(63,185,80,0.15)" : "rgba(248,81,73,0.1)",
+                    color: countingActive ? "#3fb950" : "#f85149",
+                    borderColor: countingActive ? "rgba(63,185,80,0.4)" : "rgba(248,81,73,0.35)",
+                  }}
+                  onClick={async (e) => {
+                    e.stopPropagation();
+                    const next = !countingActive;
+                    setCountingActive(next);
+                    try {
+                      await setCameraCountingActive(camera.camera_code || camera.id, next);
+                    } catch (_) {
+                      setCountingActive(!next); // revert on error
+                    }
+                  }}
+                >
+                  <i className={`bi ${countingActive ? "bi-pause-circle-fill" : "bi-play-circle-fill"}`} style={{ fontSize: 10 }} />
+                  {countingActive ? "⏸" : "▶"}
+                </button>
+
+                {/* +1 Mode */}
+                <button
+                  className="cc-btn"
+                  title="Count 1 per person crossing"
+                  style={{
+                    fontSize: 10,
+                    padding: "2px 7px",
                     fontWeight: 800,
                     fontFamily: "var(--cc-font-mono)",
-                    padding: "3px 8px",
-                    borderRadius: 4,
-                    background: qConfig.bg,
-                    color: qConfig.color,
-                    border: `1px solid ${qConfig.border}`,
-                    marginTop: 2,
-                  }}>
-                    {qConfig.label}
-                  </div>
-                );
-              })()}
-            </div>
+                    background: countMode === 1 ? "rgba(88,166,255,0.2)" : "transparent",
+                    color: countMode === 1 ? "#58a6ff" : "var(--cc-text-muted)",
+                    borderColor: countMode === 1 ? "rgba(88,166,255,0.5)" : "var(--cc-border)",
+                  }}
+                  onClick={async (e) => {
+                    e.stopPropagation();
+                    setCountMode(1);
+                    try {
+                      await setCameraCountMode(camera.camera_code || camera.id, 1);
+                    } catch (_) {
+                      setCountMode(countMode); // revert on error
+                    }
+                  }}
+                >
+                  +1
+                </button>
+
+                {/* +2 Mode */}
+                <button
+                  className="cc-btn"
+                  title="Count 2 per person crossing"
+                  style={{
+                    fontSize: 10,
+                    padding: "2px 7px",
+                    fontWeight: 800,
+                    fontFamily: "var(--cc-font-mono)",
+                    background: countMode === 2 ? "rgba(210,153,34,0.2)" : "transparent",
+                    color: countMode === 2 ? "#d29922" : "var(--cc-text-muted)",
+                    borderColor: countMode === 2 ? "rgba(210,153,34,0.5)" : "var(--cc-border)",
+                  }}
+                  onClick={async (e) => {
+                    e.stopPropagation();
+                    setCountMode(2);
+                    try {
+                      await setCameraCountMode(camera.camera_code || camera.id, 2);
+                    } catch (_) {
+                      setCountMode(countMode); // revert on error
+                    }
+                  }}
+                >
+                  +2
+                </button>
+              </div>
+            )}
           </div>
         )}
 

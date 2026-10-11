@@ -57,11 +57,17 @@ class FRSService:
 
     # ── Dashboard & KPIs ──────────────────────────────────────────────────────
 
-    async def get_dashboard_kpis(self) -> FRSDashboardKPIs:
-        cameras, total_cams = await self.camera_repo.list_cameras(is_frs=True, limit=100)
+    async def get_dashboard_kpis(
+        self,
+        event_id: Optional[uuid.UUID] = None,
+        location_id: Optional[uuid.UUID] = None,
+    ) -> FRSDashboardKPIs:
+        cameras, total_cams = await self.camera_repo.list_cameras(
+            is_frs=True, event_id=event_id, location_id=location_id, limit=100
+        )
         online_cams = sum(1 for c in cameras if c.status == "online")
 
-        candidates, total_candidates = await self.frs_repo.list_candidates(limit=500)
+        candidates, total_candidates = await self.frs_repo.list_candidates(event_id=event_id, limit=500)
         pending = sum(1 for c in candidates if c.status in ("PENDING_REVIEW", "REVIEW_REQUIRED"))
         possible_matches = sum(
             1 for c in candidates if c.status in ("POSSIBLE_MATCH", "CONFIRMED_BY_REVIEWER") or c.match_score >= 80.0
@@ -98,6 +104,7 @@ class FRSService:
         zone: Optional[str] = None,
         min_score: Optional[float] = None,
         search: Optional[str] = None,
+        event_id: Optional[uuid.UUID] = None,
         page: int = 1,
         page_size: int = 50,
     ) -> Tuple[List[FRSCandidateRead], int]:
@@ -108,6 +115,7 @@ class FRSService:
             zone=zone,
             min_score=min_score,
             search=search,
+            event_id=event_id,
             skip=skip,
             limit=page_size,
         )

@@ -1,4 +1,5 @@
 import os
+import time
 import uuid
 from typing import Any, AsyncGenerator, Callable, List, Optional
 from fastapi import Depends, HTTPException, Header, Security, status
@@ -16,8 +17,17 @@ from app.security.jwt import decode_token
 
 security = HTTPBearer(auto_error=False)
 
+# Shared in-memory caches to eliminate 5+ remote DB network round trips per request
+_USER_CACHE: dict[uuid.UUID, tuple[User, float]] = {}
+_EVENT_CONTEXT_CACHE: dict[tuple, tuple[Any, float]] = {}
+
+def invalidate_dependencies_cache():
+    _USER_CACHE.clear()
+    _EVENT_CONTEXT_CACHE.clear()
+
 # Shared Redis pool
 _redis_pool: Optional[Redis] = None
+
 
 
 
@@ -93,6 +103,14 @@ async def get_current_user(
     jwt_role = payload.get("role")
     jwt_perms = payload.get("permissions") or []
 
+    now_mono = time.monotonic()
+    cached = _USER_CACHE.get(uid)
+    if cached and now_mono < cached[1]:
+        cached_user = cached[0]
+        cached_user._jwt_role = jwt_role
+        cached_user._jwt_permissions = jwt_perms
+        return cached_user
+
     stmt = (
         select(User)
         .options(selectinload(User.role).selectinload(Role.permissions))
@@ -115,7 +133,9 @@ async def get_current_user(
 
     user._jwt_role = jwt_role
     user._jwt_permissions = jwt_perms
+    _USER_CACHE[uid] = (user, now_mono + 120.0)  # Cache for 2 minutes
     return user
+
 
 
 def require_permission(required_permission: str) -> Callable:
@@ -152,6 +172,7 @@ async def verify_ai_service_key(
 from dataclasses import dataclass
 from app.models.event import Event
 from app.models.site import Site
+from app.models.location import Location
 from app.models.user_access import UserEventAccess, UserSiteAccess
 from app.security.permissions import Permissions
 
@@ -165,6 +186,7 @@ class EventContext:
     is_global_admin: bool
     allowed_site_ids: Optional[List[uuid.UUID]] = None  # None means all sites in this event are allowed
     has_frs_access: bool = False
+    location_id: Optional[uuid.UUID] = None  # Active location scope (from X-Location-ID header)
 
 
 
@@ -172,22 +194,47 @@ class EventContext:
 
 async def get_event_context(
     x_event_id: Optional[str] = Header(None, alias="X-Event-ID"),
+    x_location_id: Optional[str] = Header(None, alias="X-Location-ID"),
     current_user: User = Depends(get_current_user),
     db: AsyncSession = Depends(get_db),
 ) -> EventContext:
     """
-    Validates event context and RBAC permissions.
-    - SUPER_ADMIN: has access to all events and all sites.
-    - Other users: must have explicit UserEventAccess record for the event.
-    - If X-Event-ID is omitted:
-        - If user has exactly one accessible event, defaults to that event.
-        - If user has multiple events, raises 400 Bad Request requiring explicit selection.
+    Validates event and location context and RBAC permissions.
+    Results are cached 60 seconds per (user, event, location) combination
+    so that the expensive multi-round-trip Supabase lookup is only done once.
     """
+    now_mono = time.monotonic()
+    cache_key = (current_user.id, x_event_id, x_location_id)
+    ctx_cached = _EVENT_CONTEXT_CACHE.get(cache_key)
+    if ctx_cached and now_mono < ctx_cached[1]:
+        return ctx_cached[0]
+
     is_super = current_user.is_super_admin
     user_perms = current_user.permissions_list
     has_frs = is_super or any(
         p in user_perms for p in [Permissions.FRS_READ, Permissions.FRS_REVIEW, Permissions.FRS_MANAGE]
     )
+
+    parsed_location_id: Optional[uuid.UUID] = None
+    if x_location_id:
+        try:
+            loc_uuid = uuid.UUID(x_location_id)
+            loc_stmt = select(Location).where((Location.id == loc_uuid) | (Location.code == x_location_id))
+        except (ValueError, AttributeError):
+            loc_stmt = select(Location).where(Location.code == x_location_id)
+        loc_res = await db.execute(loc_stmt)
+        target_loc = loc_res.scalars().first()
+        if not target_loc:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail={"code": "LOCATION_NOT_FOUND", "message": f"Location '{x_location_id}' not found"},
+            )
+        if not target_loc.is_active or target_loc.status != "ACTIVE":
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail={"code": "LOCATION_INACTIVE", "message": f"Location '{x_location_id}' is inactive"},
+            )
+        parsed_location_id = target_loc.id
 
     if is_super:
         if x_event_id:
@@ -203,11 +250,36 @@ async def get_event_context(
                     status_code=status.HTTP_404_NOT_FOUND,
                     detail={"code": "EVENT_NOT_FOUND", "message": f"Event '{x_event_id}' not found"},
                 )
+            if parsed_location_id and target_event.location_id and target_event.location_id != parsed_location_id:
+                raise HTTPException(
+                    status_code=status.HTTP_400_BAD_REQUEST,
+                    detail={
+                        "code": "EVENT_LOCATION_MISMATCH",
+                        "message": f"Event '{target_event.name}' does not belong to selected location",
+                    },
+                )
         else:
-            # Resolve active/live event dynamically first, then fallback to latest
-            stmt = select(Event).where(Event.status.in_(["ACTIVE", "LIVE"])).order_by(Event.created_at.desc()).limit(1)
-            res = await db.execute(stmt)
-            target_event = res.scalars().first()
+            target_event = None
+            if parsed_location_id:
+                # Try finding active/live event specifically for this location
+                stmt_loc = select(Event).where(
+                    Event.location_id == parsed_location_id,
+                    Event.status.in_(["ACTIVE", "LIVE"]),
+                ).order_by(Event.created_at.desc()).limit(1)
+                res_loc = await db.execute(stmt_loc)
+                target_event = res_loc.scalars().first()
+                if not target_event:
+                    stmt_loc_any = select(Event).where(
+                        Event.location_id == parsed_location_id
+                    ).order_by(Event.created_at.desc()).limit(1)
+                    res_loc_any = await db.execute(stmt_loc_any)
+                    target_event = res_loc_any.scalars().first()
+
+            if not target_event:
+                # Resolve active/live event dynamically first, then fallback to latest
+                stmt = select(Event).where(Event.status.in_(["ACTIVE", "LIVE"])).order_by(Event.created_at.desc()).limit(1)
+                res = await db.execute(stmt)
+                target_event = res.scalars().first()
             if not target_event:
                 stmt = select(Event).order_by(Event.created_at.desc()).limit(1)
                 res = await db.execute(stmt)
@@ -219,7 +291,8 @@ async def get_event_context(
                 detail={"code": "NO_EVENTS_EXIST", "message": "No events configured in the system"},
             )
 
-        return EventContext(
+        effective_loc_id = parsed_location_id or target_event.location_id
+        ctx = EventContext(
             event=target_event,
             event_id=target_event.id,
             event_code=target_event.code,
@@ -227,7 +300,10 @@ async def get_event_context(
             is_global_admin=True,
             allowed_site_ids=None,
             has_frs_access=True,
+            location_id=effective_loc_id,
         )
+        _EVENT_CONTEXT_CACHE[cache_key] = (ctx, time.monotonic() + 60.0)
+        return ctx
 
     # Regular user: query accessible events from UserEventAccess
     stmt = select(UserEventAccess).where(
@@ -291,6 +367,15 @@ async def get_event_context(
             detail={"code": "EVENT_NOT_FOUND", "message": "Accessible event could not be resolved"},
         )
 
+    if parsed_location_id and target_event.location_id and target_event.location_id != parsed_location_id:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail={
+                "code": "EVENT_LOCATION_MISMATCH",
+                "message": f"Event '{target_event.name}' does not belong to selected location",
+            },
+        )
+
     # Check site-level restrictions for this user in this event
     site_stmt = select(UserSiteAccess.site_id).where(
         UserSiteAccess.user_id == current_user.id,
@@ -302,7 +387,7 @@ async def get_event_context(
 
     allowed_sites = list(site_ids) if site_ids else None
 
-    return EventContext(
+    ctx = EventContext(
         event=target_event,
         event_id=target_event.id,
         event_code=target_event.code,
@@ -310,5 +395,8 @@ async def get_event_context(
         is_global_admin=False,
         allowed_site_ids=allowed_sites,
         has_frs_access=has_frs,
+        location_id=parsed_location_id or target_event.location_id,
     )
+    _EVENT_CONTEXT_CACHE[cache_key] = (ctx, time.monotonic() + 60.0)
+    return ctx
 

@@ -23,6 +23,9 @@ export default function Dashboard() {
   const theme = useAppStore((s) => s.theme);
   const ct = getChartTheme(theme);
   const activeEventId = useEventStore((s) => s.activeEventId);
+  const activeEvent = useEventStore((s) => s.activeEvent);
+  const activeLocationName = useEventStore((s) => s.activeLocationName);
+
 
   // Zustand State Selectors (fine-grained to prevent redundant renders)
   const dateRange = useDashboardStore((s) => s.dateRange);
@@ -474,7 +477,9 @@ export default function Dashboard() {
             </div>
           </div>
           <div className="cc-page-subtitle" style={{ fontSize: 12, color: "var(--cc-text-muted)", marginTop: 2 }}>
-            Khairatabad Ganesh Festival 2026 — Live Operations
+            {activeLocationName
+              ? `${activeLocationName}${activeEvent?.name ? ` — ${activeEvent.name}` : ""} — Live Operations`
+              : (activeEvent?.name ? `${activeEvent.name} — Live Operations` : "Live Operations")}
           </div>
         </div>
 

@@ -30,7 +30,7 @@ class AlertRepository(BaseRepository[Alert]):
         stmt = select(Alert)
 
         if event_id is not None:
-            stmt = stmt.where(or_(Alert.event_id == event_id, Alert.event_id.is_(None)))
+            stmt = stmt.where(Alert.event_id == event_id)
 
 
         if severity and severity.lower() != "all":

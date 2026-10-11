@@ -68,6 +68,11 @@ async def list_cameras(
     # Calculate effective site scoping:
     effective_sites = [site_id] if site_id else ctx.allowed_site_ids
 
+    # When location_id is provided, use location-scoping only.
+    # Cameras in a location can span multiple events (e.g. KHB-2026 COMPLETED + 1234 ACTIVE),
+    # so filtering by a single resolved event_id would hide cameras from other events.
+    effective_event_id = None if ctx.location_id else ctx.event_id
+
     cameras, total = await service.get_cameras(
         zone_code=zone,
         status_filter=status,
@@ -75,8 +80,9 @@ async def list_cameras(
         is_frs=is_frs,
         search=search,
         enabled_only=enabled_only,
-        event_id=ctx.event_id,
+        event_id=effective_event_id,
         allowed_site_ids=effective_sites,
+        location_id=ctx.location_id,
         page=page,
         page_size=page_size,
     )
@@ -101,8 +107,10 @@ async def create_camera(
     Onboard a new camera into the BYC C&C Platform.
     Validates uniqueness of camera_id, IP, and RTSP URL, verifies zone, and encrypts credentials.
     """
-    if payload.event_id is None and ctx.event_id is not None:
+    if ctx.event_id is not None:
         payload.event_id = ctx.event_id
+    if ctx.location_id is not None:
+        payload.location_id = ctx.location_id
     service = CameraService(db)
     camera = await service.create_camera(payload)
     return success_response(camera)
@@ -131,7 +139,7 @@ async def get_camera_stats(
 ):
     """Returns camera infrastructure metrics and counts based on actual database status."""
     service = CameraService(db)
-    stats_data = await service.get_camera_stats(event_id=ctx.event_id)
+    stats_data = await service.get_camera_stats(event_id=ctx.event_id, location_id=ctx.location_id)
     return success_response(stats_data)
 
 
@@ -162,14 +170,17 @@ async def bulk_import_cameras(
 @router.get("/{id}", response_model=StandardResponse[CameraRead])
 async def get_camera_detail(
     id: str,
+    ctx: EventContext = Depends(get_event_context),
     db: AsyncSession = Depends(get_db),
     current_user: User = Depends(require_permission(Permissions.CAMERA_READ)),
 ):
     """Retrieve details for a single camera by code or ID (credentials sanitized)."""
     service = CameraService(db)
     try:
-        camera = await service.get_camera_by_code(id)
+        camera = await service.get_camera_by_code(id, location_id=ctx.location_id)
         return success_response(camera)
+    except HTTPException:
+        raise
     except Exception:
         # Fallback to in-memory FRS engine camera workers
         try:
