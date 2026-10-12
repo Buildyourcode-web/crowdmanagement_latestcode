@@ -74,11 +74,20 @@ export const useEventStore = create((set, get) => ({
       useDashboardStore.getState().resetDashboardData();
     } catch (e) {}
 
-    set({
+    // Synchronize activeLocationId if event is assigned to a specific location
+    const updates = {
       activeEvent: eventObj,
       activeEventId: eventId,
       activeSiteId: null,
-    });
+    };
+    if (eventObj.location_id) {
+      try {
+        localStorage.setItem("byc_active_location_id", eventObj.location_id);
+      } catch (e) {}
+      updates.activeLocationId = eventObj.location_id;
+    }
+
+    set(updates);
 
     invalidateApiCache();
 

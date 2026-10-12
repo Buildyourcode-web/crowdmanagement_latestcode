@@ -93,14 +93,15 @@ export default function TopBar() {
       {/* Event & Site Selector in Header */}
       <div style={{ display: "flex", alignItems: "center", gap: 8, marginLeft: 12 }}>
         {activeLocationName && (
-          <span
-            className="badge bg-primary text-uppercase d-none d-md-inline-flex align-items-center gap-1"
-            style={{ fontSize: 11, padding: "5px 8px", fontWeight: 700, letterSpacing: 0.5, borderRadius: 6 }}
-            title={`Active Location: ${activeLocationName}`}
+          <Link
+            to="/locations"
+            className="badge bg-primary text-uppercase text-decoration-none d-none d-md-inline-flex align-items-center gap-1"
+            style={{ fontSize: 11, padding: "5px 8px", fontWeight: 700, letterSpacing: 0.5, borderRadius: 6, cursor: "pointer" }}
+            title={`Active Location: ${activeLocationName} (Click to switch)`}
           >
             <i className="bi bi-geo-alt-fill" style={{ fontSize: 10 }} />
             {activeLocationName}
-          </span>
+          </Link>
         )}
 
         {/* Event Dropdown */}
@@ -157,10 +158,21 @@ export default function TopBar() {
                 Accessible Festivals & Events
               </div>
               <div style={{ maxHeight: 320, overflowY: "auto" }}>
-                {events.map((evt) => {
-                  const isActive = evt.id === activeEventId;
-                  return (
-                    <button
+                {(() => {
+                  const visibleEvents = activeLocationId
+                    ? events.filter((e) => !e.location_id || e.location_id === activeLocationId)
+                    : events;
+                  if (visibleEvents.length === 0) {
+                    return (
+                      <div className="p-3 text-center text-muted" style={{ fontSize: 11 }}>
+                        No events found for this location.
+                      </div>
+                    );
+                  }
+                  return visibleEvents.map((evt) => {
+                    const isActive = evt.id === activeEventId;
+                    return (
+                      <button
                       key={evt.id}
                       type="button"
                       style={{
@@ -203,8 +215,9 @@ export default function TopBar() {
                       </span>
                     </button>
                   );
-                })}
-              </div>
+                });
+              })()}
+            </div>
               <div style={{ height: 1, background: "var(--cc-border)", margin: "6px 0" }} />
               <Link
                 to="/events"
