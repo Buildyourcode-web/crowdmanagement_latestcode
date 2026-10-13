@@ -58,7 +58,7 @@ class _DashboardCacheEntry:
 
 _dashboard_cache: Dict[str, _DashboardCacheEntry] = {}
 _in_flight_requests: Dict[str, asyncio.Future] = {}
-_DASHBOARD_CACHE_FRESH_SECONDS: float = 8.0
+_DASHBOARD_CACHE_FRESH_SECONDS: float = 15.0   # 3 poll cycles hit cache instantly (<1ms)
 _DASHBOARD_CACHE_STALE_SECONDS: float = 300.0
 # Monotonic in-memory cache to guarantee completed hours never drop to 0 on rollover.
 # Key format: "YYYY-MM-DD:HH:00" so values from one day never bleed into the next.
@@ -314,11 +314,9 @@ class DashboardService:
         # 3. Canonical Festival Totals & Selected Range Aggregation
         # -------------------------------------------------------------------
         if target_event_id:
-            # Use get_festival_daily_breakdown for accurate festival total:
-            # per-day max(LCE, snapshot) summed across all days.
-            # This correctly handles days where LCE lost writes (pool exhaustion)
-            # by falling back to snapshot for those days, while using LCE for days
-            # where it's higher (more recent, after pool fixes).
+            # get_festival_daily_breakdown uses _festival_daily_cache (15s TTL) — returns <1ms on cache hit.
+            # get_event_day_counts uses a single fast aggregation SQL query per call.
+            # Both kept sequential to avoid AsyncSession concurrent-use issues.
             _pre_days_breakdown, fest_total_in, fest_total_out, _ = await self.counting_service.get_festival_daily_breakdown(target_event_id)
             fest_occ = max(0, fest_total_in - fest_total_out)
             range_in, range_out, range_occ, _, _ = await self.counting_service.get_event_day_counts(

@@ -34,10 +34,10 @@ from app.models.line_crossing import LineCrossingEvent
 from app.models.queue import QueueSnapshot
 from app.models.zone import Zone
 
-# In-memory cache for get_festival_daily_breakdown (5s TTL)
+# In-memory cache for get_festival_daily_breakdown (15s TTL)
 # Eliminates duplicate heavy table scans during rapid concurrent dashboard refreshes
 _festival_daily_cache: Dict[str, Tuple[float, Any]] = {}
-_FESTIVAL_DAILY_CACHE_TTL: float = 5.0
+_FESTIVAL_DAILY_CACHE_TTL: float = 15.0
 
 
 @dataclass

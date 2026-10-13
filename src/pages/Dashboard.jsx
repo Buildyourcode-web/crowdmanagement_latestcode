@@ -42,6 +42,7 @@ export default function Dashboard() {
   const [selectedZoneCode, setSelectedZoneCode] = useState("all");
   const [clockStr, setClockStr] = useState("");
   const [fest10Data, setFest10Data] = useState(null);
+  const fest10DataRef = useRef(null); // Ref so loadData (stable useCallback) sees latest value
   const [downloadingCsv, setDownloadingCsv] = useState(false);
   const inFlightRef = useRef(false);
   const pendingRef = useRef(false);
@@ -114,9 +115,12 @@ export default function Dashboard() {
     if (!silent) store.setIsRefreshing(true);
 
     try {
-      const skipCache = !silent;
+      // Use skipCache only for the very first load (no data yet) or explicit festival range changes.
+      // Silent background polls always use server-side SWR cache (instant <5ms).
+      const skipCache = !silent && !store.data;
       const calls = [getDashboardSummary(range, skipCache, dayNum)];
-      if (!fest10Data || range === "festival") {
+      // Use ref (not state) so stale closure doesn't always see fest10Data as null
+      if (!fest10DataRef.current || range === "festival") {
         calls.push(getFestival10DaysAnalytics());
       }
       const [res, festRes] = await Promise.allSettled(calls);
@@ -125,7 +129,9 @@ export default function Dashboard() {
         store.setDashboardData(res.value, range, dayNum);
       }
       if (festRes && festRes.status === "fulfilled" && festRes.value) {
-        setFest10Data(festRes.value?.data || festRes.value);
+        const fData = festRes.value?.data || festRes.value;
+        fest10DataRef.current = fData; // Keep ref in sync
+        setFest10Data(fData);
       }
     } catch (err) {
       console.error("[Dashboard] Fetch error:", err);
