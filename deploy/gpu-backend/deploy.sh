@@ -89,8 +89,9 @@ for i in {1..30}; do
     sleep 2
 done
 
-echo -e "${GREEN}==> Initializing Database Tables...${NC}"
+echo -e "${GREEN}==> Initializing Database Tables & Running Migrations...${NC}"
 docker exec byc_gpu_backend python scripts/init_db.py
+docker exec byc_gpu_backend alembic upgrade head || true
 
 
 echo -e "${GREEN}======================================================${NC}"

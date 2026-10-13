@@ -45,6 +45,12 @@ async def lifespan(app: FastAPI):
     except Exception as e:
         logger.warning(f"AI Orchestrator startup skipped: {e}")
 
+    # Ensure database schema integrity (auto-sync missing tables/columns like locations, events.location_id)
+    try:
+        from app.db.init_schema import ensure_database_schema
+        await ensure_database_schema()
+    except Exception as e:
+        logger.warning(f"Database schema auto-sync notice: {e}")
 
     # Pre-warm DB connection pool and cache in background (avoids blocking startup)
     async def _warm_db_and_cache():

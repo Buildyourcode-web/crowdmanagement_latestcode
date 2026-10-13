@@ -1,19 +1,17 @@
 import uuid
 from datetime import datetime
 from typing import Any, List, Optional
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, ConfigDict, Field
 from app.schemas.common import BaseSchema
 
 
 class IncidentNoteRead(BaseSchema):
+    model_config = ConfigDict(populate_by_name=True, from_attributes=True)
+
     id: uuid.UUID
     author: str
     text: str
     time: datetime = Field(..., alias="note_time")
-
-    class Config:
-        populate_by_name = True
-        from_attributes = True
 
 
 class IncidentNoteCreate(BaseModel):
@@ -22,12 +20,14 @@ class IncidentNoteCreate(BaseModel):
 
 
 class IncidentRead(BaseSchema):
-    id: str = Field(..., example="INC-2026-0001")
-    type: str = Field(..., example="crowd_surge")
-    type_label: str = Field(..., alias="typeLabel", example="Crowd Surge")
-    severity: str = Field(..., example="critical")
-    status: str = Field(..., example="responding")
-    zone: Optional[str] = Field(None, example="ZONE-A")
+    model_config = ConfigDict(populate_by_name=True, from_attributes=True)
+
+    id: str = Field(..., examples=["INC-2026-0001"])
+    type: str = Field(..., examples=["crowd_surge"])
+    type_label: str = Field(..., alias="typeLabel", examples=["Crowd Surge"])
+    severity: str = Field(..., examples=["critical"])
+    status: str = Field(..., examples=["responding"])
+    zone: Optional[str] = Field(None, examples=["ZONE-A"])
     location: str
     cameras: List[str] = Field(default_factory=list)
     
@@ -45,13 +45,9 @@ class IncidentRead(BaseSchema):
     related_alerts: List[str] = Field(default_factory=list, alias="relatedAlerts")
     notes: List[IncidentNoteRead] = Field(default_factory=list)
 
-    class Config:
-        populate_by_name = True
-        from_attributes = True
-
 
 class IncidentCreate(BaseModel):
-    incident_code: str = Field(..., example="INC-2026-0010")
+    incident_code: str = Field(..., examples=["INC-2026-0010"])
     type: str = "crowd_surge"
     type_label: str = "Crowd Surge"
     severity: str = "high"

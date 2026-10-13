@@ -145,17 +145,19 @@ async def _resolve_ws_context(
                     raise _WsReject(4403, f"Event '{event_id_raw}' not accessible")
 
                 # Cross-location mismatch guard
+                evt_loc_id = getattr(event, "location_id", None)
                 if (
                     parsed_loc_id
-                    and event.location_id
-                    and event.location_id != parsed_loc_id
+                    and evt_loc_id
+                    and evt_loc_id != parsed_loc_id
                 ):
                     raise _WsReject(4403, "Event does not belong to the provided location")
 
                 parsed_evt_id = event.id
                 # Auto-fill location from event if caller didn't send it
                 if not parsed_loc_id:
-                    parsed_loc_id = event.location_id
+                    parsed_loc_id = evt_loc_id
+
 
             # 4. Resolve site_id (optional – just normalise)
             parsed_site_id: Optional[str] = site_id_raw or None

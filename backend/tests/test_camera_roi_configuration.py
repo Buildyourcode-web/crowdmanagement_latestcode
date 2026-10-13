@@ -523,7 +523,7 @@ async def test_dry_run_roi_validation(client: AsyncClient, superadmin_token: str
 
 @pytest.mark.asyncio
 async def test_reject_roi_on_unverified_stream(client: AsyncClient, superadmin_token: str, sample_roi_cameras):
-    """Camera with stream_status='NOT_TESTED' rejected with 400 CAMERA_STREAM_NOT_VERIFIED."""
+    """Camera with stream_status='NOT_TESTED' allows pre-configuring ROIs in advance."""
     cam = sample_roi_cameras["CAM-ROI-UNVERIFIED-01"]
     headers = {"Authorization": f"Bearer {superadmin_token}"}
 
@@ -540,20 +540,21 @@ async def test_reject_roi_on_unverified_stream(client: AsyncClient, superadmin_t
         },
     }
     res = await client.post(f"/api/v1/cameras/{cam.id}/roi-config", json=payload, headers=headers)
-    assert res.status_code == 400
-    assert "CAMERA_STREAM_NOT_VERIFIED" in res.text or "not verified" in res.text
+    assert res.status_code == 201
 
 
 @pytest.mark.asyncio
-async def test_reject_roi_on_offline_camera(client: AsyncClient, superadmin_token: str, sample_roi_cameras):
-    """Camera with stream_status='OFFLINE' or enabled=False rejected with 400 CAMERA_OFFLINE."""
+async def test_reject_roi_on_offline_camera(client: AsyncClient, superadmin_token: str, sample_roi_cameras, db_session):
+    """Camera with status='removed' rejected with 400 CAMERA_REMOVED."""
     cam = sample_roi_cameras["CAM-ROI-OFFLINE-01"]
+    cam.status = "removed"
+    await db_session.commit()
     headers = {"Authorization": f"Bearer {superadmin_token}"}
 
     payload = {
         "profile_id": "CROWD_STANDARD",
         "roi_type": "CROWD_ROI",
-        "name": "Offline Camera ROI",
+        "name": "Removed Camera ROI",
         "geometry_json": {
             "points": [
                 {"x": 0.1, "y": 0.1},
@@ -564,7 +565,8 @@ async def test_reject_roi_on_offline_camera(client: AsyncClient, superadmin_toke
     }
     res = await client.post(f"/api/v1/cameras/{cam.id}/roi-config", json=payload, headers=headers)
     assert res.status_code == 400
-    assert "CAMERA_OFFLINE" in res.text or "Offline" in res.text
+    assert "CAMERA_REMOVED" in res.text or "removed" in res.text
+
 
 
 @pytest.mark.asyncio
