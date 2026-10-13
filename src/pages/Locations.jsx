@@ -3,11 +3,21 @@ import { useNavigate } from "react-router-dom";
 import { useEventStore } from "../store/useEventStore";
 import { locationService } from "../services/locationService";
 
-const getApiErrorMessage = (err, fallback = "An error occurred") => {
+const getApiErrorMessage = (err, fallback = "Incorrect access code. Please enter the correct code.") => {
+  const errObj = err.response?.data?.error;
+  if (typeof errObj === "string") return errObj;
+  if (typeof errObj?.message === "string") return errObj.message;
+
   const detail = err.response?.data?.detail;
   if (typeof detail === "string") return detail;
-  if (detail?.message) return detail.message;
+  if (typeof detail?.message === "string") return detail.message;
+
   if (typeof err.response?.data?.message === "string") return err.response.data.message;
+
+  if (err.response?.status === 401 || (err.message && err.message.includes("401"))) {
+    return "Incorrect access code for this location. Please enter the correct code.";
+  }
+
   return err.message || fallback;
 };
 
@@ -204,7 +214,7 @@ export default function Locations() {
       setAccessMode("FESTIVALS");
       loadLocationEvents(selectedLocation.id);
     } catch (err) {
-      setAccessError(getApiErrorMessage(err, "Incorrect access code for this location. Access denied."));
+      setAccessError(getApiErrorMessage(err, "Incorrect access code. Please enter the correct code."));
     } finally {
       setIsVerifying(false);
     }

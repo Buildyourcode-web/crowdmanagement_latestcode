@@ -52,9 +52,8 @@ const processQueue = (error, token = null) => {
 apiClient.interceptors.response.use(
   (response) => response.data,
   async (error) => {
-    const originalRequest = error.config;
-
-    if (error.response?.status === 401 && !originalRequest._retry) {
+    const isSpecial401 = originalRequest?.url?.includes("/verify-access") || originalRequest?.url?.includes("/auth/login");
+    if (error.response?.status === 401 && !originalRequest._retry && !isSpecial401) {
       if (isRefreshing) {
         return new Promise((resolve, reject) =>
           pendingQueue.push({ resolve, reject })
