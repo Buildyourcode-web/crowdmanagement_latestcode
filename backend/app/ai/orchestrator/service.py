@@ -40,6 +40,7 @@ from app.db.session import AsyncSessionLocal
 from app.models.ai_deployment import AIPipelineDeployment
 from app.models.audit_log import AuditLog
 from app.models.camera import Camera
+from app.models.event import Event
 from app.models.camera_roi import ROIType
 from app.models.user import User
 from app.redis.event_bus import event_bus
@@ -896,9 +897,41 @@ class AIOrchestrator:
             running_desired = await deploy_repo.list_by_desired_state("RUNNING")
 
             now = time.time()
+            now_utc = datetime.now(timezone.utc)
 
             for d in running_desired:
                 cam_code = d.camera_code
+
+                # Automatic Event Lifecycle Shutdown Check:
+                # If the camera belongs to an event whose timeline is completed, stop pipeline and release resources.
+                cam_res = await session.execute(select(Camera).where(Camera.camera_code == cam_code))
+                camera_obj = cam_res.scalars().first()
+                if camera_obj and camera_obj.event_id:
+                    event = await session.get(Event, camera_obj.event_id)
+                    if event:
+                        event_concluded = False
+                        if event.status in ("COMPLETED", "ARCHIVED"):
+                            event_concluded = True
+                        elif event.end_date:
+                            e_end = event.end_date if event.end_date.tzinfo else event.end_date.replace(tzinfo=timezone.utc)
+                            if now_utc > e_end:
+                                event_concluded = True
+                                if event.status not in ("COMPLETED", "ARCHIVED"):
+                                    event.status = "COMPLETED"
+                                    event.is_active = False
+                                    await session.commit()
+
+                        if event_concluded:
+                            logger.info(
+                                f"[AI-Orchestrator] Camera '{cam_code}' event '{event.name}' timeline has concluded "
+                                f"(status={event.status}). Automatically stopping AI pipeline to release resources."
+                            )
+                            camera_obj.status = "offline"
+                            camera_obj.ai_status = "offline"
+                            await session.commit()
+                            await self.stop_pipeline(cam_code, session)
+                            continue
+
                 pipe = (
                     CrowdPipelineRegistry.get(cam_code)
                     or QueuePipelineRegistry.get(cam_code)
@@ -1032,6 +1065,26 @@ class AIOrchestrator:
                 for d in batch:
                     cam_code = d.camera_code
                     try:
+                        # Skip cameras belonging to concluded events
+                        cam_res = await session.execute(select(Camera).where(Camera.camera_code == cam_code))
+                        camera_obj = cam_res.scalars().first()
+                        if camera_obj and camera_obj.event_id:
+                            event = await session.get(Event, camera_obj.event_id)
+                            if event:
+                                now_utc = datetime.now(timezone.utc)
+                                e_end = event.end_date if (event.end_date and event.end_date.tzinfo) else (event.end_date.replace(tzinfo=timezone.utc) if event.end_date else None)
+                                if event.status in ("COMPLETED", "ARCHIVED") or (e_end and now_utc > e_end):
+                                    logger.info(
+                                        f"[AI-Orchestrator] Skipping startup recovery for {cam_code} — event '{event.name}' has concluded."
+                                    )
+                                    d.desired_state = "STOPPED"
+                                    d.actual_state = "STOPPED"
+                                    d.health_state = "STOPPED"
+                                    camera_obj.status = "offline"
+                                    camera_obj.ai_status = "offline"
+                                    await session.commit()
+                                    continue
+
                         logger.info(f"[AI-Orchestrator] Restoring {cam_code}...")
                         await self.start_pipeline(cam_code, session)
                     except Exception as e:
