@@ -205,10 +205,26 @@ class CanonicalCountingService:
 
         range_clean = (date_range or "").strip().lower()
 
+        # Resolve event-level exact start/end datetimes for time-gating
+        # Day 1 starts at evt.start_date (not midnight), last day ends at evt.end_date (not midnight+1)
+        def _day_start_utc(target: date) -> datetime:
+            """Day boundary start: use event start_date for Day 1, else midnight."""
+            if evt and evt.start_date and target == start_d:
+                raw = evt.start_date
+                return raw if raw.tzinfo else raw.replace(tzinfo=timezone.utc)
+            return datetime.combine(target, dtime.min, tzinfo=tz).astimezone(timezone.utc)
+
+        def _day_end_utc(target: date) -> datetime:
+            """Day boundary end: use event end_date for last day, else next-midnight."""
+            if evt and evt.end_date and target == end_d:
+                raw = evt.end_date
+                return raw if raw.tzinfo else raw.replace(tzinfo=timezone.utc)
+            return datetime.combine(target + timedelta(days=1), dtime.min, tzinfo=tz).astimezone(timezone.utc)
+
         # Check if date_range is "festival" or "all"
         if range_clean in ("festival", "all", "all_days", "fest"):
-            start_utc = datetime.combine(start_d, dtime.min, tzinfo=tz).astimezone(timezone.utc)
-            end_utc = datetime.combine(end_d + timedelta(days=1), dtime.min, tzinfo=tz).astimezone(timezone.utc)
+            start_utc = _day_start_utc(start_d)
+            end_utc = _day_end_utc(end_d)
             return None, start_utc, end_utc, 0, f"Festival Total ({start_d.strftime('%d %b')} – {end_d.strftime('%d %b')})"
 
         # Check if day_number is explicitly provided
@@ -221,8 +237,8 @@ class CanonicalCountingService:
             d_idx = (day_number - start_d).days + 1
             if 1 <= d_idx <= total_days:
                 target_d = day_number
-                start_utc = datetime.combine(target_d, dtime.min, tzinfo=tz).astimezone(timezone.utc)
-                end_utc = datetime.combine(target_d + timedelta(days=1), dtime.min, tzinfo=tz).astimezone(timezone.utc)
+                start_utc = _day_start_utc(target_d)
+                end_utc = _day_end_utc(target_d)
                 return target_d, start_utc, end_utc, d_idx, f"Day {d_idx} ({target_d.strftime('%d %b')})"
         elif range_clean.startswith("day_") or range_clean.startswith("day-"):
             try:
@@ -235,8 +251,8 @@ class CanonicalCountingService:
         if explicit_num is not None:
             if 1 <= explicit_num <= total_days:
                 target_d = start_d + timedelta(days=explicit_num - 1)
-                start_utc = datetime.combine(target_d, dtime.min, tzinfo=tz).astimezone(timezone.utc)
-                end_utc = datetime.combine(target_d + timedelta(days=1), dtime.min, tzinfo=tz).astimezone(timezone.utc)
+                start_utc = _day_start_utc(target_d)
+                end_utc = _day_end_utc(target_d)
                 return target_d, start_utc, end_utc, explicit_num, f"Day {explicit_num} ({target_d.strftime('%d %b')})"
             else:
                 # Out-of-range day (e.g. 999) — Return future empty boundary (0 counts, no fallback to today)
@@ -250,16 +266,17 @@ class CanonicalCountingService:
             target_d = today_date - timedelta(days=1)
             d_idx = (target_d - start_d).days + 1
             eff_num = d_idx if 1 <= d_idx <= total_days else 1
-            start_utc = datetime.combine(target_d, dtime.min, tzinfo=tz).astimezone(timezone.utc)
-            end_utc = datetime.combine(target_d + timedelta(days=1), dtime.min, tzinfo=tz).astimezone(timezone.utc)
+            start_utc = _day_start_utc(target_d)
+            end_utc = _day_end_utc(target_d)
             return target_d, start_utc, end_utc, eff_num, f"Yesterday ({target_d.strftime('%d %b')})"
 
         # Default to today / active event day
         target_d = today_date
         eff_num = cur_day_num
-        start_utc = datetime.combine(target_d, dtime.min, tzinfo=tz).astimezone(timezone.utc)
-        end_utc = datetime.combine(target_d + timedelta(days=1), dtime.min, tzinfo=tz).astimezone(timezone.utc)
+        start_utc = _day_start_utc(target_d)
+        end_utc = _day_end_utc(target_d)
         return target_d, start_utc, end_utc, eff_num, f"Day {eff_num} ({target_d.strftime('%d %b')})"
+
 
     async def get_durable_counts(
         self,
@@ -568,8 +585,18 @@ class CanonicalCountingService:
 
         start_fest_d = date.fromisoformat(days_template[0].date)
         end_fest_d = date.fromisoformat(days_template[-1].date)
-        start_fest_utc = datetime.combine(start_fest_d, dtime.min, tzinfo=tz).astimezone(timezone.utc)
-        end_fest_utc = datetime.combine(end_fest_d + timedelta(days=1), dtime.min, tzinfo=tz).astimezone(timezone.utc)
+        # Use event's actual start/end times instead of midnight boundaries
+        if evt and evt.start_date:
+            raw = evt.start_date
+            start_fest_utc = raw if raw.tzinfo else raw.replace(tzinfo=timezone.utc)
+        else:
+            start_fest_utc = datetime.combine(start_fest_d, dtime.min, tzinfo=tz).astimezone(timezone.utc)
+        if evt and evt.end_date:
+            raw = evt.end_date
+            end_fest_utc = raw if raw.tzinfo else raw.replace(tzinfo=timezone.utc)
+        else:
+            end_fest_utc = datetime.combine(end_fest_d + timedelta(days=1), dtime.min, tzinfo=tz).astimezone(timezone.utc)
+
         tz_name = (evt.timezone if evt and evt.timezone else "Asia/Kolkata").strip()
 
         # Bulk query line crossing events

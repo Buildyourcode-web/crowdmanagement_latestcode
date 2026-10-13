@@ -6,6 +6,7 @@ model specifications, and threshold policies into an immutable runtime configura
 Credentials are kept secure and never exposed in sanitized strings or logs.
 """
 
+from datetime import datetime
 from typing import Any, Dict, List, Optional
 from pydantic import BaseModel, Field
 from app.ai.pipelines.crowd.models_registry import ModelRegistryService, PersonDetectionModel
@@ -61,6 +62,11 @@ class CrowdPipelineConfig(BaseModel):
     density_high_max: float = 85.0
     density_critical_min: float = 85.0
 
+    # Event Time Gate — counting is ONLY allowed within [event_start_utc, event_end_utc)
+    # If None, counting is unrestricted (backwards-compatible default).
+    event_start_utc: Optional[datetime] = None
+    event_end_utc: Optional[datetime] = None
+
     @classmethod
     def from_camera_and_geometries(
         cls,
@@ -69,6 +75,8 @@ class CrowdPipelineConfig(BaseModel):
         roi_configs: List[CameraROIConfiguration],
         physical_area_m2: Optional[float] = None,
         threshold_override: Optional[Dict[str, float]] = None,
+        event_start_utc: Optional[datetime] = None,
+        event_end_utc: Optional[datetime] = None,
     ) -> "CrowdPipelineConfig":
         """
         Builds pipeline configuration from DB models with credential decryption
@@ -179,4 +187,6 @@ class CrowdPipelineConfig(BaseModel):
             density_moderate_max=thresholds.get("mod_max", 70.0),
             density_high_max=thresholds.get("high_max", 85.0),
             density_critical_min=thresholds.get("crit_min", 85.0),
+            event_start_utc=event_start_utc,
+            event_end_utc=event_end_utc,
         )

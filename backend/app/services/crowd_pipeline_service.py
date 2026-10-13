@@ -223,10 +223,27 @@ class CrowdPipelineService:
             )
 
         # 6. Build Pipeline Configuration
+        # Fetch event to determine the counting time gate
+        event_start_utc = None
+        event_end_utc = None
+        if camera.event_id:
+            from sqlalchemy import select as _sel
+            from app.models.event import Event
+            evt_res = await self.db.execute(_sel(Event).where(Event.id == camera.event_id))
+            evt_obj = evt_res.scalars().first()
+            if evt_obj:
+                from datetime import timezone as _tz
+                if evt_obj.start_date:
+                    event_start_utc = evt_obj.start_date if evt_obj.start_date.tzinfo else evt_obj.start_date.replace(tzinfo=_tz.utc)
+                if evt_obj.end_date:
+                    event_end_utc = evt_obj.end_date if evt_obj.end_date.tzinfo else evt_obj.end_date.replace(tzinfo=_tz.utc)
+
         pipe_config = CrowdPipelineConfig.from_camera_and_geometries(
             camera=camera,
             profile_id=profile_id,
             roi_configs=roi_configs,
+            event_start_utc=event_start_utc,
+            event_end_utc=event_end_utc,
         )
 
         # 7. Instantiate & Start Pipeline

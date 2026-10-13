@@ -276,7 +276,17 @@ class CrowdPipeline:
         queue_metrics: QueueMetricsResult = self.queue_engine.process_tracks(tracks, timestamp)
 
         # Step 5: Durable Event Persistence & Live Rollup
-        if validated_crossings:
+        # TIME GATE: Only persist/count crossings within the event's [start, end) window.
+        # Bounding boxes are still drawn (detection continues) but counts are suppressed outside window.
+        now_utc = datetime.fromtimestamp(timestamp, tz=timezone.utc)
+        evt_start = self.config.event_start_utc
+        evt_end = self.config.event_end_utc
+        within_event_window = (
+            (evt_start is None or now_utc >= evt_start)
+            and (evt_end is None or now_utc < evt_end)
+        )
+
+        if validated_crossings and within_event_window:
             asyncio.create_task(self._persist_crossings_durable(validated_crossings))
             for c in validated_crossings:
                 if c.direction == "IN":
@@ -307,6 +317,12 @@ class CrowdPipeline:
                     await event_bus.publish(channel="crowd", event_type="LINE_CROSSING", payload=crossing_payload)
                 except Exception as ex:
                     logger.debug(f"[CrowdPipeline] Crossing publish error: {ex}")
+        elif validated_crossings and not within_event_window:
+            logger.debug(
+                f"[CrowdPipeline] {self.camera_code} — {len(validated_crossings)} crossing(s) suppressed "
+                f"(outside event window: start={evt_start}, now={now_utc})"
+            )
+
 
         # Step 6: Health & Reliability Evaluation
         health_report = self.health_monitor.compute_health()
