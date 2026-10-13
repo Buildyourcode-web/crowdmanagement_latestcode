@@ -33,12 +33,22 @@ export const useEventStore = create((set, get) => ({
       const currentActiveId = get().activeEventId || localStorage.getItem("byc_active_event_id");
       let currentLocationId = get().activeLocationId || localStorage.getItem("byc_active_location_id");
 
-      // Verify activeLocationName matches currentLocationId
-      if (currentLocationId && locations && locations.length > 0) {
-        const loc = locations.find((l) => l.id === currentLocationId);
+      // Resolve canonical location object and normalize currentLocationId to UUID
+      if (locations && locations.length > 0) {
+        const loc = locations.find(
+          (l) =>
+            (currentLocationId && (
+              String(l.id).toLowerCase() === String(currentLocationId).toLowerCase() ||
+              String(l.code).toLowerCase() === String(currentLocationId).toLowerCase() ||
+              String(l.name).toLowerCase() === String(currentLocationId).toLowerCase()
+            )) ||
+            (get().activeLocationName && String(l.name).toLowerCase() === String(get().activeLocationName).toLowerCase())
+        );
         if (loc) {
-          set({ activeLocation: loc, activeLocationName: loc.name });
+          currentLocationId = loc.id;
+          set({ activeLocation: loc, activeLocationId: loc.id, activeLocationName: loc.name });
           try {
+            localStorage.setItem("byc_active_location_id", loc.id);
             localStorage.setItem("byc_active_location_name", loc.name);
           } catch (e) {}
         }
@@ -48,18 +58,17 @@ export const useEventStore = create((set, get) => ({
 
       // If active location is set, enforce that the active event belongs strictly to this location
       if (currentLocationId && (!matched || !matched.location_id || String(matched.location_id).toLowerCase() !== String(currentLocationId).toLowerCase())) {
+        const loc = (locations || []).find((l) => String(l.id).toLowerCase() === String(currentLocationId).toLowerCase());
+        const locClean = loc ? loc.name.toLowerCase().replace(/h$/i, "").replace(/h(?=a)/g, "") : "";
+        const isLocMatch = (e) => {
+          if (e.location_id && String(e.location_id).toLowerCase() === String(currentLocationId).toLowerCase()) return true;
+          if (locClean && ((e.name && e.name.toLowerCase().replace(/h(?=a)/g, "").includes(locClean)) || (e.location && e.location.toLowerCase().replace(/h(?=a)/g, "").includes(locClean)))) return true;
+          return false;
+        };
+
         const locEvent =
-          events.find(
-            (e) =>
-              e.location_id &&
-              String(e.location_id).toLowerCase() === String(currentLocationId).toLowerCase() &&
-              (e.status === "ACTIVE" || e.status === "LIVE")
-          ) ||
-          events.find(
-            (e) =>
-              e.location_id &&
-              String(e.location_id).toLowerCase() === String(currentLocationId).toLowerCase()
-          );
+          events.find((e) => isLocMatch(e) && (e.status === "ACTIVE" || e.status === "LIVE")) ||
+          events.find((e) => isLocMatch(e));
         if (locEvent) {
           matched = locEvent;
         }

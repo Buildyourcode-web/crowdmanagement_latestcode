@@ -17,13 +17,9 @@ from app.security.jwt import decode_token
 
 security = HTTPBearer(auto_error=False)
 
-# Shared in-memory caches to eliminate 5+ remote DB network round trips per request
-_USER_CACHE: dict[uuid.UUID, tuple[User, float]] = {}
-_EVENT_CONTEXT_CACHE: dict[tuple, tuple[Any, float]] = {}
-
+# Invalidate dependencies cache helper (no-op; ORM models are cleanly session-bound)
 def invalidate_dependencies_cache():
-    _USER_CACHE.clear()
-    _EVENT_CONTEXT_CACHE.clear()
+    pass
 
 # Shared Redis pool
 _redis_pool: Optional[Redis] = None
@@ -103,14 +99,6 @@ async def get_current_user(
     jwt_role = payload.get("role")
     jwt_perms = payload.get("permissions") or []
 
-    now_mono = time.monotonic()
-    cached = _USER_CACHE.get(uid)
-    if cached and now_mono < cached[1]:
-        cached_user = cached[0]
-        cached_user._jwt_role = jwt_role
-        cached_user._jwt_permissions = jwt_perms
-        return cached_user
-
     stmt = (
         select(User)
         .options(selectinload(User.role).selectinload(Role.permissions))
@@ -133,7 +121,6 @@ async def get_current_user(
 
     user._jwt_role = jwt_role
     user._jwt_permissions = jwt_perms
-    _USER_CACHE[uid] = (user, now_mono + 120.0)  # Cache for 2 minutes
     return user
 
 
@@ -203,12 +190,6 @@ async def get_event_context(
     Results are cached 60 seconds per (user, event, location) combination
     so that the expensive multi-round-trip Supabase lookup is only done once.
     """
-    now_mono = time.monotonic()
-    cache_key = (current_user.id, x_event_id, x_location_id)
-    ctx_cached = _EVENT_CONTEXT_CACHE.get(cache_key)
-    if ctx_cached and now_mono < ctx_cached[1]:
-        return ctx_cached[0]
-
     is_super = current_user.is_super_admin
     user_perms = current_user.permissions_list
     has_frs = is_super or any(
@@ -302,7 +283,6 @@ async def get_event_context(
             has_frs_access=True,
             location_id=effective_loc_id,
         )
-        _EVENT_CONTEXT_CACHE[cache_key] = (ctx, time.monotonic() + 60.0)
         return ctx
 
     # Regular user: query accessible events from UserEventAccess
@@ -397,6 +377,5 @@ async def get_event_context(
         has_frs_access=has_frs,
         location_id=parsed_location_id or target_event.location_id,
     )
-    _EVENT_CONTEXT_CACHE[cache_key] = (ctx, time.monotonic() + 60.0)
     return ctx
 

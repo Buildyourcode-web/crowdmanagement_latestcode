@@ -26,7 +26,7 @@ export default function TopBar() {
   const { sidebarCollapsed, toggleSidebar, toggleFullscreen, user, theme, toggleTheme, logout } = useAppStore();
   const { criticalCount } = useAlertStore();
   const { cpu, gpu } = useSystemStore();
-  const { events, activeEvent, activeEventId, setActiveEvent, fetchEvents, sites, activeSiteId, setActiveSiteId, activeLocation, activeLocationId, activeLocationName } = useEventStore();
+  const { events, locations, activeEvent, activeEventId, setActiveEvent, fetchEvents, sites, activeSiteId, setActiveSiteId, activeLocation, activeLocationId, activeLocationName } = useEventStore();
   const [userMenuOpen, setUserMenuOpen] = useState(false);
   const userMenuRef = useRef(null);
   const [eventMenuOpen, setEventMenuOpen] = useState(false);
@@ -159,13 +159,47 @@ export default function TopBar() {
               </div>
               <div style={{ maxHeight: 320, overflowY: "auto" }}>
                 {(() => {
-                  const visibleEvents = activeLocationId
-                    ? events.filter(
-                        (e) =>
-                          e.location_id &&
-                          String(e.location_id).toLowerCase() === String(activeLocationId).toLowerCase()
-                      )
-                    : events;
+                  const matchedLoc = (locations || []).find(
+                    (l) =>
+                      (activeLocationId && (
+                        String(l.id).toLowerCase() === String(activeLocationId).toLowerCase() ||
+                        String(l.code).toLowerCase() === String(activeLocationId).toLowerCase() ||
+                        String(l.name).toLowerCase() === String(activeLocationId).toLowerCase()
+                      )) ||
+                      (activeLocationName && String(l.name).toLowerCase() === String(activeLocationName).toLowerCase())
+                  );
+
+                  const visibleEvents = matchedLoc
+                    ? events.filter((e) => {
+                        if (e.location_id) {
+                          const locIdStr = String(e.location_id).toLowerCase();
+                          if (
+                            locIdStr === String(matchedLoc.id).toLowerCase() ||
+                            locIdStr === String(matchedLoc.code).toLowerCase() ||
+                            locIdStr === String(matchedLoc.name).toLowerCase()
+                          ) {
+                            return true;
+                          }
+                        }
+                        const locCleanName = matchedLoc.name.toLowerCase().replace(/h$/i, "").replace(/h(?=a)/g, "");
+                        if (e.name) {
+                          const cleanEventName = e.name.toLowerCase().replace(/h(?=a)/g, "");
+                          if (cleanEventName.includes(locCleanName)) return true;
+                        }
+                        if (e.location) {
+                          const cleanEventLoc = e.location.toLowerCase().replace(/h(?=a)/g, "");
+                          if (cleanEventLoc.includes(locCleanName)) return true;
+                        }
+                        return false;
+                      })
+                    : (activeLocationId
+                        ? events.filter(
+                            (e) =>
+                              e.location_id &&
+                              String(e.location_id).toLowerCase() === String(activeLocationId).toLowerCase()
+                          )
+                        : events);
+
                   if (visibleEvents.length === 0) {
                     return (
                       <div className="p-3 text-center text-muted" style={{ fontSize: 11 }}>
