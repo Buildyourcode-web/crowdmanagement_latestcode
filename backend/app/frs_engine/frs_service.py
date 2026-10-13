@@ -3730,60 +3730,70 @@ async def restore_active_cameras_from_db():
             events_map = {e.id: e for e in events_res.scalars().all()}
 
             logger.info(f"[FRS-Engine] Restoring {len(cams)} saved camera(s) from database...")
+            restored_count = 0
             for c in cams:
-                cam_id = c.camera_code
-                with _workers_lock:
-                    if cam_id in _camera_workers or f"{cam_id}-CROWD" in _camera_workers or f"{cam_id}-FRS" in _camera_workers:
+                try:
+                    cam_id = c.camera_code
+                    with _workers_lock:
+                        if cam_id in _camera_workers or f"{cam_id}-CROWD" in _camera_workers or f"{cam_id}-FRS" in _camera_workers:
+                            continue
+
+                    rtsp_url = decrypt_credential(c.rtsp_url_encrypted)
+                    if not rtsp_url:
+                        logger.warning(f"[FRS-Engine] Skipping camera {cam_id}: could not decrypt RTSP URL")
                         continue
 
-                rtsp_url = decrypt_credential(c.rtsp_url_encrypted)
-                if not rtsp_url:
-                    continue
+                    is_frs = bool(c.is_frs_camera or c.camera_type == "FRS")
+                    cam_type = "FRS" if is_frs else (c.camera_type or "CROWD")
+                    ai_purp = ["FRS"] if is_frs else ["ENTRY", "ZONE"]
 
-                is_frs = bool(c.is_frs_camera or c.camera_type == "FRS")
-                cam_type = "FRS" if is_frs else (c.camera_type or "CROWD")
-                ai_purp = ["FRS"] if is_frs else ["ENTRY", "ZONE"]
+                    clean_code = cam_id.replace("-FRS", "").replace("-CROWD", "")
+                    c_evt_key = str(c.event_id) if c.event_id else "NONE"
+                    in_val, out_val = camera_counts.get((cam_id, c_evt_key)) or camera_counts.get((clean_code, c_evt_key)) or (0, 0)
 
-                clean_code = cam_id.replace("-FRS", "").replace("-CROWD", "")
-                c_evt_key = str(c.event_id) if c.event_id else "NONE"
-                in_val, out_val = camera_counts.get((cam_id, c_evt_key)) or camera_counts.get((clean_code, c_evt_key)) or (0, 0)
+                    state = CameraWorkerState(
+                        camera_id=cam_id,
+                        rtsp_url=rtsp_url,
+                        name=c.name or c.label or f"Camera {cam_id}",
+                        is_frs=is_frs,
+                        camera_type=cam_type,
+                        ai_purposes=ai_purp,
+                        zone_code=c.zone_code or "ZONE-A",
+                    )
+                    state.event_id = str(c.event_id) if c.event_id else None
+                    state.site_id = str(c.site_id) if c.site_id else None
+                    evt_obj = events_map.get(c.event_id) if c.event_id else None
+                    if evt_obj:
+                        state.location_id = str(evt_obj.location_id) if evt_obj.location_id else None
+                        state.event_start_utc = _normalize_to_utc(evt_obj.start_date)
+                        state.event_end_utc = _normalize_to_utc(evt_obj.end_date)
+                    state.in_count = in_val
+                    state.out_count = out_val
+                    state.occupancy_count = c.people_count or max(0, in_val - out_val)
 
-                state = CameraWorkerState(
-                    camera_id=cam_id,
-                    rtsp_url=rtsp_url,
-                    name=c.name or c.label or f"Camera {cam_id}",
-                    is_frs=is_frs,
-                    camera_type=cam_type,
-                    ai_purposes=ai_purp,
-                    zone_code=c.zone_code or "ZONE-A",
-                )
-                state.event_id = str(c.event_id) if c.event_id else None
-                state.site_id = str(c.site_id) if c.site_id else None
-                evt_obj = events_map.get(c.event_id) if c.event_id else None
-                if evt_obj:
-                    state.location_id = str(evt_obj.location_id) if evt_obj.location_id else None
-                    state.event_start_utc = _normalize_to_utc(evt_obj.start_date)
-                    state.event_end_utc = _normalize_to_utc(evt_obj.end_date)
-                state.in_count = in_val
-                state.out_count = out_val
-                state.occupancy_count = c.people_count or max(0, in_val - out_val)
+                    worker = RTSPCameraWorker(state)
+                    state.running = True
 
-                worker = RTSPCameraWorker(state)
-                state.running = True
+                    t = threading.Thread(
+                        target=worker.run,
+                        daemon=True,
+                        name=f"Camera-Worker-{cam_id}",
+                    )
+                    state.thread = t
+                    with _workers_lock:
+                        _camera_workers[cam_id] = state
+                    t.start()
+                    restored_count += 1
+                    logger.info(f"[FRS-Engine] Auto-restored camera worker: {cam_id} ({cam_type}) for event {state.event_id}")
 
-                t = threading.Thread(
-                    target=worker.run,
-                    daemon=True,
-                    name=f"Camera-Worker-{cam_id}",
-                )
-                state.thread = t
-                with _workers_lock:
-                    _camera_workers[cam_id] = state
-                t.start()
-                logger.info(f"[FRS-Engine] Auto-restored camera worker: {cam_id} ({cam_type}) for event {state.event_id}")
+                except Exception as cam_ex:
+                    logger.error(f"[FRS-Engine] Failed to restore camera {getattr(c, 'camera_code', '?')}: {cam_ex}")
+                    # Continue with next camera — one bad camera must NOT block all others
+
+            logger.info(f"[FRS-Engine] Camera restore complete: {restored_count}/{len(cams)} cameras restored successfully.")
 
     except Exception as e:
-        logger.warning(f"[FRS-Engine] Failed to restore cameras from DB: {e}")
+        logger.error(f"[FRS-Engine] Fatal error in restore_active_cameras_from_db: {e}", exc_info=True)
 
 
 async def resync_camera_workers_from_db(add_both: bool = False, event_id: Optional[uuid.UUID] = None) -> Dict[str, Any]:
