@@ -1341,8 +1341,8 @@ class RTSPCameraWorker:
 
                 preds = np.squeeze(outputs[0]).T  # (8400, 84)
                 person_scores = preds[:, 4]
-                # Dual-threshold detection: sensitive threshold (0.10) keeps continuous tracks alive; 0.18 for new tracks
-                mask = person_scores > 0.10
+                # Standard robust thresholds: 0.22 for active track continuity, 0.32 for high-confidence new tracks
+                mask = person_scores > 0.22
                 filtered_preds = preds[mask]
 
                 sx = w_orig / 640.0
@@ -1356,7 +1356,7 @@ class RTSPCameraWorker:
                     raw_boxes.append([x1, y1, int(bw * sx), int(bh * sy)])
                     raw_scores.append(float(row[4]))
 
-                indices = cv2.dnn.NMSBoxes(raw_boxes, raw_scores, score_threshold=0.10, nms_threshold=0.45)
+                indices = cv2.dnn.NMSBoxes(raw_boxes, raw_scores, score_threshold=0.22, nms_threshold=0.45)
                 high_detections = []
                 low_detections = []
 
@@ -1378,7 +1378,7 @@ class RTSPCameraWorker:
                             "bottom_center": det_bc,
                             "confidence": conf,
                         }
-                        if conf >= 0.18:
+                        if conf >= 0.32:
                             high_detections.append(det_obj)
                         else:
                             low_detections.append(det_obj)
@@ -1505,16 +1505,19 @@ class RTSPCameraWorker:
                     trk["loco_history"].append((curr_time, trk["centroid"], trk["bottom_center"], bh_curr))
 
                 # Spawn new tracks for unassigned high detections
-                # IoU-based tracking (threshold > 0.60) allows people walking side-by-side to receive independent tracks.
-                # Every new track starts clean with crossed_lines = set() (no propagation from preceding people).
+                # Robust anti-duplicate guard: suppress duplicate track IDs if detection overlaps
+                # an existing track (IoU > 0.35) or is within 55px of a stationary track.
                 for d_idx in unassigned_high_d:
                     det = high_detections[d_idx]
                     det_c = det["centroid"]
 
-                    # 1. IoU-based multi-person tracking check (replaces old 45px rule):
                     too_close = False
                     for existing_trk in self._crowd_tracks.values():
-                        if _box_iou(det["bbox"], existing_trk["bbox"]) > 0.60:
+                        if _box_iou(det["bbox"], existing_trk["bbox"]) > 0.35:
+                            too_close = True
+                            break
+                        dist_to_trk = math.hypot(det_c[0] - existing_trk["centroid"][0], det_c[1] - existing_trk["centroid"][1])
+                        if dist_to_trk < 55.0:
                             too_close = True
                             break
                     if too_close:
@@ -1560,20 +1563,21 @@ class RTSPCameraWorker:
                 # -----------------------------------------------------------
                 if any(p in purposes for p in ("ENTRY", "EXIT", "ENTRY_EXIT")) and self._cached_roi_lines:
                     for trk in list(self._crowd_tracks.values()):
-                        if trk.get("hits", 0) < 2:
+                        # Gate 1: Require at least 4 confirmed detection hits to stabilize track
+                        if trk.get("hits", 0) < 4:
                             continue
                         hist = list(trk.get("history", []))
-                        if len(hist) < 2:
+                        if len(hist) < 3:
                             continue
 
                         for line in self._cached_roi_lines:
                             line_id = str(line.get("id") or line.get("name") or "line")
 
-                            # Deduplication: already counted for this person
+                            # Deduplication: already counted for this person on this line
                             if line_id in trk.get("crossed_lines", set()):
                                 continue
 
-                            # Cooldown
+                            # Cooldown: prevents double-triggering for the same person
                             if curr_time < trk.get("cooldown_until", 0.0):
                                 continue
 
@@ -1584,8 +1588,8 @@ class RTSPCameraWorker:
                             vy = l2[1] - l1[1]
                             l_len = math.hypot(vx, vy)
                             if l_len > 0:
-                                ext_x = int(vx / l_len * 25)
-                                ext_y = int(vy / l_len * 25)
+                                ext_x = int(vx / l_len * 15)
+                                ext_y = int(vy / l_len * 15)
                                 el1 = (l1[0] - ext_x, l1[1] - ext_y)
                                 el2 = (l2[0] + ext_x, l2[1] + ext_y)
                             else:
@@ -1595,58 +1599,45 @@ class RTSPCameraWorker:
                             crossing_prev = None
                             bh = trk["bbox"][3] - trk["bbox"][1]
 
-                            # 1. Multi-Trajectory Checks (Centroid, Feet, Mid-Body)
+                            # Gate 2: Physical Trajectory Crossing (Strict segments_cross only)
+                            # Person MUST physically move across the line from one side to the other.
+                            # Touching or sitting near the line will NEVER count!
                             for i in range(max(0, len(hist) - 6), len(hist) - 1):
                                 p_a = hist[i][0]
                                 p_b = hist[i + 1][0]
 
-                                # A. Centroid Path — center of body
+                                # Movement step must be real travel (not sub-pixel video noise)
+                                if math.hypot(p_b[0] - p_a[0], p_b[1] - p_a[1]) < 6.0:
+                                    continue
+
+                                # A. Centroid Path crosses line
                                 if _segments_cross(p_a, p_b, el1, el2):
                                     has_crossed = True
                                     crossing_prev = p_a
                                     break
 
-                                # B. Feet Path — bottom/feet region
-                                feet_a = (p_a[0], p_a[1] + bh * 0.48)
-                                feet_b = (p_b[0], p_b[1] + bh * 0.48)
+                                # B. Feet / Bottom-Center Path crosses line
+                                feet_a = (p_a[0], p_a[1] + bh * 0.45)
+                                feet_b = (p_b[0], p_b[1] + bh * 0.45)
                                 if _segments_cross(feet_a, feet_b, el1, el2):
                                     has_crossed = True
                                     crossing_prev = p_a
                                     break
 
-                                # C. Mid-Body Path — torso / chest region
-                                mid_a = (p_a[0], p_a[1] + bh * 0.20)
-                                mid_b = (p_b[0], p_b[1] + bh * 0.20)
-                                if _segments_cross(mid_a, mid_b, el1, el2):
-                                    has_crossed = True
-                                    crossing_prev = p_a
-                                    break
-
-                            # 2. Side Flip Detection — detects movement from one side of line to the other
-                            if not has_crossed and len(hist) >= 2:
-                                p_early = hist[max(0, len(hist) - 6)][0]
-                                p_now = trk["centroid"]
-                                side_early = (el2[0] - el1[0]) * (p_early[1] - el1[1]) - (el2[1] - el1[1]) * (p_early[0] - el1[0])
-                                side_now = (el2[0] - el1[0]) * (p_now[1] - el1[1]) - (el2[1] - el1[1]) * (p_now[0] - el1[0])
-                                if (side_early * side_now) < 0:
-                                    if _point_to_segment_dist(p_now, el1, el2) <= max(90.0, bh * 1.2):
-                                        has_crossed = True
-                                        crossing_prev = p_early
-
-                            # 3. Bounding Box Straddle & Touch — detects bounding box touching/straddling counting line
-                            if not has_crossed and _box_touches_line(trk["bbox"], el1, el2):
-                                p_early = hist[max(0, len(hist) - 6)][0]
-                                p_now = trk["centroid"]
-                                if math.hypot(p_now[0] - p_early[0], p_now[1] - p_early[1]) > 12.0:
-                                    has_crossed = True
-                                    crossing_prev = p_early
-
                             if not has_crossed:
                                 continue
 
-                            # Mark line crossed for THIS Track ID only — cooldown only for this person
+                            # Gate 3: Enforce Minimum Directional Displacement across the line
+                            # Person must have traveled at least 20px across the crossing point
+                            start_c = crossing_prev or hist[0][0]
+                            end_c = trk["centroid"]
+                            total_disp = math.hypot(end_c[0] - start_c[0], end_c[1] - start_c[1])
+                            if total_disp < 20.0:
+                                continue
+
+                            # Mark line crossed for THIS Track ID with an 8-second cooldown
                             trk["crossed_lines"].add(line_id)
-                            trk["cooldown_until"] = curr_time + 3.0
+                            trk["cooldown_until"] = curr_time + 8.0
 
                             # RULE B REMOVED COMPLETELY: Every person is evaluated independently!
                             # No suppression of adjacent, side-by-side, or following tracks.
