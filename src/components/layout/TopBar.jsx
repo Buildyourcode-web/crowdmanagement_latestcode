@@ -155,17 +155,21 @@ export default function TopBar() {
                   textTransform: "uppercase",
                 }}
               >
-                Accessible Festivals & Events
+                {activeLocationName ? `${activeLocationName} Events` : "Accessible Festivals & Events"}
               </div>
               <div style={{ maxHeight: 320, overflowY: "auto" }}>
                 {(() => {
                   const visibleEvents = activeLocationId
-                    ? events.filter((e) => !e.location_id || e.location_id === activeLocationId)
+                    ? events.filter(
+                        (e) =>
+                          e.location_id &&
+                          String(e.location_id).toLowerCase() === String(activeLocationId).toLowerCase()
+                      )
                     : events;
                   if (visibleEvents.length === 0) {
                     return (
                       <div className="p-3 text-center text-muted" style={{ fontSize: 11 }}>
-                        No events found for this location.
+                        No events found for {activeLocationName || "this location"}.
                       </div>
                     );
                   }

@@ -46,26 +46,28 @@ export const useEventStore = create((set, get) => ({
 
       let matched = events.find((e) => e.id === currentActiveId);
 
-      // If active event belongs to a different location than currentLocationId, respect the location
-      if (matched && currentLocationId && matched.location_id && matched.location_id !== currentLocationId) {
+      // If active location is set, enforce that the active event belongs strictly to this location
+      if (currentLocationId && (!matched || !matched.location_id || String(matched.location_id).toLowerCase() !== String(currentLocationId).toLowerCase())) {
         const locEvent =
-          events.find((e) => e.location_id === currentLocationId && (e.status === "ACTIVE" || e.status === "LIVE")) ||
-          events.find((e) => e.location_id === currentLocationId);
+          events.find(
+            (e) =>
+              e.location_id &&
+              String(e.location_id).toLowerCase() === String(currentLocationId).toLowerCase() &&
+              (e.status === "ACTIVE" || e.status === "LIVE")
+          ) ||
+          events.find(
+            (e) =>
+              e.location_id &&
+              String(e.location_id).toLowerCase() === String(currentLocationId).toLowerCase()
+          );
         if (locEvent) {
           matched = locEvent;
         }
       }
 
-      // If no valid active event, respect the active location
-      if (!matched) {
-        if (currentLocationId) {
-          matched =
-            events.find((e) => e.location_id === currentLocationId && (e.status === "ACTIVE" || e.status === "LIVE")) ||
-            events.find((e) => e.location_id === currentLocationId);
-        }
-        if (!matched && !currentLocationId) {
-          matched = events.find((e) => e.status === "ACTIVE" || e.status === "LIVE") || events[0];
-        }
+      // If no valid active event and no location set, pick first active
+      if (!matched && !currentLocationId) {
+        matched = events.find((e) => e.status === "ACTIVE" || e.status === "LIVE") || events[0];
       }
 
       if (matched && (!get().activeEvent || get().activeEvent.id !== matched.id)) {
