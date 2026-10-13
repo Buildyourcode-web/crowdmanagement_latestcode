@@ -1,6 +1,7 @@
 // Event & Site Zustand Store
 import { create } from "zustand";
 import { eventService } from "../services/eventService";
+import { locationService } from "../services/locationService";
 import { invalidateApiCache } from "../services/apiClient";
 import { useDashboardStore } from "./useDashboardStore";
 import { realtimeService } from "../services/realtimeService";
@@ -8,6 +9,7 @@ import { realtimeService } from "../services/realtimeService";
 
 export const useEventStore = create((set, get) => ({
   events: [],
+  locations: [],
   activeEvent: null,
   activeEventId: localStorage.getItem("byc_active_event_id") || null,
   sites: [],
@@ -22,23 +24,45 @@ export const useEventStore = create((set, get) => ({
   fetchEvents: async () => {
     set({ isLoadingEvents: true, error: null });
     try {
-      const events = await eventService.getEvents();
-      set({ events, isLoadingEvents: false });
+      const [events, locations] = await Promise.all([
+        eventService.getEvents().catch(() => []),
+        locationService.getLocations().catch(() => []),
+      ]);
+      set({ events, locations: locations || [], isLoadingEvents: false });
 
       const currentActiveId = get().activeEventId || localStorage.getItem("byc_active_event_id");
-      const currentLocationId = get().activeLocationId || localStorage.getItem("byc_active_location_id");
+      let currentLocationId = get().activeLocationId || localStorage.getItem("byc_active_location_id");
+
+      // Verify activeLocationName matches currentLocationId
+      if (currentLocationId && locations && locations.length > 0) {
+        const loc = locations.find((l) => l.id === currentLocationId);
+        if (loc) {
+          set({ activeLocation: loc, activeLocationName: loc.name });
+          try {
+            localStorage.setItem("byc_active_location_name", loc.name);
+          } catch (e) {}
+        }
+      }
 
       let matched = events.find((e) => e.id === currentActiveId);
+
+      // If active event belongs to a different location than currentLocationId, respect the location
+      if (matched && currentLocationId && matched.location_id && matched.location_id !== currentLocationId) {
+        const locEvent =
+          events.find((e) => e.location_id === currentLocationId && (e.status === "ACTIVE" || e.status === "LIVE")) ||
+          events.find((e) => e.location_id === currentLocationId);
+        if (locEvent) {
+          matched = locEvent;
+        }
+      }
 
       // If no valid active event, respect the active location
       if (!matched) {
         if (currentLocationId) {
-          // Pick the ACTIVE/LIVE event that belongs to this location first
           matched =
             events.find((e) => e.location_id === currentLocationId && (e.status === "ACTIVE" || e.status === "LIVE")) ||
             events.find((e) => e.location_id === currentLocationId);
         }
-        // Only fall back to any global event when NO location is selected
         if (!matched && !currentLocationId) {
           matched = events.find((e) => e.status === "ACTIVE" || e.status === "LIVE") || events[0];
         }
@@ -74,17 +98,28 @@ export const useEventStore = create((set, get) => ({
       useDashboardStore.getState().resetDashboardData();
     } catch (e) {}
 
-    // Synchronize activeLocationId if event is assigned to a specific location
+    // Synchronize activeLocationId and activeLocationName if event is assigned to a specific location
     const updates = {
       activeEvent: eventObj,
       activeEventId: eventId,
       activeSiteId: null,
     };
     if (eventObj.location_id) {
+      const locId = eventObj.location_id;
+      updates.activeLocationId = locId;
       try {
-        localStorage.setItem("byc_active_location_id", eventObj.location_id);
+        localStorage.setItem("byc_active_location_id", locId);
       } catch (e) {}
-      updates.activeLocationId = eventObj.location_id;
+
+      const locs = get().locations || [];
+      const matchedLoc = locs.find((l) => l.id === locId);
+      if (matchedLoc) {
+        updates.activeLocation = matchedLoc;
+        updates.activeLocationName = matchedLoc.name;
+        try {
+          localStorage.setItem("byc_active_location_name", matchedLoc.name);
+        } catch (e) {}
+      }
     }
 
     set(updates);

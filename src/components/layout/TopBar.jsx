@@ -26,7 +26,7 @@ export default function TopBar() {
   const { sidebarCollapsed, toggleSidebar, toggleFullscreen, user, theme, toggleTheme, logout } = useAppStore();
   const { criticalCount } = useAlertStore();
   const { cpu, gpu } = useSystemStore();
-  const { events, activeEvent, activeEventId, setActiveEvent, fetchEvents, sites, activeSiteId, setActiveSiteId, activeLocationName } = useEventStore();
+  const { events, activeEvent, activeEventId, setActiveEvent, fetchEvents, sites, activeSiteId, setActiveSiteId, activeLocation, activeLocationId, activeLocationName } = useEventStore();
   const [userMenuOpen, setUserMenuOpen] = useState(false);
   const userMenuRef = useRef(null);
   const [eventMenuOpen, setEventMenuOpen] = useState(false);
