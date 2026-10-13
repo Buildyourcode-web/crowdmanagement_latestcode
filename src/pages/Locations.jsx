@@ -3,6 +3,14 @@ import { useNavigate } from "react-router-dom";
 import { useEventStore } from "../store/useEventStore";
 import { locationService } from "../services/locationService";
 
+const getApiErrorMessage = (err, fallback = "An error occurred") => {
+  const detail = err.response?.data?.detail;
+  if (typeof detail === "string") return detail;
+  if (detail?.message) return detail.message;
+  if (typeof err.response?.data?.message === "string") return err.response.data.message;
+  return err.message || fallback;
+};
+
 export default function Locations() {
   const navigate = useNavigate();
   const { events, activeEventId, setActiveEvent, activeLocationId, setActiveLocation, fetchEvents } = useEventStore();
@@ -121,7 +129,7 @@ export default function Locations() {
       setAddStep(2);
       setOtpCountdown(60);
     } catch (err) {
-      setAddError(err.response?.data?.detail?.message || err.response?.data?.message || err.message || "Failed to send code");
+      setAddError(getApiErrorMessage(err, "Failed to send code"));
     } finally {
       setIsSubmitting(false);
     }
@@ -162,7 +170,7 @@ export default function Locations() {
       });
       await loadLocations();
     } catch (err) {
-      setAddError(err.response?.data?.detail?.message || err.response?.data?.message || err.message || "Failed to create location");
+      setAddError(getApiErrorMessage(err, "Failed to create location"));
     } finally {
       setIsSubmitting(false);
     }
@@ -196,7 +204,7 @@ export default function Locations() {
       setAccessMode("FESTIVALS");
       loadLocationEvents(selectedLocation.id);
     } catch (err) {
-      setAccessError(err.response?.data?.detail?.message || err.response?.data?.message || err.message || "Incorrect access code");
+      setAccessError(getApiErrorMessage(err, "Incorrect access code for this location. Access denied."));
     } finally {
       setIsVerifying(false);
     }
@@ -230,7 +238,7 @@ export default function Locations() {
       setAccessMode("FORGOT_RESET");
       setOtpCountdown(60);
     } catch (err) {
-      setAccessError(err.response?.data?.detail?.message || err.response?.data?.message || err.message || "Failed to send recovery code");
+      setAccessError(getApiErrorMessage(err, "Failed to send recovery code"));
     } finally {
       setIsVerifying(false);
     }
@@ -265,7 +273,7 @@ export default function Locations() {
       setAccessCodeInput("");
       setRecoverySuccessMsg("Access code reset successfully! Please enter your new access code to continue.");
     } catch (err) {
-      setAccessError(err.response?.data?.detail?.message || err.response?.data?.message || err.message || "Failed to reset access code");
+      setAccessError(getApiErrorMessage(err, "Failed to reset access code"));
     } finally {
       setIsVerifying(false);
     }
@@ -304,7 +312,7 @@ export default function Locations() {
       await loadLocations();
       await fetchEvents();
     } catch (err) {
-      setAccessError(err.response?.data?.detail?.message || err.response?.data?.message || err.message || "Failed to add festival");
+      setAccessError(getApiErrorMessage(err, "Failed to add festival"));
     } finally {
       setIsSubmitting(false);
     }
@@ -324,7 +332,7 @@ export default function Locations() {
       await loadLocations();
       await fetchEvents();
     } catch (err) {
-      setAccessError(err.response?.data?.detail?.message || err.message || "Failed to link event");
+      setAccessError(getApiErrorMessage(err, "Failed to link event"));
     } finally {
       setIsSubmitting(false);
     }
