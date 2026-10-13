@@ -545,10 +545,10 @@ class DashboardService:
 
                     # 1. Monotonic protection: Past completed hours only fall back to memory if DB returns 0 (glitch protection).
                     # Real DB values (including corrections) ALWAYS take precedence!
-                    # Key includes date so yesterday's data NEVER bleeds into today's graph.
+                    # Key includes event_id and date so yesterday's data or another event's data NEVER bleeds into today's graph.
                     for p in hourly_flow:
                         if p.hour != cur_h_str:
-                            cache_key_h = f"{date_prefix}:{p.hour}"
+                            cache_key_h = f"{target_event_id}:{date_prefix}:{p.hour}"
                             if p.entry == 0:
                                 prev_in, prev_out = _completed_hourly_cache.get(cache_key_h, (0, 0))
                                 if prev_in > 0:
@@ -558,10 +558,10 @@ class DashboardService:
                             else:
                                 _completed_hourly_cache[cache_key_h] = (p.entry, p.exit)
 
-                    # Record past completed hours into cache (date-prefixed key)
+                    # Record past completed hours into cache (event + date prefixed key)
                     for p in hourly_flow:
                         if p.hour != cur_h_str and (p.entry > 0 or p.exit > 0):
-                            _completed_hourly_cache[f"{date_prefix}:{p.hour}"] = (p.entry, p.exit)
+                            _completed_hourly_cache[f"{target_event_id}:{date_prefix}:{p.hour}"] = (p.entry, p.exit)
 
                     # Recompute peak hour accurately across all buckets
                     max_p = max(hourly_flow, key=lambda x: x.entry, default=None)
