@@ -510,10 +510,10 @@ export default function CameraCard({ camera, onSelect, onToggleFrs, onFullscreen
                   {countingActive ? "⏸" : "▶"}
                 </button>
 
-                {/* +1 Mode */}
+                {/* Count Mode (was +1) */}
                 <button
                   className="cc-btn"
-                  title="Count 1 per person crossing"
+                  title="Count mode: 1 per person crossing"
                   style={{
                     fontSize: 10,
                     padding: "2px 7px",
@@ -533,13 +533,13 @@ export default function CameraCard({ camera, onSelect, onToggleFrs, onFullscreen
                     }
                   }}
                 >
-                  +1
+                  Count
                 </button>
 
-                {/* +2 Mode */}
+                {/* Queue Mode (was +2) */}
                 <button
                   className="cc-btn"
-                  title="Count 2 per person crossing"
+                  title="Queue mode: 2 per person crossing"
                   style={{
                     fontSize: 10,
                     padding: "2px 7px",
@@ -559,7 +559,7 @@ export default function CameraCard({ camera, onSelect, onToggleFrs, onFullscreen
                     }
                   }}
                 >
-                  +2
+                  Queue
                 </button>
               </div>
             )}
