@@ -52,7 +52,7 @@ class Settings(BaseSettings):
     FRS_MIN_SHARPNESS: float = 45.0
     FRS_MAX_YAW_ANGLE: float = 35.0
 
-    # SMTP Email Configuration
+    # SMTP Email Configuration (loaded from .env)
     SMTP_HOST: Optional[str] = "smtp.gmail.com"
     SMTP_PORT: int = 587
     SMTP_USER: Optional[str] = None

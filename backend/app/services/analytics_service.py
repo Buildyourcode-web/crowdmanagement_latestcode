@@ -338,8 +338,9 @@ class AnalyticsService:
             for idx, qs in enumerate(q_snaps[:4]):
                 q_code, default_name, def_count, def_wait, def_status = queue_names[idx % len(queue_names)]
                 q_len = qs.queue_length if qs.queue_length is not None else def_count
-                wait_min = max(1, (qs.wait_time_seconds or (def_wait * 60)) // 60)
-                m_status = qs.movement_status or def_status
+                wait_sec = getattr(qs, "wait_time_seconds", None) or getattr(qs, "average_wait_seconds", None) or (def_wait * 60)
+                wait_min = max(1, int(wait_sec) // 60)
+                m_status = getattr(qs, "movement_status", None) or getattr(qs, "queue_movement_status", None) or def_status
                 is_bottle = m_status in ("STOPPED", "SLOW") or wait_min > 12
 
                 if m_status == "STOPPED":

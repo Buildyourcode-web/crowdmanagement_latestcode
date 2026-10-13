@@ -44,6 +44,15 @@ services:
       # CORS — Put your Frontend CPU instance IP / domain here
       - CORS_ORIGINS=${CORS_ORIGINS:-http://localhost,http://localhost:5173,http://localhost:80}
 
+      # Email & SMTP Settings (passed directly from .env)
+      - SMTP_HOST=${SMTP_HOST:-smtp.gmail.com}
+      - SMTP_PORT=${SMTP_PORT:-587}
+      - SMTP_USER=${SMTP_USER}
+      - SMTP_PASSWORD=${SMTP_PASSWORD}
+      - SMTP_FROM=${SMTP_FROM:-BYC AI Command Center <buildyourcode.tech@gmail.com>}
+      - SMTP_TLS=${SMTP_TLS:-true}
+
+
       # GPU Acceleration & AI Settings
       - USE_CUDA=true
       - MODEL_NAME=buffalo_l

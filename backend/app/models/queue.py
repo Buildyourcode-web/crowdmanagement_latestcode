@@ -50,3 +50,15 @@ class QueueSnapshot(Base, UUIDMixin, TimestampMixin):
         Index("idx_queue_event_time", "event_id", "timestamp"),
         Index("idx_queue_event_cam_time", "event_id", "camera_id", "timestamp"),
     )
+
+    @property
+    def wait_time_seconds(self) -> int:
+        return self.average_wait_seconds if self.average_wait_seconds is not None else 0
+
+    @property
+    def movement_status(self) -> str:
+        if self.risk_level == "CRITICAL":
+            return "STOPPED"
+        if self.risk_level == "HIGH":
+            return "SLOW"
+        return "MOVING"

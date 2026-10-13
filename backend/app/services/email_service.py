@@ -90,12 +90,14 @@ class EmailService:
                 return True
             except Exception as e:
                 logger.error(f"[EmailService] Failed to send email via SMTP to {to_email}: {e}")
+                logger.warning(f"[EMAIL DISPATCH BACKUP] Verification code for {to_email}: >>> {code} <<< (valid for 10m)")
                 if settings.APP_ENV == "production":
                     raise HTTPException(
                         status_code=status.HTTP_502_BAD_GATEWAY,
                         detail="Failed to dispatch verification email. Please check mail server connectivity.",
                     )
                 # In development, fall through to dev log fallback
+
 
         # If SMTP is not configured:
         if settings.APP_ENV == "production":
