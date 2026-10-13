@@ -130,7 +130,11 @@ export default function Cameras() {
       const headers = {};
       if (activeLoc) headers["X-Location-ID"] = activeLoc;
       if (activeEvt) headers["X-Event-ID"] = activeEvt;
-      const res = await fetch(`${BACKEND}/api/v1/frs-engine/cameras`, { headers });
+      const q = [];
+      if (activeEvt) q.push(`event_id=${encodeURIComponent(activeEvt)}`);
+      if (activeLoc) q.push(`location_id=${encodeURIComponent(activeLoc)}`);
+      const qStr = q.length > 0 ? `?${q.join("&")}` : "";
+      const res = await fetch(`${BACKEND}/api/v1/frs-engine/cameras${qStr}`, { headers });
       if (res.ok && isMountedRef.current) {
         const data = await res.json();
         const list = Array.isArray(data) ? data : [data];
@@ -157,6 +161,8 @@ export default function Cameras() {
             people_count: c.headcount ?? c.people_count ?? c.occupancy_count ?? 0,
             queue_movement_status: c.queue_movement_status || "STOPPED",
             zone_data: c.zone_data || [],
+            event_id: c.event_id || null,
+            location_id: c.location_id || null,
           }))
         );
       }
@@ -326,8 +332,18 @@ export default function Cameras() {
     const rawId = eng.camera_id || eng.id;
     if (!rawId) continue;
     const cleanId = (rawId || "").replace("-CROWD", "").replace("-FRS", "");
+
+    // STRICT EVENT ISOLATION:
+    // Only overlay live worker if it belongs to this event's DB cameras or matches activeEventId.
+    const isDbCam = activeStreamsMap.has(rawId) || activeStreamsMap.has(cleanId);
+    const isMatchingEvt = eng.event_id && activeEventId && String(eng.event_id) === String(activeEventId);
+    if (activeEventId && !isDbCam && !isMatchingEvt) {
+      continue; // Skip foreign camera from another event!
+    }
+
     const matchKey = activeStreamsMap.has(rawId) ? rawId : (activeStreamsMap.has(cleanId) ? cleanId : rawId);
     const existing = activeStreamsMap.get(matchKey) || {};
+
     const isFrs = Boolean(eng.is_frs || eng.camera_type === "FRS");
     activeStreamsMap.set(matchKey, {
       ...existing,

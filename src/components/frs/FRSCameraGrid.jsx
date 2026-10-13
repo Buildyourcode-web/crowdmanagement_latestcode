@@ -1,7 +1,7 @@
-// Dedicated FRS Camera Grid (Section 11) — with live MJPEG stream support
 import { useState, useEffect } from "react";
 import { useNavigate } from "react-router-dom";
 import { getBackendUrl } from "../../utils/urlConfig.js";
+import { useEventStore } from "../../store/useEventStore.js";
 
 const BACKEND = getBackendUrl();
 
@@ -27,11 +27,21 @@ export default function FRSCameraGrid({ cameras = [] }) {
     return () => document.removeEventListener("visibilitychange", handleVis);
   }, []);
 
-  // Fetch live FRS engine cameras (RTSP workers)
+  // Fetch live FRS engine cameras (RTSP workers) strictly scoped to active event/location
   useEffect(() => {
     const load = async () => {
       try {
-        const res = await fetch(`${BACKEND}/api/v1/frs-engine/cameras`);
+        const activeLoc = useEventStore.getState().activeLocationId;
+        const activeEvt = useEventStore.getState().activeEventId;
+        const headers = {};
+        if (activeLoc) headers["X-Location-ID"] = activeLoc;
+        if (activeEvt) headers["X-Event-ID"] = activeEvt;
+        const q = [];
+        if (activeEvt) q.push(`event_id=${encodeURIComponent(activeEvt)}`);
+        if (activeLoc) q.push(`location_id=${encodeURIComponent(activeLoc)}`);
+        const qStr = q.length > 0 ? `?${q.join("&")}` : "";
+
+        const res = await fetch(`${BACKEND}/api/v1/frs-engine/cameras${qStr}`, { headers });
         if (res.ok) {
           const data = await res.json();
           setEngineCams(data);

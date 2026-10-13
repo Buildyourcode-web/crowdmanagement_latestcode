@@ -35,7 +35,7 @@ from typing import Dict, List, Optional
 
 import cv2
 import numpy as np
-from fastapi import APIRouter, HTTPException, Request, WebSocket, WebSocketDisconnect
+from fastapi import APIRouter, HTTPException, Query, Request, WebSocket, WebSocketDisconnect
 from fastapi.responses import StreamingResponse
 from loguru import logger
 from pydantic import BaseModel, Field
@@ -529,7 +529,7 @@ def _box_iou(b1, b2):
     return (inter / denom) if denom > 0 else 0.0
 
 
-def _persist_crowd_snapshot_threadsafe(camera_code: str, inflow_delta: int, outflow_delta: int, headcount: int, zone_code_override: Optional[str] = None):
+def _persist_crowd_snapshot_threadsafe(camera_code: str, inflow_delta: int, outflow_delta: int, headcount: int, zone_code_override: Optional[str] = None, event_id: Optional[str] = None):
     """Asynchronously persist line-crossing or crowd headcount snapshot to PostgreSQL, updating Camera and Zone tables."""
     async def _do_persist():
         try:
@@ -548,10 +548,16 @@ def _persist_crowd_snapshot_threadsafe(camera_code: str, inflow_delta: int, outf
                 now = datetime.now(timezone.utc)
                 target_zone = zone_code_override or (cam.zone_code if (cam and cam.zone_code) else "ZONE-A")
 
-                evt_id = cam.event_id if cam else None
+                evt_id = None
+                if event_id:
+                    try:
+                        evt_id = uuid.UUID(str(event_id))
+                    except Exception:
+                        pass
+                if not evt_id:
+                    evt_id = cam.event_id if cam else None
                 if not evt_id:
                     # Prefer ACTIVE/LIVE events, most recently created first.
-                    # No hardcoded location names — works for any location.
                     evt_stmt = select(Event).where(
                         Event.status.in_(["ACTIVE", "LIVE"])
                     ).order_by(Event.created_at.desc()).limit(1)
@@ -628,6 +634,8 @@ def _persist_line_crossing_event_threadsafe(
     ground_x: float = 0.5,
     ground_y: float = 0.5,
     signed_distance: float = 0.0,
+    event_id: Optional[str] = None,
+    site_id: Optional[str] = None,
 ):
     """Asynchronously persist durable line-crossing event to PostgreSQL line_crossing_events table."""
     async def _do_persist_attempt():
@@ -643,13 +651,27 @@ def _persist_line_crossing_event_threadsafe(
                 res = await session.execute(stmt)
                 cam = res.scalars().first()
 
-                evt_id = cam.event_id if cam else None
-                site_id = cam.site_id if cam else None
+                evt_id = None
+                if event_id:
+                    try:
+                        evt_id = uuid.UUID(str(event_id))
+                    except Exception:
+                        pass
+                if not evt_id:
+                    evt_id = cam.event_id if cam else None
+
+                target_site_id = None
+                if site_id:
+                    try:
+                        target_site_id = uuid.UUID(str(site_id))
+                    except Exception:
+                        pass
+                if not target_site_id:
+                    target_site_id = cam.site_id if cam else None
 
                 # 1. Resolve event_id if not present on camera
                 if not evt_id:
                     # Prefer ACTIVE/LIVE events, most recently created first.
-                    # No hardcoded location names — works for any location.
                     evt_stmt = select(Event).where(
                         Event.status.in_(["ACTIVE", "LIVE"])
                     ).order_by(Event.created_at.desc()).limit(1)
@@ -661,8 +683,8 @@ def _persist_line_crossing_event_threadsafe(
                         evt = evt_res.scalars().first()
                     if evt:
                         evt_id = evt.id
-                        if not site_id:
-                            site_id = getattr(evt, "site_id", None)
+                        if not target_site_id:
+                            target_site_id = getattr(evt, "site_id", None)
 
                 # 2. Ensure camera exists in DB so foreign key never fails
                 if not cam:
@@ -711,7 +733,7 @@ def _persist_line_crossing_event_threadsafe(
                 stmt_insert = dialect_insert(LineCrossingEvent).values(
                     id=uuid.uuid4(),
                     event_id=evt_id,
-                    site_id=site_id,
+                    site_id=target_site_id,
                     camera_id=cam_id,
                     camera_code=camera_code,
                     line_id=str(line_id),
@@ -757,7 +779,7 @@ def _persist_line_crossing_event_threadsafe(
             pass
 
 
-def _persist_queue_snapshot_threadsafe(camera_code: str, headcount: int, movement_status: str, zone_code_override: Optional[str] = None):
+def _persist_queue_snapshot_threadsafe(camera_code: str, headcount: int, movement_status: str, zone_code_override: Optional[str] = None, event_id: Optional[str] = None):
     """Asynchronously persist queue status snapshot to PostgreSQL."""
     async def _do_persist_queue():
         try:
@@ -773,7 +795,14 @@ def _persist_queue_snapshot_threadsafe(camera_code: str, headcount: int, movemen
                 res = await session.execute(stmt)
                 cam = res.scalars().first()
 
-                evt_id = cam.event_id if cam else None
+                evt_id = None
+                if event_id:
+                    try:
+                        evt_id = uuid.UUID(str(event_id))
+                    except Exception:
+                        pass
+                if not evt_id:
+                    evt_id = cam.event_id if cam else None
                 if not evt_id:
                     evt_stmt = select(Event).where(Event.status.in_(["ACTIVE", "LIVE"])).order_by(Event.created_at.desc()).limit(1)
                     evt_res = await session.execute(evt_stmt)
@@ -1638,12 +1667,19 @@ class RTSPCameraWorker:
                             tot_live_out = 0
                             for w_obj in list(_camera_workers.values()):
                                 if getattr(w_obj, "crowd_ai_active", False):
+                                    w_evt = getattr(w_obj, "event_id", None)
+                                    # Strict per-event rollup: never bleed counts from other events!
+                                    if self.state.event_id and w_evt and str(w_evt) != str(self.state.event_id):
+                                        continue
                                     tot_live_in += int(getattr(w_obj, "in_count", 0) or 0)
                                     tot_live_out += int(getattr(w_obj, "out_count", 0) or 0)
 
                             telemetry_payload = {
                                 "camera_id": self.state.camera_id,
                                 "camera_code": self.state.camera_id,
+                                "event_id": str(self.state.event_id) if self.state.event_id else None,
+                                "location_id": str(self.state.location_id) if self.state.location_id else None,
+                                "site_id": str(self.state.site_id) if self.state.site_id else None,
                                 "in_count": self.state.in_count,
                                 "out_count": self.state.out_count,
                                 "occupancy": self.state.occupancy_count,
@@ -1690,6 +1726,8 @@ class RTSPCameraWorker:
                                 ground_x=trk["bottom_center"][0] / float(w_orig) if w_orig > 0 else 0.5,
                                 ground_y=trk["bottom_center"][1] / float(h_orig) if h_orig > 0 else 0.5,
                                 signed_distance=0.0,
+                                event_id=self.state.event_id,
+                                site_id=self.state.site_id,
                             )
 
                     # Periodic telemetry snapshot flush (every 30s)
@@ -1700,6 +1738,7 @@ class RTSPCameraWorker:
                             inflow_delta=0,
                             outflow_delta=0,
                             headcount=len(self._crowd_tracks),
+                            event_id=self.state.event_id,
                         )
 
                 # -----------------------------------------------------------
@@ -2347,6 +2386,7 @@ class AddCameraRequest(BaseModel):
     zone_code: Optional[str] = "ZONE-A"
     event_id: Optional[str] = None
     site_id: Optional[str] = None
+    location_id: Optional[str] = None
 
 
 class CameraInfo(BaseModel):
@@ -2367,27 +2407,105 @@ class CameraInfo(BaseModel):
     queue_movement_status: Optional[str] = "STOPPED"
     zone_data: Optional[List[dict]] = Field(default_factory=list)
     zone_code: Optional[str] = "ZONE-A"
+    event_id: Optional[str] = None
+    location_id: Optional[str] = None
 
 
 # ── POST /cameras ────────────────────────────────────────────────────────────
 
 @router.post("/cameras", response_model=CameraInfo, status_code=201)
 async def add_frs_camera(req: AddCameraRequest, request: Request = None):
+    # 1. Resolve event_id and location_id from request headers if not in body
     if not req.event_id and request is not None:
         h_evt = request.headers.get("X-Event-ID")
         if h_evt:
             req.event_id = h_evt
-    if req.camera_id and req.camera_id.strip():
-        cam_id = req.camera_id.strip()
-    else:
-        with _workers_lock:
-            existing_ids = set(_camera_workers.keys())
-        idx = 1
-        candidate = f"CAM-KHB-{idx:03d}"
-        while candidate in existing_ids:
-            idx += 1
+    if not req.location_id and request is not None:
+        h_loc = request.headers.get("X-Location-ID")
+        if h_loc:
+            req.location_id = h_loc
+
+    target_event_id = None
+    target_site_id = None
+    target_location_id = None
+    if req.event_id:
+        try:
+            target_event_id = uuid.UUID(str(req.event_id))
+        except Exception:
+            pass
+    if req.site_id:
+        try:
+            target_site_id = uuid.UUID(str(req.site_id))
+        except Exception:
+            pass
+    if req.location_id:
+        try:
+            target_location_id = uuid.UUID(str(req.location_id))
+        except Exception:
+            pass
+
+    # Resolve event strictly within location context if only location is provided
+    from app.db.session import AsyncSessionLocal
+    from app.models.camera import Camera
+    from app.models.event import Event
+    from app.models.line_crossing import LineCrossingEvent
+    from app.security.encryption import encrypt_credential
+    from sqlalchemy import select, func, case
+
+    async with AsyncSessionLocal() as pg_db:
+        if not target_event_id and target_location_id:
+            evt_stmt = select(Event).where(
+                Event.location_id == target_location_id,
+                Event.status.in_(["ACTIVE", "LIVE"]),
+            ).order_by(Event.created_at.desc()).limit(1)
+            evt_res = await pg_db.execute(evt_stmt)
+            evt = evt_res.scalars().first()
+            if evt:
+                target_event_id = evt.id
+                if not target_site_id:
+                    target_site_id = getattr(evt, "site_id", None)
+        elif target_event_id and not target_location_id:
+            evt_obj = await pg_db.get(Event, target_event_id)
+            if evt_obj and evt_obj.location_id:
+                target_location_id = evt_obj.location_id
+
+        # Auto-generate camera code ensuring no collision across memory or DB
+        if req.camera_id and req.camera_id.strip():
+            cam_id = req.camera_id.strip()
+        else:
+            with _workers_lock:
+                existing_worker_ids = set(_camera_workers.keys())
+            res_codes = await pg_db.execute(select(Camera.camera_code))
+            db_codes = set(res_codes.scalars().all())
+            existing_all = existing_worker_ids | db_codes
+            idx = 1
             candidate = f"CAM-KHB-{idx:03d}"
-        cam_id = candidate
+            while candidate in existing_all:
+                idx += 1
+                candidate = f"CAM-KHB-{idx:03d}"
+            cam_id = candidate
+
+        # Query existing line-crossing counts strictly for (camera, target_event_id) today
+        event_in = 0
+        event_out = 0
+        if target_event_id:
+            IST = timezone(timedelta(hours=5, minutes=30))
+            now_ist = datetime.now(timezone.utc).astimezone(IST)
+            today_start = datetime.combine(now_ist.date(), datetime.min.time(), tzinfo=IST).astimezone(timezone.utc)
+            clean_check_id = cam_id.replace("-FRS", "").replace("-CROWD", "")
+            counts_q = select(
+                func.coalesce(func.sum(case((LineCrossingEvent.direction == "IN", LineCrossingEvent.count_delta), else_=0)), 0).label("tot_in"),
+                func.coalesce(func.sum(case((LineCrossingEvent.direction == "OUT", LineCrossingEvent.count_delta), else_=0)), 0).label("tot_out"),
+            ).where(
+                LineCrossingEvent.event_id == target_event_id,
+                LineCrossingEvent.camera_code.in_([cam_id, clean_check_id]),
+                LineCrossingEvent.crossing_timestamp >= today_start,
+            )
+            c_res = await pg_db.execute(counts_q)
+            c_row = c_res.first()
+            if c_row:
+                event_in = int(c_row.tot_in or 0)
+                event_out = int(c_row.tot_out or 0)
 
     is_frs = req.is_frs if req.camera_type == "FRS" else False
     ai_purp = req.ai_purposes if req.ai_purposes is not None else ([] if req.camera_type == "CROWD" else ["FRS"])
@@ -2401,6 +2519,7 @@ async def add_frs_camera(req: AddCameraRequest, request: Request = None):
         if existing_match:
             old_id, state = existing_match
             url_changed = state.rtsp_url.strip() != req.rtsp_url.strip()
+            event_changed = target_event_id is not None and str(getattr(state, "event_id", "")) != str(target_event_id)
 
             if url_changed:
                 logger.info(f"[FRS-Engine] RTSP URL changed for {cam_id}: {state.rtsp_url} -> {req.rtsp_url}. Stopping old worker and restarting.")
@@ -2423,17 +2542,21 @@ async def add_frs_camera(req: AddCameraRequest, request: Request = None):
                 state.camera_type = req.camera_type
                 state.ai_purposes = ai_purp
                 state.zone_code = zone_cd
+                state.event_id = str(target_event_id) if target_event_id else state.event_id
+                state.location_id = str(target_location_id) if target_location_id else state.location_id
+                state.site_id = str(target_site_id) if target_site_id else state.site_id
+                if event_changed:
+                    # Reset worker counts strictly to target event today
+                    state.in_count = event_in
+                    state.out_count = event_out
+                    state.occupancy_count = max(0, event_in - event_out)
                 if req.name and req.name != "Camera":
                     state.name = req.name
-                logger.info(f"[FRS-Engine] Re-keyed and updated worker for {cam_id} ({req.camera_type}) in zone {zone_cd} with purposes {ai_purp}")
+                logger.info(f"[FRS-Engine] Re-keyed worker for {cam_id} ({req.camera_type}) in event {state.event_id} with IN={state.in_count}")
 
                 # DB sync
                 try:
-                    from app.db.session import AsyncSessionLocal
-                    from app.models.camera import Camera
-                    from app.security.encryption import encrypt_credential
-                    from sqlalchemy import select
-                    async def _sync_cam_db():
+                    async def _sync_existing_cam_db():
                         async with AsyncSessionLocal() as pg_db:
                             clean_id = cam_id.replace("-FRS", "").replace("-CROWD", "")
                             stmt = select(Camera).where(Camera.camera_code.in_([cam_id, clean_id]))
@@ -2443,8 +2566,11 @@ async def add_frs_camera(req: AddCameraRequest, request: Request = None):
                                 c.rtsp_url_encrypted = encrypt_credential(req.rtsp_url)
                                 c.status = "online"
                                 c.stream_status = "ONLINE"
+                                if target_event_id:
+                                    c.event_id = target_event_id
+                                    c.site_id = target_site_id
                             await pg_db.commit()
-                    await _sync_cam_db()
+                    await _sync_existing_cam_db()
                 except Exception as e:
                     logger.warning(f"Error updating camera in DB: {e}")
 
@@ -2466,8 +2592,11 @@ async def add_frs_camera(req: AddCameraRequest, request: Request = None):
                     queue_movement_status=getattr(state, "queue_movement_status", "STOPPED"),
                     zone_data=getattr(state, "zone_data", []),
                     zone_code=getattr(state, "zone_code", "ZONE-A"),
+                    event_id=getattr(state, "event_id", None),
+                    location_id=getattr(state, "location_id", None),
                 )
 
+        # Fresh worker instantiation
         state = CameraWorkerState(
             camera_id=cam_id,
             rtsp_url=req.rtsp_url,
@@ -2477,6 +2606,13 @@ async def add_frs_camera(req: AddCameraRequest, request: Request = None):
             ai_purposes=ai_purp,
             zone_code=zone_cd,
         )
+        state.event_id = str(target_event_id) if target_event_id else None
+        state.location_id = str(target_location_id) if target_location_id else None
+        state.site_id = str(target_site_id) if target_site_id else None
+        state.in_count = event_in
+        state.out_count = event_out
+        state.occupancy_count = max(0, event_in - event_out)
+
         worker = RTSPCameraWorker(state)
         state.running = True
 
@@ -2489,37 +2625,12 @@ async def add_frs_camera(req: AddCameraRequest, request: Request = None):
         _camera_workers[cam_id] = state
         t.start()
 
-    logger.info(f"[FRS-Engine] Camera added: {cam_id} ({req.camera_type}) in {zone_cd} -> {req.rtsp_url[:40]}...")
+    logger.info(f"[FRS-Engine] Camera added: {cam_id} ({req.camera_type}) in {zone_cd} for event {state.event_id}")
 
     # DB sync
     try:
-        from app.db.session import AsyncSessionLocal
-        from app.models.camera import Camera
-        from app.models.event import Event
-        from app.security.encryption import encrypt_credential
-        from sqlalchemy import select
         async def _sync_new_cam_db():
             async with AsyncSessionLocal() as pg_db:
-                # Resolve target event and site
-                target_event_id = None
-                target_site_id = None
-                if req.event_id:
-                    try:
-                        target_event_id = uuid.UUID(str(req.event_id))
-                    except Exception:
-                        pass
-                if not target_event_id:
-                    evt_stmt = select(Event).where(Event.status.in_(["ACTIVE", "LIVE"])).order_by(Event.created_at.desc()).limit(1)
-                    evt_res = await pg_db.execute(evt_stmt)
-                    evt = evt_res.scalars().first()
-                    if not evt:
-                        evt_stmt = select(Event).order_by(Event.created_at.desc()).limit(1)
-                        evt_res = await pg_db.execute(evt_stmt)
-                        evt = evt_res.scalars().first()
-                    if evt:
-                        target_event_id = evt.id
-                        target_site_id = getattr(evt, "site_id", None)
-
                 clean_id = cam_id.replace("-FRS", "").replace("-CROWD", "")
                 stmt = select(Camera).where(Camera.camera_code.in_([cam_id, clean_id]))
                 res = await pg_db.execute(stmt)
@@ -2554,7 +2665,7 @@ async def add_frs_camera(req: AddCameraRequest, request: Request = None):
                         c.enabled = True
                         c.is_active = True
                         c.removed_at = None
-                        if target_event_id and not c.event_id:
+                        if target_event_id:
                             c.event_id = target_event_id
                             c.site_id = target_site_id
                 await pg_db.commit()
@@ -2573,17 +2684,79 @@ async def add_frs_camera(req: AddCameraRequest, request: Request = None):
         is_frs=is_frs,
         camera_type=req.camera_type,
         zone_code=zone_cd,
+        event_id=state.event_id,
+        location_id=state.location_id,
     )
 
 
 # ── GET /cameras ─────────────────────────────────────────────────────────────
 
 @router.get("/cameras", response_model=List[CameraInfo])
-async def list_frs_engine_cameras():
-    """List all active FRS engine camera workers."""
+async def list_frs_engine_cameras(
+    request: Request = None,
+    event_id: Optional[str] = Query(None, description="Filter active camera workers strictly by event UUID"),
+    location_id: Optional[str] = Query(None, description="Filter active camera workers strictly by location UUID"),
+):
+    """List active FRS engine camera workers, strictly scoped by event_id and location_id."""
+    eff_event_id = event_id or (request.headers.get("X-Event-ID") if request else None)
+    eff_location_id = location_id or (request.headers.get("X-Location-ID") if request else None)
+
+    # In case workers don't have event_id in memory yet, resolve from DB
+    missing_cam_codes = []
+    with _workers_lock:
+        for cid, state in _camera_workers.items():
+            if not getattr(state, "event_id", None):
+                missing_cam_codes.append(cid)
+
+    if missing_cam_codes:
+        try:
+            from app.db.session import AsyncSessionLocal
+            from app.models.camera import Camera
+            from app.models.event import Event
+            from sqlalchemy import select
+            async with AsyncSessionLocal() as pg_db:
+                clean_codes = [c.replace("-FRS", "").replace("-CROWD", "") for c in missing_cam_codes]
+                all_query_codes = list(set(missing_cam_codes + clean_codes))
+                c_res = await pg_db.execute(select(Camera).where(Camera.camera_code.in_(all_query_codes)))
+                db_cams = c_res.scalars().all()
+                cam_event_map = {}
+                cam_loc_map = {}
+                for c in db_cams:
+                    if c.event_id:
+                        cam_event_map[c.camera_code] = str(c.event_id)
+                        evt = await pg_db.get(Event, c.event_id)
+                        if evt and evt.location_id:
+                            cam_loc_map[c.camera_code] = str(evt.location_id)
+
+                with _workers_lock:
+                    for cid in missing_cam_codes:
+                        state = _camera_workers.get(cid)
+                        if state:
+                            clean = cid.replace("-FRS", "").replace("-CROWD", "")
+                            e_val = cam_event_map.get(cid) or cam_event_map.get(clean)
+                            l_val = cam_loc_map.get(cid) or cam_loc_map.get(clean)
+                            if e_val:
+                                state.event_id = e_val
+                            if l_val:
+                                state.location_id = l_val
+        except Exception as e:
+            logger.debug(f"[FRS-Engine] Error resolving camera DB event mappings: {e}")
+
     result = []
     with _workers_lock:
         for cam_id, state in _camera_workers.items():
+            # Strict Event Filter: foreign event workers must never leak!
+            if eff_event_id:
+                w_evt = getattr(state, "event_id", None)
+                if w_evt is not None and str(w_evt) != str(eff_event_id):
+                    continue
+
+            # Strict Location Filter: foreign location workers must never leak!
+            if eff_location_id:
+                w_loc = getattr(state, "location_id", None)
+                if w_loc is not None and str(w_loc) != str(eff_location_id):
+                    continue
+
             result.append(CameraInfo(
                 camera_id=cam_id,
                 name=state.name,
@@ -2602,8 +2775,11 @@ async def list_frs_engine_cameras():
                 queue_movement_status=getattr(state, "queue_movement_status", "STOPPED"),
                 zone_data=getattr(state, "zone_data", []),
                 zone_code=getattr(state, "zone_code", "ZONE-A"),
+                event_id=getattr(state, "event_id", None),
+                location_id=getattr(state, "location_id", None),
             ))
     return result
+
 
 
 # ── DELETE /cameras/{id} ─────────────────────────────────────────────────────
@@ -3479,7 +3655,7 @@ async def restore_active_cameras_from_db():
                 logger.info("[FRS-Engine] No saved cameras found in database on startup.")
                 return
 
-            # Restore today's cumulative in/out counts for each camera from DB
+            # Restore today's cumulative in/out counts for each camera from DB strictly per event
             from app.models.crowd import CrowdSnapshot
             from sqlalchemy import func
             IST = timezone(timedelta(hours=5, minutes=30))
@@ -3489,14 +3665,18 @@ async def restore_active_cameras_from_db():
             counts_stmt = (
                 select(
                     CrowdSnapshot.camera_code,
+                    CrowdSnapshot.event_id,
                     func.sum(CrowdSnapshot.inflow_rate).label("in_sum"),
                     func.sum(CrowdSnapshot.outflow_rate).label("out_sum"),
                 )
                 .where(CrowdSnapshot.timestamp >= today_start)
-                .group_by(CrowdSnapshot.camera_code)
+                .group_by(CrowdSnapshot.camera_code, CrowdSnapshot.event_id)
             )
             counts_res = await pg_db.execute(counts_stmt)
-            camera_counts = {r.camera_code: (int(r.in_sum or 0), int(r.out_sum or 0)) for r in counts_res.all()}
+            camera_counts = {}
+            for r in counts_res.all():
+                e_key = str(r.event_id) if r.event_id else "NONE"
+                camera_counts[(r.camera_code, e_key)] = (int(r.in_sum or 0), int(r.out_sum or 0))
 
             logger.info(f"[FRS-Engine] Restoring {len(cams)} saved camera(s) from database...")
             for c in cams:
@@ -3514,7 +3694,8 @@ async def restore_active_cameras_from_db():
                 ai_purp = ["FRS"] if is_frs else ["ENTRY", "ZONE"]
 
                 clean_code = cam_id.replace("-FRS", "").replace("-CROWD", "")
-                in_val, out_val = camera_counts.get(cam_id) or camera_counts.get(clean_code) or (0, 0)
+                c_evt_key = str(c.event_id) if c.event_id else "NONE"
+                in_val, out_val = camera_counts.get((cam_id, c_evt_key)) or camera_counts.get((clean_code, c_evt_key)) or (0, 0)
 
                 state = CameraWorkerState(
                     camera_id=cam_id,
@@ -3525,6 +3706,8 @@ async def restore_active_cameras_from_db():
                     ai_purposes=ai_purp,
                     zone_code=c.zone_code or "ZONE-A",
                 )
+                state.event_id = str(c.event_id) if c.event_id else None
+                state.site_id = str(c.site_id) if c.site_id else None
                 state.in_count = in_val
                 state.out_count = out_val
                 state.occupancy_count = c.people_count or max(0, in_val - out_val)
@@ -3541,16 +3724,16 @@ async def restore_active_cameras_from_db():
                 with _workers_lock:
                     _camera_workers[cam_id] = state
                 t.start()
-                logger.info(f"[FRS-Engine] Auto-restored camera worker: {cam_id} ({cam_type}) in {state.zone_code}")
+                logger.info(f"[FRS-Engine] Auto-restored camera worker: {cam_id} ({cam_type}) for event {state.event_id}")
 
     except Exception as e:
         logger.warning(f"[FRS-Engine] Failed to restore cameras from DB: {e}")
 
 
-async def resync_camera_workers_from_db(add_both: bool = False) -> Dict[str, Any]:
+async def resync_camera_workers_from_db(add_both: bool = False, event_id: Optional[uuid.UUID] = None) -> Dict[str, Any]:
     """
     Dynamically updates active in-memory camera worker counts from PostgreSQL without restarting the server.
-    When add_both=True, persists the live detections into DB CrowdSnapshot and adds to total.
+    Strictly isolated per event_id so counts from one event never bleed into another.
     """
     try:
         from app.db.session import AsyncSessionLocal
@@ -3566,39 +3749,34 @@ async def resync_camera_workers_from_db(add_both: bool = False) -> Dict[str, Any
             counts_stmt = (
                 select(
                     CrowdSnapshot.camera_code,
+                    CrowdSnapshot.event_id,
                     func.sum(CrowdSnapshot.inflow_rate).label("in_sum"),
                     func.sum(CrowdSnapshot.outflow_rate).label("out_sum"),
                 )
                 .where(CrowdSnapshot.timestamp >= today_start)
-                .group_by(CrowdSnapshot.camera_code)
             )
-            counts_res = await pg_db.execute(counts_stmt)
-            camera_counts = {r.camera_code: (int(r.in_sum or 0), int(r.out_sum or 0)) for r in counts_res.all()}
+            if event_id:
+                counts_stmt = counts_stmt.where(CrowdSnapshot.event_id == event_id)
+            counts_stmt = counts_stmt.group_by(CrowdSnapshot.camera_code, CrowdSnapshot.event_id)
 
-            total_today_in = sum(v[0] for v in camera_counts.values())
-            total_today_out = sum(v[1] for v in camera_counts.values())
+            counts_res = await pg_db.execute(counts_stmt)
+            camera_counts = {}
+            for r in counts_res.all():
+                e_key = str(r.event_id) if r.event_id else "NONE"
+                camera_counts[(r.camera_code, e_key)] = (int(r.in_sum or 0), int(r.out_sum or 0))
 
             results = {}
             with _workers_lock:
                 worker_items = list(_camera_workers.items())
 
-            matched_any = any(
-                (camera_counts.get(cid) or camera_counts.get(cid.replace("-FRS", "").replace("-CROWD", "")) or (0, 0))[0] > 0
-                for cid, _ in worker_items
-            )
-
             for idx, (cam_id, state) in enumerate(worker_items):
-                clean_code = cam_id.replace("-FRS", "").replace("-CROWD", "")
-                db_in, db_out = camera_counts.get(cam_id) or camera_counts.get(clean_code) or (0, 0)
+                # Only resync workers matching event_id if event_id is supplied
+                if event_id and state.event_id and str(state.event_id) != str(event_id):
+                    continue
 
-                # Fallback to total if single camera worker, or if no worker matched specific DB counts (e.g. MANUAL_ENTRY)
-                if db_in == 0 and total_today_in > 0:
-                    if not matched_any and ("001" in cam_id or idx == 0):
-                        db_in = total_today_in
-                        db_out = total_today_out
-                    elif len(worker_items) == 1:
-                        db_in = total_today_in
-                        db_out = total_today_out
+                clean_code = cam_id.replace("-FRS", "").replace("-CROWD", "")
+                w_evt_key = str(state.event_id) if state.event_id else "NONE"
+                db_in, db_out = camera_counts.get((cam_id, w_evt_key)) or camera_counts.get((clean_code, w_evt_key)) or (0, 0)
 
                 old_in = state.in_count
                 old_out = state.out_count

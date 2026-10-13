@@ -264,13 +264,14 @@ class DashboardService:
                     for cid, w in list(_camera_workers.items()):
                         clean_cid = cid.replace("-FRS", "").replace("-CROWD", "")
                         if getattr(w, "running", False):
-                            if (
-                                not event_camera_codes
-                                or cid in event_camera_codes
-                                or clean_cid in event_camera_codes
-                                or getattr(w, "camera_id", "") in event_camera_codes
-                                or getattr(w, "camera_id", "").replace("-FRS", "").replace("-CROWD", "") in event_camera_codes
-                            ):
+                            w_evt = getattr(w, "event_id", None)
+                            matches_event = (
+                                (cid in event_camera_codes or clean_cid in event_camera_codes)
+                                or (getattr(w, "camera_id", "") in event_camera_codes)
+                                or (getattr(w, "camera_id", "").replace("-FRS", "").replace("-CROWD", "") in event_camera_codes)
+                                or (w_evt and target_event_id and str(w_evt) == str(target_event_id))
+                            )
+                            if matches_event:
                                 if getattr(w, "is_frs", False):
                                     frs_running_count += 1
                                 live_frs_workers[cid] = w

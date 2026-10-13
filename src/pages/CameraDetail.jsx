@@ -7,6 +7,7 @@ import { getCameraROIConfig } from "../services/aiService.js";
 import ROIEditor from "../components/ai/ROIEditor.jsx";
 import { LoadingState, ErrorState } from "../components/common/States.jsx";
 import { getBackendUrl } from "../utils/urlConfig.js";
+import { useEventStore } from "../store/useEventStore.js";
 
 const BACKEND = getBackendUrl();
 
@@ -295,7 +296,17 @@ export default function CameraDetail() {
     } catch (e) {
       // Fallback: check FRS engine in-memory cameras
       try {
-        const engRes = await fetch(`${BACKEND}/api/v1/frs-engine/cameras`);
+        const activeLoc = useEventStore.getState().activeLocationId;
+        const activeEvt = useEventStore.getState().activeEventId;
+        const headers = {};
+        if (activeLoc) headers["X-Location-ID"] = activeLoc;
+        if (activeEvt) headers["X-Event-ID"] = activeEvt;
+        const q = [];
+        if (activeEvt) q.push(`event_id=${encodeURIComponent(activeEvt)}`);
+        if (activeLoc) q.push(`location_id=${encodeURIComponent(activeLoc)}`);
+        const qStr = q.length > 0 ? `?${q.join("&")}` : "";
+
+        const engRes = await fetch(`${BACKEND}/api/v1/frs-engine/cameras${qStr}`, { headers });
         if (engRes.ok) {
           const engList = await engRes.json();
           const match = Array.isArray(engList)
@@ -331,7 +342,17 @@ export default function CameraDetail() {
   // Poll live counts from FRS engine every 3s
   const pollLiveCounts = useCallback(async () => {
     try {
-      const res = await fetch(`${BACKEND}/api/v1/frs-engine/cameras`);
+      const activeLoc = useEventStore.getState().activeLocationId;
+      const activeEvt = useEventStore.getState().activeEventId;
+      const headers = {};
+      if (activeLoc) headers["X-Location-ID"] = activeLoc;
+      if (activeEvt) headers["X-Event-ID"] = activeEvt;
+      const q = [];
+      if (activeEvt) q.push(`event_id=${encodeURIComponent(activeEvt)}`);
+      if (activeLoc) q.push(`location_id=${encodeURIComponent(activeLoc)}`);
+      const qStr = q.length > 0 ? `?${q.join("&")}` : "";
+
+      const res = await fetch(`${BACKEND}/api/v1/frs-engine/cameras${qStr}`, { headers });
       if (!res.ok) return;
       const data = await res.json();
       const list = Array.isArray(data) ? data : [data];
