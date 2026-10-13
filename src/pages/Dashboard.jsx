@@ -163,7 +163,10 @@ export default function Dashboard() {
     isMountedRef.current = true;
     const initialRange = useDashboardStore.getState().dateRange || "today";
     const initialDay = useDashboardStore.getState().selectedDayNumber;
-    loadData(false, initialRange, initialDay);
+    // If we already have data (returning from another page), show it instantly
+    // and silently refresh in background — no spinner, no stale flash.
+    const hasData = !!useDashboardStore.getState().data;
+    loadData(!hasData, initialRange, initialDay);
 
     const scheduleNext = () => {
       clearTimeout(timerRef.current);
@@ -264,14 +267,22 @@ export default function Dashboard() {
     };
   }, [loadData]);
 
-  // Re-fetch immediately when active event selection changes
+  // Re-fetch immediately when active event selection CHANGES (not just mounts)
+  const prevEventIdRef = useRef(activeEventId);
   useEffect(() => {
-    if (activeEventId) {
+    if (!activeEventId) return;
+    const prevId = prevEventIdRef.current;
+    prevEventIdRef.current = activeEventId;
+    // Only show full loading skeleton when the event actually switches (not on remount)
+    const eventReallyChanged = prevId && prevId !== activeEventId;
+    if (eventReallyChanged) {
       useDashboardStore.getState().setLoading(true);
-      const curRange = useDashboardStore.getState().dateRange || "today";
-      const curDay = useDashboardStore.getState().selectedDayNumber;
-      loadData(false, curRange, curDay);
     }
+    const curRange = useDashboardStore.getState().dateRange || "today";
+    const curDay = useDashboardStore.getState().selectedDayNumber;
+    // silent=true on remount (data exists), silent=false only on real event switch
+    const hasData = !!useDashboardStore.getState().data;
+    loadData(!hasData && !eventReallyChanged, curRange, curDay);
   }, [activeEventId, loadData]);
 
   // Handle Event Day Change
@@ -493,7 +504,17 @@ export default function Dashboard() {
           <div style={{ fontSize: 11, fontFamily: "var(--cc-font-mono)", color: "var(--cc-text-muted)", marginRight: 6 }}>
             {clockStr} IST
           </div>
-          <button className="cc-btn cc-btn-sm" onClick={() => loadData(false)} disabled={isRefreshing} title="Refresh Live Data">
+          <button className="cc-btn cc-btn-sm" onClick={() => {
+            // Explicit user refresh: show spinner + bypass SWR cache for truly fresh data
+            useDashboardStore.getState().setIsRefreshing(true);
+            const curRange = useDashboardStore.getState().dateRange || "today";
+            const curDay = useDashboardStore.getState().selectedDayNumber;
+            getDashboardSummary(curRange, true, curDay).then((res) => {
+              if (res) useDashboardStore.getState().setDashboardData(res, curRange, curDay);
+            }).catch(() => {}).finally(() => {
+              useDashboardStore.getState().setIsRefreshing(false);
+            });
+          }} disabled={isRefreshing} title="Refresh Live Data">
             <i className={`bi bi-arrow-clockwise ${isRefreshing ? "cc-spin" : ""}`} />
             {isRefreshing ? "Updating..." : "Refresh"}
           </button>
