@@ -430,6 +430,16 @@ class CameraService:
             last_tested_at=None,
         )
 
+        # Clean slate: Purge any stale leftover ROI configurations from older cameras with matching code
+        try:
+            from app.models.camera_roi import CameraROIConfiguration
+            from sqlalchemy import delete as sa_delete
+            await self.db.execute(
+                sa_delete(CameraROIConfiguration).where(CameraROIConfiguration.camera_code == code)
+            )
+        except Exception:
+            pass
+
         self.db.add(new_cam)
         await self.db.commit()
         await self.db.refresh(new_cam)
@@ -608,22 +618,21 @@ class CameraService:
             cam.removed_at = datetime.now(timezone.utc)
             self.db.add(cam)
 
-            # Deactivate stale ROI configurations so re-adding this camera starts clean
+            # Permanently delete ROI configurations so re-adding this camera starts clean
             try:
                 from app.models.camera_roi import CameraROIConfiguration
-                from sqlalchemy import update as sa_update, or_
+                from sqlalchemy import delete as sa_delete, or_
                 await self.db.execute(
-                    sa_update(CameraROIConfiguration)
+                    sa_delete(CameraROIConfiguration)
                     .where(
                         or_(
                             CameraROIConfiguration.camera_id == cam.id,
                             CameraROIConfiguration.camera_code == target_code,
                         )
                     )
-                    .values(enabled=False, is_active=False)
                 )
             except Exception as e:
-                logger.warning(f"Could not deactivate ROIs for camera {target_code}: {e}")
+                logger.warning(f"Could not delete ROIs for camera {target_code}: {e}")
 
             await self.db.commit()
 

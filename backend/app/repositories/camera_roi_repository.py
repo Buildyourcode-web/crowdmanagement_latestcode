@@ -22,13 +22,16 @@ class CameraROIRepository:
         self,
         camera_id: uuid.UUID,
         profile_id: Optional[str] = None,
-        enabled_only: bool = False,
+        enabled_only: bool = True,
     ) -> List[CameraROIConfiguration]:
         stmt = select(CameraROIConfiguration).where(CameraROIConfiguration.camera_id == camera_id)
         if profile_id:
             stmt = stmt.where(CameraROIConfiguration.profile_id == profile_id)
         if enabled_only:
-            stmt = stmt.where(CameraROIConfiguration.enabled.is_(True))
+            stmt = stmt.where(
+                CameraROIConfiguration.enabled.is_(True),
+                CameraROIConfiguration.is_active.is_(True),
+            )
         stmt = stmt.order_by(CameraROIConfiguration.created_at.asc())
         result = await self.db.execute(stmt)
         return list(result.scalars().all())
@@ -37,13 +40,16 @@ class CameraROIRepository:
         self,
         camera_code: str,
         profile_id: Optional[str] = None,
-        enabled_only: bool = False,
+        enabled_only: bool = True,
     ) -> List[CameraROIConfiguration]:
         stmt = select(CameraROIConfiguration).where(CameraROIConfiguration.camera_code == camera_code)
         if profile_id:
             stmt = stmt.where(CameraROIConfiguration.profile_id == profile_id)
         if enabled_only:
-            stmt = stmt.where(CameraROIConfiguration.enabled.is_(True))
+            stmt = stmt.where(
+                CameraROIConfiguration.enabled.is_(True),
+                CameraROIConfiguration.is_active.is_(True),
+            )
         stmt = stmt.order_by(CameraROIConfiguration.created_at.asc())
         result = await self.db.execute(stmt)
         return list(result.scalars().all())

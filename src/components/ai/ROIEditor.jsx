@@ -88,6 +88,10 @@ export default function ROIEditor({
   const [rois, setRois] = useState([]);
   const [readiness, setReadiness] = useState(null);
 
+  const activeRois = useMemo(() => {
+    return (rois || []).filter((r) => r.enabled !== false && r.is_active !== false);
+  }, [rois]);
+
   // Assigned purpose locked to camera profile: ENTRY | EXIT | ZONE
   const assignedObjective = useMemo(() => {
     if (initialObjective && initialObjective !== "ALL") return initialObjective;
@@ -236,10 +240,10 @@ export default function ROIEditor({
   // Update default name when tool changes
   useEffect(() => {
     const meta = ROI_TYPE_META[activeTool];
-    setRoiName(`${meta?.label || activeTool} ${rois.filter((r) => r.roi_type === activeTool).length + 1}`);
+    setRoiName(`${meta?.label || activeTool} ${activeRois.filter((r) => r.roi_type === activeTool).length + 1}`);
     if (meta?.direction) setDirection(meta.direction);
     setCurrentPoints([]);
-  }, [activeTool, rois]);
+  }, [activeTool, activeRois]);
 
   // Canvas coordinate transformation
   const getNormalizedCoords = (e) => {
@@ -433,7 +437,7 @@ export default function ROIEditor({
       await saveCameraROI(camera.id, {
         profile_id: profileId,
         roi_type: activeTool,
-        name: roiName || `${meta?.label} ${rois.length + 1}`,
+        name: roiName || `${meta?.label} ${activeRois.length + 1}`,
         geometry_json: geom,
         normalized: true,
         enabled: true,
@@ -996,10 +1000,10 @@ export default function ROIEditor({
           {/* Saved Geometries list */}
           <div style={{ marginTop: 12 }}>
             <div style={{ fontSize: 11, fontWeight: 700, color: "var(--cc-text-muted)", textTransform: "uppercase", marginBottom: 6 }}>
-              Saved Configurations ({rois.length})
+              Saved Configurations ({activeRois.length})
             </div>
             <div style={{ display: "flex", flexDirection: "column", gap: 6, maxHeight: 150, overflowY: "auto" }}>
-              {rois.map((roi) => {
+              {activeRois.map((roi) => {
                 const meta = ROI_TYPE_META[roi.roi_type] || { label: roi.roi_type, color: "#58a6ff" };
                 return (
                   <div
@@ -1265,7 +1269,7 @@ export default function ROIEditor({
                 preserveAspectRatio="none"
               >
                 {/* 1. Render Saved Polygons */}
-                {rois
+                {activeRois
                   .filter((r) => r.geometry_json?.points)
                   .map((r) => {
                     const meta = ROI_TYPE_META[r.roi_type] || { color: "#58a6ff" };
@@ -1297,7 +1301,7 @@ export default function ROIEditor({
                   })}
 
                 {/* 2. Render Saved Lines */}
-                {rois
+                {activeRois
                   .filter((r) => r.geometry_json?.start && r.geometry_json?.end)
                   .map((r) => {
                     const meta = ROI_TYPE_META[r.roi_type] || { color: "#bc8cff" };

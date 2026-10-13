@@ -194,6 +194,7 @@ def _fetch_rois_sync(state) -> tuple:
         stmt = sa_select(CameraROIConfiguration).where(
             CameraROIConfiguration.camera_code.in_([state.camera_id, clean_id]),
             CameraROIConfiguration.enabled.is_(True),
+            CameraROIConfiguration.is_active.is_(True),
             CameraROIConfiguration.roi_type.in_(all_valid_types),
         )
         items = db.execute(stmt).scalars().all()

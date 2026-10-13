@@ -346,7 +346,7 @@ class CameraROIService:
     ) -> CameraROIConfigSummary:
         """Fetches ROI configuration summary and readiness state."""
         camera = await self._resolve_camera(camera_id_or_code)
-        rois = await self.repo.get_by_camera_id(camera.id, profile_id=profile_id)
+        rois = await self.repo.get_by_camera_id(camera.id, profile_id=profile_id, enabled_only=True)
 
         # Fetch assigned profiles to calculate readiness
         assignments = await self.ai_repo.get_assignments_for_camera(camera.id)
@@ -391,6 +391,7 @@ class CameraROIService:
                     updated_at=r.updated_at,
                 )
                 for r in rois
+                if (r.enabled is not False and r.is_active is not False)
             ],
             readiness_by_profile=readiness_map,
         )
