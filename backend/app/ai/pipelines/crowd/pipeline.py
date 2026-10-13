@@ -193,12 +193,19 @@ class CrowdPipeline:
             return
 
         try:
+            from sqlalchemy.dialects.postgresql import insert as pg_dialect_insert
+            from sqlalchemy.dialects.sqlite import insert as sqlite_dialect_insert
+
             async with db_session.AsyncSessionLocal() as session:
-                bind = session.bind or session.get_bind()
-                if bind and "sqlite" in bind.dialect.name:
-                    from sqlalchemy.dialects.sqlite import insert as dialect_insert
-                else:
-                    from sqlalchemy.dialects.postgresql import insert as dialect_insert
+                # Determine dialect safely without using deprecated .bind attribute
+                dialect_name = "postgresql"
+                try:
+                    conn = await session.connection()
+                    dialect_name = conn.dialect.name
+                except Exception:
+                    pass
+
+                dialect_insert = sqlite_dialect_insert if "sqlite" in dialect_name else pg_dialect_insert
 
                 for c in crossings:
                     evt_uuid = uuid.UUID(c.event_id) if c.event_id else None
@@ -230,8 +237,10 @@ class CrowdPipeline:
                     )
                     await session.execute(stmt)
                 await session.commit()
+                logger.debug(f"[CrowdPipeline] Persisted {len(crossings)} crossing(s) for {self.camera_code}")
         except Exception as ex:
-            logger.warning(f"[CrowdPipeline] Error persisting durable crossing event: {ex}")
+            logger.error(f"[CrowdPipeline] CRITICAL: Failed to persist {len(crossings)} crossing(s) for {self.camera_code}: {ex}")
+
 
     def _compute_count_reliability(self, health: PipelineHealthStatus) -> Tuple[str, float]:
         """Calculates count reliability tier and confidence score (0-100%)."""

@@ -697,11 +697,16 @@ def _persist_line_crossing_event_threadsafe(
                 idempotency_key = f"{evt_str}_{cam_str}_{safe_line}_{safe_sess}_CROSSING-{crossing_sequence:03d}"
 
                 now = datetime.now(timezone.utc)
-                bind = session.bind or session.get_bind()
-                if bind and "sqlite" in bind.dialect.name:
-                    from sqlalchemy.dialects.sqlite import insert as dialect_insert
-                else:
-                    from sqlalchemy.dialects.postgresql import insert as dialect_insert
+                # Determine dialect safely without deprecated .bind attribute
+                from sqlalchemy.dialects.postgresql import insert as pg_dialect_insert
+                from sqlalchemy.dialects.sqlite import insert as sqlite_dialect_insert
+                dialect_name = "postgresql"
+                try:
+                    conn = await session.connection()
+                    dialect_name = conn.dialect.name
+                except Exception:
+                    pass
+                dialect_insert = sqlite_dialect_insert if "sqlite" in dialect_name else pg_dialect_insert
 
                 stmt_insert = dialect_insert(LineCrossingEvent).values(
                     id=uuid.uuid4(),
