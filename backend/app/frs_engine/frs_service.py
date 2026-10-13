@@ -2619,6 +2619,7 @@ async def remove_frs_camera(camera_id: str, sync_db: bool = True):
             if target_key:
                 state = _camera_workers.pop(target_key, None)
 
+    invalidate_roi_sync_cache(camera_id)
     if state is not None:
         state.running = False
         if hasattr(state, "reader") and state.reader:
@@ -2786,12 +2787,15 @@ def toggle_frs_camera_worker(camera_code_or_id: str, active: bool = True) -> boo
 
 def sync_worker_roi_lines(camera_code_or_id: str) -> bool:
     """Instructs the active worker to reload ROI counting lines and automatically start Crowd AI."""
+    invalidate_roi_sync_cache(camera_code_or_id)
     state = get_worker_for_camera(camera_code_or_id)
     if state and state.running:
         state.crowd_ai_active = True
         state.is_frs = False
         state.camera_type = "CROWD"
         if hasattr(state, "worker") and state.worker:
+            state.worker._cached_roi_lines = []
+            state.worker._cached_roi_polygons = []
             state.worker._roi_lines_last_fetch = 0.0
             if hasattr(state.worker, "_queue_tracks"):
                 state.worker._queue_tracks.clear()

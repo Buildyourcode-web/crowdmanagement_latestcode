@@ -607,7 +607,32 @@ class CameraService:
             cam.stream_status = "OFFLINE"
             cam.removed_at = datetime.now(timezone.utc)
             self.db.add(cam)
+
+            # Deactivate stale ROI configurations so re-adding this camera starts clean
+            try:
+                from app.models.camera_roi import CameraROIConfiguration
+                from sqlalchemy import update as sa_update, or_
+                await self.db.execute(
+                    sa_update(CameraROIConfiguration)
+                    .where(
+                        or_(
+                            CameraROIConfiguration.camera_id == cam.id,
+                            CameraROIConfiguration.camera_code == target_code,
+                        )
+                    )
+                    .values(enabled=False, is_active=False)
+                )
+            except Exception as e:
+                logger.warning(f"Could not deactivate ROIs for camera {target_code}: {e}")
+
             await self.db.commit()
+
+            # Invalidate in-memory ROI cache
+            try:
+                from app.frs_engine.frs_service import invalidate_roi_sync_cache
+                invalidate_roi_sync_cache(target_code)
+            except Exception:
+                pass
 
             try:
                 asyncio.create_task(

@@ -179,12 +179,12 @@ export default function ROIEditor({
   const [mousePos, setMousePos] = useState({ x: 0, y: 0 });
 
   // Stream status guard — allow live drawing whenever camera is not offline
-  const isStreamVerified = camera?.enabled !== false && camera?.status !== "offline" && !streamError;
+  const isStreamVerified = camera?.enabled !== false && camera?.status !== "offline";
 
   const streamWarningMessage = useMemo(() => {
     if (camera?.enabled === false) return "Camera Offline — Camera is currently disabled";
     if (camera?.status === "offline") return "Camera Offline — Stream is unreachable";
-    if (streamError) return "Stream Connection Error — Could not connect to live feed";
+    if (streamError) return "Stream Connection Error — Displaying offline grid. Geometry editing active.";
     return null;
   }, [camera, streamError]);
 
@@ -204,16 +204,33 @@ export default function ROIEditor({
         if (g.capacity) setCapacity(String(g.capacity));
         if (g.zone_code) setSelectedZone(g.zone_code);
         if (first.name) setRoiName(first.name);
+      } else {
+        setWarningThreshold("50");
+        setDangerThreshold("80");
+        setCapacity("100");
       }
     } catch (err) {
       console.error("Failed to load ROI configurations:", err);
+      setRois([]);
     }
   };
 
   useEffect(() => {
-    refreshData();
+    // Thoroughly reset all state for previous camera so no old ROIs bleed through
+    setRois([]);
+    setReadiness(null);
+    setCurrentPoints([]);
+    setHistory([]);
+    setRedoStack([]);
+    setValidationStatus(null);
+    setStatusMessage("");
+    setWarningThreshold("50");
+    setDangerThreshold("80");
+    setCapacity("100");
+    setSelectedZone(camera?.zone_code || camera?.zone || "ZONE-A");
     setStreamLoading(true);
     setStreamError(false);
+    refreshData();
   }, [camera?.id, effectiveStreamUrl]);
 
   // Update default name when tool changes
@@ -245,7 +262,7 @@ export default function ROIEditor({
   };
 
   const handleCanvasClick = (e) => {
-    if (!isStreamVerified || draggingIdx !== null) return;
+    if (draggingIdx !== null) return;
     const coords = getNormalizedCoords(e);
     const meta = ROI_TYPE_META[activeTool];
 
@@ -465,6 +482,7 @@ export default function ROIEditor({
   const handleDeleteROI = async (roiId) => {
     if (!window.confirm("Are you sure you want to delete this geometry configuration?")) return;
     try {
+      setRois((prev) => prev.filter((r) => r.id !== roiId));
       await deleteCameraROI(camera.id, roiId);
       await refreshData();
       if (onSaved) onSaved();
@@ -477,6 +495,7 @@ export default function ROIEditor({
         const detail = err.response?.data?.detail;
         const msg = (typeof detail === "object" && detail?.message) ? detail.message : (typeof detail === "string" ? detail : err.message);
         alert("Failed to delete ROI: " + msg);
+        await refreshData();
       }
     }
   };
@@ -1106,66 +1125,98 @@ export default function ROIEditor({
           </div>
 
           {/* Live Feed Container with Interactive SVG */}
-          {streamError ? (
-            <div style={{ textAlign: "center", color: "var(--cc-text-muted)", padding: 40 }}>
-              <div style={{ fontSize: 36, marginBottom: 12 }}>📹</div>
-              <div style={{ fontWeight: 700, color: "var(--cc-red)", fontSize: 14, marginBottom: 6 }}>
-                Live Stream Connection Failed
-              </div>
-              <div style={{ fontSize: 12, maxWidth: 360, margin: "0 auto" }}>
-                Make sure the camera RTSP stream is online and reachable on the network.
-              </div>
-            </div>
-          ) : (
-            <div
-              style={{
-                position: "relative",
-                maxWidth: "96%",
-                maxHeight: "92%",
-                display: "inline-block",
-                cursor: currentPoints.length > 0 ? "crosshair" : "default",
-              }}
-              onClick={handleCanvasClick}
-            >
-              {streamLoading && (
-                <div
-                  style={{
-                    position: "absolute",
-                    inset: 0,
-                    display: "flex",
-                    alignItems: "center",
-                    justifyContent: "center",
-                    background: "rgba(10,13,16,0.85)",
-                    zIndex: 20,
-                    color: "var(--cc-text-muted)",
-                    fontSize: 12,
-                    gap: 8,
-                  }}
-                >
-                  <i className="bi bi-broadcast" style={{ color: "var(--cc-green)", animation: "pulse 1.5s infinite" }} />
-                  Connecting to live camera feed...
-                </div>
-              )}
-              <img
+          <div
+            style={{
+              position: "relative",
+              maxWidth: "96%",
+              maxHeight: "92%",
+              display: "inline-block",
+              cursor: currentPoints.length > 0 ? "crosshair" : "default",
+            }}
+            onClick={handleCanvasClick}
+          >
+            {streamError ? (
+              <div
                 ref={imageRef}
-                src={effectiveStreamUrl}
-                alt="Camera Live Feed"
                 style={{
-                  display: "block",
-                  maxWidth: "100%",
-                  maxHeight: "82vh",
+                  width: "min(88vw, 960px)",
+                  aspectRatio: "16/9",
+                  background: "radial-gradient(ellipse at center, #161b22 0%, #0d1117 100%)",
                   borderRadius: 4,
-                  border: "1px solid var(--cc-border)",
-                  objectFit: "contain",
+                  border: "1px dashed var(--cc-border)",
+                  display: "flex",
+                  flexDirection: "column",
+                  alignItems: "center",
+                  justifyContent: "center",
+                  color: "var(--cc-text-muted)",
+                  padding: 20,
+                  userSelect: "none",
                 }}
-                onError={() => {
-                  setStreamLoading(false);
-                  setStreamError(true);
-                }}
-                onLoad={() => setStreamLoading(false)}
-              />
+              >
+                <div style={{ fontSize: 32, marginBottom: 8, opacity: 0.7 }}>📹</div>
+                <div style={{ fontWeight: 700, color: "var(--cc-yellow)", fontSize: 13, marginBottom: 4 }}>
+                  Camera Stream Offline / Connecting
+                </div>
+                <div style={{ fontSize: 11, maxWidth: 380, textAlign: "center", marginBottom: 12, lineHeight: 1.4 }}>
+                  Visual boundary layout & ROI deletion remain fully active. Click below to retry connecting to RTSP stream.
+                </div>
+                <button
+                  type="button"
+                  onClick={(e) => {
+                    e.stopPropagation();
+                    setStreamLoading(true);
+                    setStreamError(false);
+                  }}
+                  className="cc-btn cc-btn-secondary"
+                  style={{ fontSize: 11, padding: "4px 12px" }}
+                >
+                  ⟳ Retry Stream Connection
+                </button>
+              </div>
+            ) : (
+              <>
+                {streamLoading && (
+                  <div
+                    style={{
+                      position: "absolute",
+                      inset: 0,
+                      display: "flex",
+                      alignItems: "center",
+                      justifyContent: "center",
+                      background: "rgba(10,13,16,0.85)",
+                      zIndex: 20,
+                      color: "var(--cc-text-muted)",
+                      fontSize: 12,
+                      gap: 8,
+                    }}
+                  >
+                    <i className="bi bi-broadcast" style={{ color: "var(--cc-green)", animation: "pulse 1.5s infinite" }} />
+                    Connecting to live camera feed...
+                  </div>
+                )}
+                <img
+                  ref={imageRef}
+                  src={effectiveStreamUrl}
+                  alt="Camera Live Feed"
+                  style={{
+                    display: "block",
+                    maxWidth: "100%",
+                    maxHeight: "82vh",
+                    borderRadius: 4,
+                    border: "1px solid var(--cc-border)",
+                    objectFit: "contain",
+                  }}
+                  onError={() => {
+                    setStreamLoading(false);
+                    setStreamError(true);
+                  }}
+                  onLoad={() => setStreamLoading(false)}
+                />
+              </>
+            )}
 
-              {/* Real-time Live Badge */}
+            {/* Real-time Live Badge */}
+            {!streamError && (
               <div
                 style={{
                   position: "absolute",
@@ -1198,6 +1249,7 @@ export default function ROIEditor({
                 />
                 LIVE FEED
               </div>
+            )}
 
               {/* Interactive SVG Overlay */}
               <svg
@@ -1331,7 +1383,6 @@ export default function ROIEditor({
                 )}
               </svg>
             </div>
-          )}
         </div>
       </div>
     </div>

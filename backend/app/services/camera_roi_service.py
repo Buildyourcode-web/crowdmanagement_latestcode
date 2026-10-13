@@ -332,21 +332,11 @@ class CameraROIService:
         return camera
 
     def _verify_camera_readiness_for_editing(self, camera: Camera) -> None:
-        """Verifies camera is enabled and stream verified before editing ROIs."""
-        if not camera.enabled or (camera.status or "").lower() == "offline":
+        """Verifies camera exists and is not removed before editing ROIs."""
+        if (camera.status or "").lower() == "removed":
             raise HTTPException(
                 status_code=status.HTTP_400_BAD_REQUEST,
-                detail={"code": "CAMERA_OFFLINE", "message": "Camera Offline or Disabled — ROI editor unavailable"},
-            )
-        if (camera.stream_status or "").upper() == "NOT_TESTED":
-            raise HTTPException(
-                status_code=status.HTTP_400_BAD_REQUEST,
-                detail={"code": "CAMERA_STREAM_NOT_VERIFIED", "message": "Camera stream has not been verified yet"},
-            )
-        if (camera.stream_status or "").upper() == "OFFLINE":
-            raise HTTPException(
-                status_code=status.HTTP_400_BAD_REQUEST,
-                detail={"code": "CAMERA_OFFLINE", "message": "Camera stream is offline"},
+                detail={"code": "CAMERA_REMOVED", "message": "Camera is removed — ROI editor unavailable"},
             )
 
     async def get_camera_roi_config(
@@ -790,7 +780,6 @@ class CameraROIService:
     ) -> Dict[str, Any]:
         """Deletes an existing ROI configuration."""
         camera = await self._resolve_camera(camera_id_or_code)
-        self._verify_camera_readiness_for_editing(camera)
 
         try:
             roi_uuid = uuid.UUID(roi_id)
@@ -816,7 +805,13 @@ class CameraROIService:
         await self.db.commit()
 
         try:
-            from app.frs_engine.frs_service import sync_worker_roi_lines
+            from app.frs_engine.frs_service import sync_worker_roi_lines, invalidate_roi_sync_cache, get_worker_for_camera
+            invalidate_roi_sync_cache(camera.camera_code)
+            w_state = get_worker_for_camera(camera.camera_code)
+            if w_state and hasattr(w_state, "worker") and w_state.worker:
+                w_state.worker._cached_roi_lines = []
+                w_state.worker._cached_roi_polygons = []
+                w_state.worker._roi_lines_last_fetch = 0.0
             sync_worker_roi_lines(camera.camera_code)
         except Exception:
             pass
