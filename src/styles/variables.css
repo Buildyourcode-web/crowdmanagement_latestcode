@@ -12,6 +12,7 @@
   --cc-bg-input: #111620;
   --cc-bg-sidebar: #0c1017;
   --cc-bg-topbar: #0a0d10;
+  --cc-card-bg: var(--cc-bg-card);
 
   /* --- Borders --- */
   --cc-border: #252d38;
@@ -103,6 +104,7 @@
   --cc-bg-input: #ffffff;
   --cc-bg-sidebar: #ebf0f5;
   --cc-bg-topbar: #ffffff;
+  --cc-card-bg: var(--cc-bg-card);
 
   /* --- Borders --- */
   --cc-border: #cbd5e1;

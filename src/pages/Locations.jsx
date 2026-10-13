@@ -405,7 +405,7 @@ export default function Locations() {
       ) : (
         <div className="row g-4">
           {locations.map((loc) => {
-            const isCurrentLoc = loc.id === activeLocationId;
+            const isCurrentLoc = Boolean(activeLocationId && String(loc.id).toLowerCase() === String(activeLocationId).toLowerCase());
             return (
               <div key={loc.id} className="col-12 col-lg-6 col-xl-4">
                 <div
