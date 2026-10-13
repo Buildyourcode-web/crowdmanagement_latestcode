@@ -154,6 +154,13 @@ export const useDashboardStore = create((set, get) => ({
   patchDashboardCrossing: (payload) =>
     set((state) => {
       if (!state.data) return state;
+
+      // Event boundary guard: discard telemetry belonging to a different event
+      const activeEventId = localStorage.getItem("byc_active_event_id");
+      if (payload?.event_id && activeEventId && String(payload.event_id).toLowerCase() !== String(activeEventId).toLowerCase()) {
+        return state;
+      }
+
       const inDelta = Number(payload?.inflow_delta || (payload?.crossing === "IN" ? 1 : 0));
       const outDelta = Number(payload?.outflow_delta || (payload?.crossing === "OUT" ? 1 : 0));
 

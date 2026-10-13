@@ -31,7 +31,7 @@ import uuid
 from collections import deque
 from datetime import datetime, timezone, timedelta
 from pathlib import Path
-from typing import Dict, List, Optional
+from typing import Dict, List, Optional, Any, Tuple
 
 import cv2
 import numpy as np
@@ -117,6 +117,8 @@ class CameraWorkerState:
         self.event_id: Optional[str] = None
         self.location_id: Optional[str] = None
         self.site_id: Optional[str] = None
+        self.event_start_utc: Optional[datetime] = None
+        self.event_end_utc: Optional[datetime] = None
         self.thread: Optional[threading.Thread] = None
         self.running = False
         self.latest_frame: Optional[bytes] = None  # JPEG bytes for MJPEG (annotated if AI active)
@@ -165,6 +167,20 @@ def invalidate_roi_sync_cache(camera_id: Optional[str] = None):
         _ROI_SYNC_CACHE.pop(clean, None)
     else:
         _ROI_SYNC_CACHE.clear()
+
+def _normalize_to_utc(dt: Any) -> Optional[datetime]:
+    if dt is None:
+        return None
+    if isinstance(dt, str):
+        try:
+            dt = datetime.fromisoformat(dt)
+        except Exception:
+            return None
+    if isinstance(dt, datetime):
+        if dt.tzinfo is None:
+            return dt.replace(tzinfo=timezone.utc)
+        return dt.astimezone(timezone.utc)
+    return None
 
 def _fetch_rois_sync(state) -> tuple:
     """Synchronously fetch ROI configs from DB. Safe to call from any background thread."""
@@ -1648,87 +1664,102 @@ class RTSPCameraWorker:
                             is_pure_entry = ("ENTRY" in purposes and "EXIT" not in purposes) or line_type == "ENTRY_LINE"
                             is_pure_exit = ("EXIT" in purposes and "ENTRY" not in purposes) or line_type == "EXIT_LINE"
 
-                            if is_pure_exit or (not is_pure_entry and (line_dir == "OUT" or (cross_prod < 0 and line_dir == "BOTH"))):
-                                self.state.out_count += 1
-                                inflow_d, outflow_d = 0, 1
-                                crossing_label = "OUT"
-                            else:
-                                self.state.in_count += 1
-                                inflow_d, outflow_d = 1, 0
-                                crossing_label = "IN"
-
-                            self.state.occupancy_count = max(0, self.state.in_count - self.state.out_count)
-                            logger.info(
-                                f"[YOLO11x-Crowd:{self.state.camera_id}] Track #{trk['track_id']} CROSSED '{line.get('name')}': "
-                                f"{crossing_label} | IN={self.state.in_count} OUT={self.state.out_count} OCCUPANCY={self.state.occupancy_count}"
+                            # TIME GATE: Only increment counters and persist crossings within the event's [start, end) window.
+                            # Bounding boxes and detection visual HUDs continue running, but counts are suppressed outside the window.
+                            now_utc = datetime.now(timezone.utc)
+                            evt_start = _normalize_to_utc(getattr(self.state, "event_start_utc", None))
+                            evt_end = _normalize_to_utc(getattr(self.state, "event_end_utc", None))
+                            within_event_window = (
+                                (evt_start is None or now_utc >= evt_start)
+                                and (evt_end is None or now_utc < evt_end)
                             )
 
-                            tot_live_in = 0
-                            tot_live_out = 0
-                            for w_obj in list(_camera_workers.values()):
-                                if getattr(w_obj, "crowd_ai_active", False):
-                                    w_evt = getattr(w_obj, "event_id", None)
-                                    # Strict per-event rollup: never bleed counts from other events!
-                                    if self.state.event_id and w_evt and str(w_evt) != str(self.state.event_id):
-                                        continue
-                                    tot_live_in += int(getattr(w_obj, "in_count", 0) or 0)
-                                    tot_live_out += int(getattr(w_obj, "out_count", 0) or 0)
+                            if within_event_window:
+                                if is_pure_exit or (not is_pure_entry and (line_dir == "OUT" or (cross_prod < 0 and line_dir == "BOTH"))):
+                                    self.state.out_count += 1
+                                    inflow_d, outflow_d = 0, 1
+                                    crossing_label = "OUT"
+                                else:
+                                    self.state.in_count += 1
+                                    inflow_d, outflow_d = 1, 0
+                                    crossing_label = "IN"
 
-                            telemetry_payload = {
-                                "camera_id": self.state.camera_id,
-                                "camera_code": self.state.camera_id,
-                                "event_id": str(self.state.event_id) if self.state.event_id else None,
-                                "location_id": str(self.state.location_id) if self.state.location_id else None,
-                                "site_id": str(self.state.site_id) if self.state.site_id else None,
-                                "in_count": self.state.in_count,
-                                "out_count": self.state.out_count,
-                                "occupancy": self.state.occupancy_count,
-                                "current_occupancy": self.state.occupancy_count,
-                                "headcount": len(self._crowd_tracks),
-                                "crossing": crossing_label,
-                                "inflow_delta": inflow_d,
-                                "outflow_delta": outflow_d,
-                                "line_name": line.get("name"),
-                                "zone_code": getattr(self.state, "zone_code", "ZONE-A"),
-                                "timestamp": datetime.now(timezone.utc).isoformat(),
-                                "today_entries": tot_live_in,
-                                "today_exits": tot_live_out,
-                                "total_visitors_festival": tot_live_in,
-                                "camera_in_count": self.state.in_count,
-                                "camera_out_count": self.state.out_count,
-                            }
-                            _emit_frs_event_threadsafe("crowd_telemetry", telemetry_payload)
-                            _emit_frs_event_threadsafe("crowd_update", telemetry_payload)
+                                self.state.occupancy_count = max(0, self.state.in_count - self.state.out_count)
+                                logger.info(
+                                    f"[YOLO11x-Crowd:{self.state.camera_id}] Track #{trk['track_id']} CROSSED '{line.get('name')}': "
+                                    f"{crossing_label} | IN={self.state.in_count} OUT={self.state.out_count} OCCUPANCY={self.state.occupancy_count}"
+                                )
 
-                            crossing_seq = trk.get("crossing_sequence", 0) + 1
-                            trk["crossing_sequence"] = crossing_seq
-                            t_sess = trk.get("track_session_id") or f"sess_{trk['track_id']}_{int(trk.get('last_seen', time.time()))}"
-                            trk["track_session_id"] = t_sess
+                                tot_live_in = 0
+                                tot_live_out = 0
+                                for w_obj in list(_camera_workers.values()):
+                                    if getattr(w_obj, "crowd_ai_active", False):
+                                        w_evt = getattr(w_obj, "event_id", None)
+                                        # Strict per-event rollup: never bleed counts from other events!
+                                        if self.state.event_id and w_evt and str(w_evt) != str(self.state.event_id):
+                                            continue
+                                        tot_live_in += int(getattr(w_obj, "in_count", 0) or 0)
+                                        tot_live_out += int(getattr(w_obj, "out_count", 0) or 0)
 
-                            # Canonical count_delta: 1 for valid direction, 0 for reverse audit
-                            if is_pure_entry:
-                                count_d = 1 if crossing_label == "IN" else 0
-                            elif is_pure_exit:
-                                count_d = 1 if crossing_label == "OUT" else 0
+                                telemetry_payload = {
+                                    "camera_id": self.state.camera_id,
+                                    "camera_code": self.state.camera_id,
+                                    "event_id": str(self.state.event_id) if self.state.event_id else None,
+                                    "location_id": str(self.state.location_id) if self.state.location_id else None,
+                                    "site_id": str(self.state.site_id) if self.state.site_id else None,
+                                    "in_count": self.state.in_count,
+                                    "out_count": self.state.out_count,
+                                    "occupancy": self.state.occupancy_count,
+                                    "current_occupancy": self.state.occupancy_count,
+                                    "headcount": len(self._crowd_tracks),
+                                    "crossing": crossing_label,
+                                    "inflow_delta": inflow_d,
+                                    "outflow_delta": outflow_d,
+                                    "line_name": line.get("name"),
+                                    "zone_code": getattr(self.state, "zone_code", "ZONE-A"),
+                                    "timestamp": datetime.now(timezone.utc).isoformat(),
+                                    "today_entries": tot_live_in,
+                                    "today_exits": tot_live_out,
+                                    "total_visitors_festival": tot_live_in,
+                                    "camera_in_count": self.state.in_count,
+                                    "camera_out_count": self.state.out_count,
+                                }
+                                _emit_frs_event_threadsafe("crowd_telemetry", telemetry_payload)
+                                _emit_frs_event_threadsafe("crowd_update", telemetry_payload)
+
+                                crossing_seq = trk.get("crossing_sequence", 0) + 1
+                                trk["crossing_sequence"] = crossing_seq
+                                t_sess = trk.get("track_session_id") or f"sess_{trk['track_id']}_{int(trk.get('last_seen', time.time()))}"
+                                trk["track_session_id"] = t_sess
+
+                                # Canonical count_delta: 1 for valid direction, 0 for reverse audit
+                                if is_pure_entry:
+                                    count_d = 1 if crossing_label == "IN" else 0
+                                elif is_pure_exit:
+                                    count_d = 1 if crossing_label == "OUT" else 0
+                                else:
+                                    count_d = 1
+
+                                _persist_line_crossing_event_threadsafe(
+                                    camera_code=self.state.camera_id,
+                                    line_id=line.get("id") or "LINE-01",
+                                    line_name=line.get("name") or "Gate Counting Line",
+                                    direction=crossing_label,
+                                    count_delta=count_d,
+                                    track_session_id=t_sess,
+                                    track_token=f"TRK-{trk['track_id']}",
+                                    crossing_sequence=crossing_seq,
+                                    confidence=trk.get("confidence", 0.85),
+                                    ground_x=trk["bottom_center"][0] / float(w_orig) if w_orig > 0 else 0.5,
+                                    ground_y=trk["bottom_center"][1] / float(h_orig) if h_orig > 0 else 0.5,
+                                    signed_distance=0.0,
+                                    event_id=self.state.event_id,
+                                    site_id=self.state.site_id,
+                                )
                             else:
-                                count_d = 1
-
-                            _persist_line_crossing_event_threadsafe(
-                                camera_code=self.state.camera_id,
-                                line_id=line.get("id") or "LINE-01",
-                                line_name=line.get("name") or "Gate Counting Line",
-                                direction=crossing_label,
-                                count_delta=count_d,
-                                track_session_id=t_sess,
-                                track_token=f"TRK-{trk['track_id']}",
-                                crossing_sequence=crossing_seq,
-                                confidence=trk.get("confidence", 0.85),
-                                ground_x=trk["bottom_center"][0] / float(w_orig) if w_orig > 0 else 0.5,
-                                ground_y=trk["bottom_center"][1] / float(h_orig) if h_orig > 0 else 0.5,
-                                signed_distance=0.0,
-                                event_id=self.state.event_id,
-                                site_id=self.state.site_id,
-                            )
+                                logger.debug(
+                                    f"[TimeGate] Crossing outside event window ({evt_start} - {evt_end}) suppressed for {self.state.camera_id}"
+                                )
 
                     # Periodic telemetry snapshot flush (every 30s)
                     if (curr_time - self._last_snapshot_persist) > 30.0:
@@ -2452,6 +2483,8 @@ async def add_frs_camera(req: AddCameraRequest, request: Request = None):
     from app.security.encryption import encrypt_credential
     from sqlalchemy import select, func, case
 
+    target_evt_start = None
+    target_evt_end = None
     async with AsyncSessionLocal() as pg_db:
         if not target_event_id and target_location_id:
             evt_stmt = select(Event).where(
@@ -2464,10 +2497,17 @@ async def add_frs_camera(req: AddCameraRequest, request: Request = None):
                 target_event_id = evt.id
                 if not target_site_id:
                     target_site_id = getattr(evt, "site_id", None)
-        elif target_event_id and not target_location_id:
+                target_evt_start = _normalize_to_utc(evt.start_date)
+                target_evt_end = _normalize_to_utc(evt.end_date)
+        elif target_event_id:
             evt_obj = await pg_db.get(Event, target_event_id)
-            if evt_obj and evt_obj.location_id:
-                target_location_id = evt_obj.location_id
+            if evt_obj:
+                if not target_location_id and evt_obj.location_id:
+                    target_location_id = evt_obj.location_id
+                if not target_site_id and getattr(evt_obj, "site_id", None):
+                    target_site_id = evt_obj.site_id
+                target_evt_start = _normalize_to_utc(evt_obj.start_date)
+                target_evt_end = _normalize_to_utc(evt_obj.end_date)
 
         # Auto-generate camera code ensuring no collision across memory or DB
         if req.camera_id and req.camera_id.strip():
@@ -2545,6 +2585,10 @@ async def add_frs_camera(req: AddCameraRequest, request: Request = None):
                 state.event_id = str(target_event_id) if target_event_id else state.event_id
                 state.location_id = str(target_location_id) if target_location_id else state.location_id
                 state.site_id = str(target_site_id) if target_site_id else state.site_id
+                if target_evt_start is not None:
+                    state.event_start_utc = target_evt_start
+                if target_evt_end is not None:
+                    state.event_end_utc = target_evt_end
                 if event_changed:
                     # Reset worker counts strictly to target event today
                     state.in_count = event_in
@@ -2609,6 +2653,8 @@ async def add_frs_camera(req: AddCameraRequest, request: Request = None):
         state.event_id = str(target_event_id) if target_event_id else None
         state.location_id = str(target_location_id) if target_location_id else None
         state.site_id = str(target_site_id) if target_site_id else None
+        state.event_start_utc = target_evt_start
+        state.event_end_utc = target_evt_end
         state.in_count = event_in
         state.out_count = event_out
         state.occupancy_count = max(0, event_in - event_out)
@@ -3678,6 +3724,11 @@ async def restore_active_cameras_from_db():
                 e_key = str(r.event_id) if r.event_id else "NONE"
                 camera_counts[(r.camera_code, e_key)] = (int(r.in_sum or 0), int(r.out_sum or 0))
 
+            from app.models.event import Event
+            events_stmt = select(Event)
+            events_res = await pg_db.execute(events_stmt)
+            events_map = {e.id: e for e in events_res.scalars().all()}
+
             logger.info(f"[FRS-Engine] Restoring {len(cams)} saved camera(s) from database...")
             for c in cams:
                 cam_id = c.camera_code
@@ -3708,6 +3759,11 @@ async def restore_active_cameras_from_db():
                 )
                 state.event_id = str(c.event_id) if c.event_id else None
                 state.site_id = str(c.site_id) if c.site_id else None
+                evt_obj = events_map.get(c.event_id) if c.event_id else None
+                if evt_obj:
+                    state.location_id = str(evt_obj.location_id) if evt_obj.location_id else None
+                    state.event_start_utc = _normalize_to_utc(evt_obj.start_date)
+                    state.event_end_utc = _normalize_to_utc(evt_obj.end_date)
                 state.in_count = in_val
                 state.out_count = out_val
                 state.occupancy_count = c.people_count or max(0, in_val - out_val)
@@ -3765,11 +3821,27 @@ async def resync_camera_workers_from_db(add_both: bool = False, event_id: Option
                 e_key = str(r.event_id) if r.event_id else "NONE"
                 camera_counts[(r.camera_code, e_key)] = (int(r.in_sum or 0), int(r.out_sum or 0))
 
+            from app.models.event import Event
+            events_stmt = select(Event)
+            events_res = await pg_db.execute(events_stmt)
+            events_map = {str(e.id): e for e in events_res.scalars().all()}
+
             results = {}
             with _workers_lock:
                 worker_items = list(_camera_workers.items())
 
             for idx, (cam_id, state) in enumerate(worker_items):
+                # Ensure worker has latest event timeline and location attached
+                if state.event_id:
+                    evt_obj = events_map.get(str(state.event_id))
+                    if evt_obj:
+                        if state.event_start_utc is None:
+                            state.event_start_utc = _normalize_to_utc(evt_obj.start_date)
+                        if state.event_end_utc is None:
+                            state.event_end_utc = _normalize_to_utc(evt_obj.end_date)
+                        if not state.location_id and evt_obj.location_id:
+                            state.location_id = str(evt_obj.location_id)
+
                 # Only resync workers matching event_id if event_id is supplied
                 if event_id and state.event_id and str(state.event_id) != str(event_id):
                     continue
