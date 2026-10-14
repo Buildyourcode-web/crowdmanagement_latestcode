@@ -131,6 +131,8 @@ class CameraWorkerState:
         self.status = "starting"
         # Crowd AI & Counting Line state
         self.crowd_ai_active: bool = (not is_frs) or (camera_type == "CROWD")
+        self.counting_active: bool = True
+        self.count_mode: int = 1
         self.in_count: int = 0
         self.out_count: int = 0
         self.occupancy_count: int = 0
@@ -1694,20 +1696,24 @@ class RTSPCameraWorker:
                                 and (evt_end is None or now_utc < evt_end)
                             )
 
-                            if within_event_window:
+                            is_counting_active = getattr(self.state, "counting_active", True)
+                            count_mult = max(1, int(getattr(self.state, "count_mode", 1) or 1))
+
+                            if within_event_window and is_counting_active:
                                 if is_pure_exit or (not is_pure_entry and (line_dir == "OUT" or (cross_prod < 0 and line_dir == "BOTH"))):
                                     self.state.out_count += 1
                                     inflow_d, outflow_d = 0, 1
                                     crossing_label = "OUT"
                                 else:
-                                    self.state.in_count += 1
-                                    inflow_d, outflow_d = 1, 0
+                                    self.state.in_count += count_mult
+                                    inflow_d, outflow_d = count_mult, 0
                                     crossing_label = "IN"
 
                                 self.state.occupancy_count = max(0, self.state.in_count - self.state.out_count)
                                 logger.info(
                                     f"[YOLO11x-Crowd:{self.state.camera_id}] Track #{trk['track_id']} CROSSED '{line.get('name')}': "
-                                    f"{crossing_label} | IN={self.state.in_count} OUT={self.state.out_count} OCCUPANCY={self.state.occupancy_count}"
+                                    f"{crossing_label} (+{inflow_d if crossing_label == 'IN' else outflow_d}) | "
+                                    f"IN={self.state.in_count} OUT={self.state.out_count} OCCUPANCY={self.state.occupancy_count} (mode={count_mult})"
                                 )
 
                                 tot_live_in = 0
@@ -1729,6 +1735,8 @@ class RTSPCameraWorker:
                                     "site_id": str(self.state.site_id) if self.state.site_id else None,
                                     "in_count": self.state.in_count,
                                     "out_count": self.state.out_count,
+                                    "counting_active": is_counting_active,
+                                    "count_mode": count_mult,
                                     "occupancy": self.state.occupancy_count,
                                     "current_occupancy": self.state.occupancy_count,
                                     "headcount": len(self._crowd_tracks),
@@ -1752,13 +1760,13 @@ class RTSPCameraWorker:
                                 t_sess = trk.get("track_session_id") or f"sess_{trk['track_id']}_{int(trk.get('last_seen', time.time()))}"
                                 trk["track_session_id"] = t_sess
 
-                                # Canonical count_delta: 1 for valid direction, 0 for reverse audit
+                                # Canonical count_delta: count_mult for valid IN, 1 for OUT, 0 for reverse audit
                                 if is_pure_entry:
-                                    count_d = 1 if crossing_label == "IN" else 0
+                                    count_d = count_mult if crossing_label == "IN" else 0
                                 elif is_pure_exit:
                                     count_d = 1 if crossing_label == "OUT" else 0
                                 else:
-                                    count_d = 1
+                                    count_d = count_mult if crossing_label == "IN" else 1
 
                                 _persist_line_crossing_event_threadsafe(
                                     camera_code=self.state.camera_id,
@@ -1775,6 +1783,11 @@ class RTSPCameraWorker:
                                     signed_distance=0.0,
                                     event_id=self.state.event_id,
                                     site_id=self.state.site_id,
+                                )
+                            elif not is_counting_active:
+                                logger.info(
+                                    f"[YOLO11x-Crowd:{self.state.camera_id}] Track #{trk['track_id']} crossed line '{line.get('name')}' "
+                                    f"but counting is PAUSED on this camera (boxes only). Count suppressed."
                                 )
                             else:
                                 logger.debug(
@@ -2376,11 +2389,21 @@ class RTSPCameraWorker:
                     cv2.rectangle(bgr_crowd, (0, 0), (w, 30), (15, 23, 42), -1)
                     hud_parts = []
                     if is_entry:
-                        hud_parts.append(f"ENTRY: {self.state.in_count}")
+                        entry_str = f"ENTRY: {self.state.in_count}"
+                        if not getattr(self.state, "counting_active", True):
+                            entry_str += " [PAUSED]"
+                        elif getattr(self.state, "count_mode", 1) == 2:
+                            entry_str += " [x2]"
+                        hud_parts.append(entry_str)
                     elif is_exit:
                         hud_parts.append(f"EXIT: {self.state.out_count}")
                     elif "ENTRY_EXIT" in purposes or ("ENTRY" in purposes and "EXIT" in purposes):
-                        hud_parts.append(f"IN: {self.state.in_count} | OUT: {self.state.out_count}")
+                        ee_str = f"IN: {self.state.in_count} | OUT: {self.state.out_count}"
+                        if not getattr(self.state, "counting_active", True):
+                            ee_str += " [PAUSED]"
+                        elif getattr(self.state, "count_mode", 1) == 2:
+                            ee_str += " [x2]"
+                        hud_parts.append(ee_str)
 
                     if "ZONE" in purposes:
                         z_occ = getattr(self.state, "occupancy_count", 0)
@@ -2451,6 +2474,8 @@ class CameraInfo(BaseModel):
     is_frs: bool = True
     camera_type: str = "FRS"
     crowd_ai_active: bool = False
+    counting_active: bool = True
+    count_mode: int = 1
     in_count: int = 0
     out_count: int = 0
     occupancy_count: int = 0
@@ -2649,6 +2674,8 @@ async def add_frs_camera(req: AddCameraRequest, request: Request = None):
                     is_frs=state.is_frs,
                     camera_type=state.camera_type,
                     crowd_ai_active=getattr(state, "crowd_ai_active", False),
+                    counting_active=getattr(state, "counting_active", True),
+                    count_mode=getattr(state, "count_mode", 1),
                     in_count=getattr(state, "in_count", 0),
                     out_count=getattr(state, "out_count", 0),
                     occupancy_count=getattr(state, "occupancy_count", 0),
@@ -2749,6 +2776,9 @@ async def add_frs_camera(req: AddCameraRequest, request: Request = None):
         stream_url=f"/api/v1/frs-engine/cameras/{cam_id}/stream",
         is_frs=is_frs,
         camera_type=req.camera_type,
+        crowd_ai_active=getattr(state, "crowd_ai_active", False),
+        counting_active=getattr(state, "counting_active", True),
+        count_mode=getattr(state, "count_mode", 1),
         zone_code=zone_cd,
         event_id=state.event_id,
         location_id=state.location_id,
@@ -2834,6 +2864,8 @@ async def list_frs_engine_cameras(
                 is_frs=state.is_frs,
                 camera_type=state.camera_type,
                 crowd_ai_active=getattr(state, "crowd_ai_active", False),
+                counting_active=getattr(state, "counting_active", True),
+                count_mode=getattr(state, "count_mode", 1),
                 in_count=getattr(state, "in_count", 0),
                 out_count=getattr(state, "out_count", 0),
                 occupancy_count=getattr(state, "occupancy_count", 0),
@@ -3134,6 +3166,78 @@ async def api_toggle_frs(camera_id: str, active: bool = True):
     if not success:
         raise HTTPException(status_code=404, detail=f"Camera worker for {camera_id} not found or not running")
     return {"status": "success", "camera_id": camera_id, "is_frs": active}
+
+
+@router.patch("/cameras/{camera_id}/counting-active")
+async def api_set_camera_counting_active(
+    camera_id: str,
+    active: Optional[bool] = Query(None),
+    request: Request = None,
+):
+    eff_active = active
+    if eff_active is None and request is not None:
+        try:
+            body = await request.json()
+            if isinstance(body, dict) and "active" in body:
+                eff_active = bool(body["active"])
+        except Exception:
+            pass
+    if eff_active is None:
+        eff_active = True
+    state = get_worker_for_camera(camera_id)
+    if state is None:
+        raise HTTPException(status_code=404, detail=f"Camera worker for {camera_id} not found")
+    state.counting_active = bool(eff_active)
+    logger.info(f"[FRS-Engine] Camera {camera_id} counting_active set to {eff_active}")
+    telemetry_payload = {
+        "camera_id": state.camera_id,
+        "camera_code": state.camera_id,
+        "event_id": str(state.event_id) if state.event_id else None,
+        "in_count": state.in_count,
+        "out_count": state.out_count,
+        "occupancy": state.occupancy_count,
+        "counting_active": state.counting_active,
+        "count_mode": getattr(state, "count_mode", 1),
+    }
+    _emit_frs_event_threadsafe("crowd_telemetry", telemetry_payload)
+    return {"status": "success", "camera_id": camera_id, "counting_active": state.counting_active}
+
+
+@router.patch("/cameras/{camera_id}/count-mode")
+async def api_set_camera_count_mode(
+    camera_id: str,
+    mode: Optional[int] = Query(None),
+    request: Request = None,
+):
+    eff_mode = mode
+    if eff_mode is None and request is not None:
+        try:
+            body = await request.json()
+            if isinstance(body, dict) and "mode" in body:
+                eff_mode = int(body["mode"])
+        except Exception:
+            pass
+    if eff_mode is None:
+        eff_mode = 1
+    if eff_mode not in (1, 2):
+        raise HTTPException(status_code=400, detail="Count mode must be 1 or 2")
+    state = get_worker_for_camera(camera_id)
+    if state is None:
+        raise HTTPException(status_code=404, detail=f"Camera worker for {camera_id} not found")
+    state.count_mode = int(eff_mode)
+    logger.info(f"[FRS-Engine] Camera {camera_id} count_mode set to {eff_mode}")
+    telemetry_payload = {
+        "camera_id": state.camera_id,
+        "camera_code": state.camera_id,
+        "event_id": str(state.event_id) if state.event_id else None,
+        "in_count": state.in_count,
+        "out_count": state.out_count,
+        "occupancy": state.occupancy_count,
+        "counting_active": getattr(state, "counting_active", True),
+        "count_mode": state.count_mode,
+    }
+    _emit_frs_event_threadsafe("crowd_telemetry", telemetry_payload)
+    return {"status": "success", "camera_id": camera_id, "count_mode": state.count_mode}
 
 
 @router.patch("/cameras/{camera_id}/reassign-purpose")

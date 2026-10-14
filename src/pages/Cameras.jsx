@@ -154,6 +154,8 @@ export default function Cameras() {
             detections_count: c.detections_count || 0,
             ai_status: c.status === "online" ? "online" : "offline",
             ai_purposes: (c.ai_purposes || (c.is_frs ? ["FRS"] : [])).filter((p) => p !== "ENTRY_EXIT"),
+            counting_active: c.counting_active !== false,
+            count_mode: c.count_mode === 2 ? 2 : 1,
             // Analytics fields
             in_count: c.in_count ?? 0,
             out_count: c.out_count ?? 0,
@@ -265,6 +267,8 @@ export default function Cameras() {
                   in_count: dataPayload.in_count ?? cam.in_count,
                   out_count: dataPayload.out_count ?? cam.out_count,
                   occupancy: dataPayload.occupancy ?? cam.occupancy,
+                  counting_active: dataPayload.counting_active !== undefined ? Boolean(dataPayload.counting_active) : cam.counting_active,
+                  count_mode: dataPayload.count_mode !== undefined ? Number(dataPayload.count_mode) : cam.count_mode,
                 };
               }
               return cam;

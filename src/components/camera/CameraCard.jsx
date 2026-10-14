@@ -81,6 +81,18 @@ export default function CameraCard({ camera, onSelect, onToggleFrs, onFullscreen
   const [countingActive, setCountingActive] = useState(() => camera?.counting_active !== false);
   const [countMode, setCountMode] = useState(() => camera?.count_mode === 2 ? 2 : 1);
 
+  useEffect(() => {
+    if (camera?.counting_active !== undefined) {
+      setCountingActive(camera.counting_active !== false);
+    }
+  }, [camera?.counting_active]);
+
+  useEffect(() => {
+    if (camera?.count_mode !== undefined) {
+      setCountMode(camera.count_mode === 2 ? 2 : 1);
+    }
+  }, [camera?.count_mode]);
+
   if (!camera) return null;
 
   const isFrs = Boolean(camera.is_frs_camera || camera.isFRS || camera.is_frs || camera.camera_type === "FRS");
@@ -480,20 +492,20 @@ export default function CameraCard({ camera, onSelect, onToggleFrs, onFullscreen
                 }}
                 onClick={(e) => e.stopPropagation()}
               >
-                {/* ▶ / ⏸  Count gate */}
+                {/* Play / Pause Toggle Button */}
                 <button
                   className="cc-btn"
-                  title={countingActive ? "Stop Count (freeze official count commits)" : "Start Count (resume official count commits)"}
+                  title={countingActive ? "Counting Active (Live) — click to pause counting (bounding boxes remain visible)" : "Counting Paused — click to resume counting"}
                   style={{
                     fontSize: 10,
-                    padding: "2px 6px",
+                    padding: "2px 7px",
                     display: "flex",
                     alignItems: "center",
-                    gap: 2,
+                    gap: 3,
                     fontWeight: 700,
-                    background: countingActive ? "rgba(63,185,80,0.15)" : "rgba(248,81,73,0.1)",
+                    background: countingActive ? "rgba(63,185,80,0.18)" : "rgba(248,81,73,0.14)",
                     color: countingActive ? "#3fb950" : "#f85149",
-                    borderColor: countingActive ? "rgba(63,185,80,0.4)" : "rgba(248,81,73,0.35)",
+                    borderColor: countingActive ? "rgba(63,185,80,0.45)" : "rgba(248,81,73,0.4)",
                   }}
                   onClick={async (e) => {
                     e.stopPropagation();
@@ -506,22 +518,22 @@ export default function CameraCard({ camera, onSelect, onToggleFrs, onFullscreen
                     }
                   }}
                 >
-                  <i className={`bi ${countingActive ? "bi-pause-circle-fill" : "bi-play-circle-fill"}`} style={{ fontSize: 10 }} />
-                  {countingActive ? "⏸" : "▶"}
+                  <i className={`bi ${countingActive ? "bi-play-fill" : "bi-pause-fill"}`} style={{ fontSize: 12 }} />
+                  <span>{countingActive ? "Play" : "Paused"}</span>
                 </button>
 
-                {/* Count Mode (was +1) */}
+                {/* Camera / +1 Button */}
                 <button
                   className="cc-btn"
-                  title="Count mode: 1 per person crossing"
+                  title="Camera mode: 1 count per person crossing (Default)"
                   style={{
                     fontSize: 10,
                     padding: "2px 7px",
                     fontWeight: 800,
                     fontFamily: "var(--cc-font-mono)",
-                    background: countMode === 1 ? "rgba(88,166,255,0.2)" : "transparent",
+                    background: countMode === 1 ? "rgba(88,166,255,0.22)" : "transparent",
                     color: countMode === 1 ? "#58a6ff" : "var(--cc-text-muted)",
-                    borderColor: countMode === 1 ? "rgba(88,166,255,0.5)" : "var(--cc-border)",
+                    borderColor: countMode === 1 ? "rgba(88,166,255,0.55)" : "var(--cc-border)",
                   }}
                   onClick={async (e) => {
                     e.stopPropagation();
@@ -533,21 +545,21 @@ export default function CameraCard({ camera, onSelect, onToggleFrs, onFullscreen
                     }
                   }}
                 >
-                  Count
+                  Camera (+1)
                 </button>
 
-                {/* Queue Mode (was +2) */}
+                {/* Queue / +2 Button */}
                 <button
                   className="cc-btn"
-                  title="Queue mode: 2 per person crossing"
+                  title="Queue mode: 2 counts per person crossing"
                   style={{
                     fontSize: 10,
                     padding: "2px 7px",
                     fontWeight: 800,
                     fontFamily: "var(--cc-font-mono)",
-                    background: countMode === 2 ? "rgba(210,153,34,0.2)" : "transparent",
+                    background: countMode === 2 ? "rgba(210,153,34,0.25)" : "transparent",
                     color: countMode === 2 ? "#d29922" : "var(--cc-text-muted)",
-                    borderColor: countMode === 2 ? "rgba(210,153,34,0.5)" : "var(--cc-border)",
+                    borderColor: countMode === 2 ? "rgba(210,153,34,0.6)" : "var(--cc-border)",
                   }}
                   onClick={async (e) => {
                     e.stopPropagation();
@@ -559,7 +571,7 @@ export default function CameraCard({ camera, onSelect, onToggleFrs, onFullscreen
                     }
                   }}
                 >
-                  Queue
+                  Queue (+2)
                 </button>
               </div>
             )}
