@@ -1527,6 +1527,18 @@ class RTSPCameraWorker:
                     self._next_track_id += 1
                     self.state.detections_count += 1
                     bh_new = det["bbox"][3] - det["bbox"][1]
+
+                    # Check pruned ghost table: if this new detection is near a recently-pruned track
+                    # that already crossed a line, inherit its crossed_lines to prevent double-counting.
+                    ghost_table = getattr(self, "_pruned_ghost_table", [])
+                    inherited_crossed = set()
+                    best_ghost_dist = 999.0
+                    for ghost in ghost_table:
+                        gd = math.hypot(det_c[0] - ghost["centroid"][0], det_c[1] - ghost["centroid"][1])
+                        if gd < 80.0 and gd < best_ghost_dist:
+                            best_ghost_dist = gd
+                            inherited_crossed = set(ghost["crossed_lines"])
+
                     self._crowd_tracks[new_tid] = {
                         "track_id": new_tid,
                         "bbox": det["bbox"],
@@ -1541,20 +1553,37 @@ class RTSPCameraWorker:
                         "history": deque([(det_c, curr_time)], maxlen=20),
                         "loco_history": deque([(curr_time, det_c, det["bottom_center"], bh_new)], maxlen=25),
                         "cooldown_until": 0.0,
-                        "crossed_lines": set(),  # Independent: never inherited from other tracks!
+                        "crossed_lines": inherited_crossed,  # Inherited from ghost to prevent double-count!
                         "movement_state": "MOVING",
                         "last_moving_time": curr_time,
                         "stopped_frames": 0,
                     }
 
-                # Prune tracks ONLY when they leave camera bounds or remain unseen for > 60 frames (>15s)
+                # Prune tracks aggressively: misses > 18 (~2.5s at 8fps) OR off-screen.
+                # This matches the Sept-20 working logic — long-lived ghost tracks drift and cause re-counts.
+                # Save pruned track centroids + crossed_lines to a short-lived ghost table so
+                # that a person who briefly disappears and gets a NEW track ID is NOT counted again.
+                if not hasattr(self, "_pruned_ghost_table"):
+                    self._pruned_ghost_table = []  # List of {centroid, crossed_lines, pruned_at}
+
                 stale_tids = [
                     tid for tid, trk in self._crowd_tracks.items()
-                    if (trk.get("misses", 0) > 60 and (curr_time - trk.get("last_seen", curr_time)) > 15.0)
+                    if trk.get("misses", 0) > 18 or (curr_time - trk.get("last_seen", curr_time)) > 3.0
                     or trk["bbox"][2] < 5 or trk["bbox"][3] < 5 or trk["bbox"][0] > (w_orig - 5) or trk["bbox"][1] > (h_orig - 5)
                 ]
                 for tid in stale_tids:
-                    del self._crowd_tracks[tid]
+                    pruned_trk = self._crowd_tracks.pop(tid)
+                    # Only preserve ghost if it actually crossed something (otherwise irrelevant)
+                    if pruned_trk.get("crossed_lines"):
+                        self._pruned_ghost_table.append({
+                            "centroid": pruned_trk["centroid"],
+                            "crossed_lines": set(pruned_trk["crossed_lines"]),
+                            "pruned_at": curr_time,
+                        })
+
+                # Expire ghosts older than 12 seconds
+                self._pruned_ghost_table = [g for g in self._pruned_ghost_table if curr_time - g["pruned_at"] < 12.0]
+
 
                 purposes = self.state.ai_purposes or ["ENTRY_EXIT"]
 
