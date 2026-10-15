@@ -894,6 +894,16 @@ class RTSPCameraWorker:
         self._next_queue_track_id: int = 1
         self._last_snapshot_persist: float = 0.0
         self._recent_crossings: List[dict] = []
+        # ── Performance / Rate-Limiting ──────────────────────────────────────
+        # Per-camera inference rate cap. YOLO11x on a T4 GPU takes ~20-25ms per
+        # frame. With 4 cameras sharing ONE GPU session (single lock), naive
+        # 50Hz polling causes GPU starvation. Capping each camera at 4 FPS
+        # gives the GPU ~100ms per round-trip — comfortable and smooth.
+        self._last_crowd_infer_time: float = 0.0
+        # Throttle how often the capture thread overwrites _latest_ai_rgb.
+        # Without this, the AI thread always sees a frame that was queued while
+        # the GPU was busy — effectively processing stale frames under load.
+        self._ai_feed_last_time: float = 0.0
 
     def _ai_detection_loop(self, face_model, matcher, tracker):
         crop_dir = str(_DATA_CROPS_DIR)
@@ -1281,6 +1291,19 @@ class RTSPCameraWorker:
                 continue
 
             now = time.time()
+
+            # ── Inference rate cap ─────────────────────────────────────────────
+            # g4.large has 1 T4 GPU shared across all cameras. YOLO11x takes
+            # ~20-25ms per frame. 4 cameras × 25ms = 100ms — we must serialise
+            # them through the GPU lock. Targeting 4 fps per camera (250ms gap)
+            # keeps GPU utilisation ~40% and eliminates starvation / freeze.
+            # Counting accuracy is fine at 4 fps: a person crossing a line takes
+            # ~0.5-1s, giving 2-4 detection samples per crossing.
+            _CROWD_AI_INTERVAL = 0.25  # seconds between inferences per camera (4 fps)
+            if (now - self._last_crowd_infer_time) < _CROWD_AI_INTERVAL:
+                time.sleep(0.04)
+                continue
+
             now_dt_ist = datetime.now(timezone.utc).astimezone(timezone(timedelta(hours=5, minutes=30)))
             cur_day_str = now_dt_ist.strftime("%Y-%m-%d")
             if getattr(self.state, "_active_date", None) != cur_day_str:
@@ -1331,6 +1354,10 @@ class RTSPCameraWorker:
                 inp = (img_resized.transpose(2, 0, 1).astype(np.float32) / 255.0)[np.newaxis, ...]
                 inp_name = yolo_sess.get_inputs()[0].name
                 out_name = yolo_sess.get_outputs()[0].name
+
+                # Stamp inference time BEFORE acquiring GPU lock — counts wait time
+                # in the interval so we don't overshoot the 4 fps target under load.
+                self._last_crowd_infer_time = time.time()
 
                 # Per-GPU lock: only cameras sharing the same GPU serialize here.
                 # Cameras on different GPUs (e.g. GPU-0 vs GPU-3) run in parallel.
@@ -2068,7 +2095,7 @@ class RTSPCameraWorker:
             except Exception as e:
                 logger.warning(f"[Crowd-AI-Worker:{self.state.camera_id}] Inference loop warning: {type(e).__name__}: {e}")
 
-            time.sleep(0.02)
+            time.sleep(0.05)  # Prevent spin-wait; rate cap above gates actual inference
 
     def run(self):
         (FaceModel, IdentityMatcher, FaceQualityAssessor, FaceTracker, RTSPReader, db) = _load_frs_components()
@@ -2093,7 +2120,11 @@ class RTSPCameraWorker:
             tracker = FaceTracker(max_missed_frames=15, min_iou=0.10, max_center_distance=180.0) if FaceTracker else None
 
         try:
-            reader = RTSPReader(url=self.state.rtsp_url, resize=(1280, 720))
+            # CROWD cameras decode at 960x540 (540p) — YOLO resizes to 640x640 anyway,
+            # so 540p gives identical detection quality at ~44% less memory bandwidth.
+            # FRS cameras keep 720p for better face crop quality.
+            _rtsp_res = (1280, 720) if self.state.is_frs else (960, 540)
+            reader = RTSPReader(url=self.state.rtsp_url, resize=_rtsp_res)
             self.state.reader = reader
             self.reader = reader
             reader.start()
@@ -2123,9 +2154,19 @@ class RTSPCameraWorker:
                 if rgb is None:
                     continue
 
-                # Pass latest frame to AI detection threads and worker state
+                # Feed FRS AI thread every frame (face detection needs high frame rate).
+                # Feed Crowd AI thread at most every 150ms (~6-7 fps) — the inference
+                # loop itself is capped at 4 fps, but we feed slightly faster so it
+                # always has a fresh frame ready when it does run. This prevents the
+                # AI thread from processing frames that are several seconds old when
+                # the GPU was busy (the old "stale frame" problem causing count spikes).
+                now_ts = time.time()
                 with self._ai_lock:
-                    self._latest_ai_rgb = rgb
+                    # FRS always gets the frame; crowd gets it at throttled rate
+                    if self.state.is_frs or (now_ts - self._ai_feed_last_time >= 0.15):
+                        self._latest_ai_rgb = rgb
+                        if not self.state.is_frs:
+                            self._ai_feed_last_time = now_ts
                 with self.state.frame_lock:
                     self.state.latest_rgb = rgb
 
