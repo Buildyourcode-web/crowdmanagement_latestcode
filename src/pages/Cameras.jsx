@@ -372,6 +372,8 @@ export default function Cameras() {
       people_count: eng.people_count ?? existing.people_count ?? eng.occupancy ?? 0,
       queue_movement_status: eng.queue_movement_status || existing.queue_movement_status || "STOPPED",
       zone_data: eng.zone_data || existing.zone_data || [],
+      counting_active: eng.counting_active !== undefined ? eng.counting_active : (existing.counting_active !== undefined ? existing.counting_active : true),
+      count_mode: eng.count_mode !== undefined ? eng.count_mode : (existing.count_mode !== undefined ? existing.count_mode : 1),
     });
   }
 

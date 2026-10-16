@@ -1619,7 +1619,8 @@ class RTSPCameraWorker:
                 # -----------------------------------------------------------
                 # 1. ENTRY / EXIT Mode: Trajectory Segment Crossing (Strict No-Touch)
                 # -----------------------------------------------------------
-                if any(p in purposes for p in ("ENTRY", "EXIT", "ENTRY_EXIT")) and self._cached_roi_lines:
+                is_counting_active = getattr(self.state, "counting_active", True)
+                if any(p in purposes for p in ("ENTRY", "EXIT", "ENTRY_EXIT")) and self._cached_roi_lines and is_counting_active:
                     for trk in list(self._crowd_tracks.values()):
                         # Gate 1: Require at least 4 confirmed detection hits to stabilize track
                         if trk.get("hits", 0) < 4:
@@ -3229,6 +3230,14 @@ async def api_set_camera_counting_active(
     if state is None:
         raise HTTPException(status_code=404, detail=f"Camera worker for {camera_id} not found")
     state.counting_active = bool(eff_active)
+    if bool(eff_active) and state.worker is not None:
+        # Resuming counting: clear ghost table so old crossings don't block new arrivals
+        if hasattr(state.worker, "_pruned_ghost_table"):
+            state.worker._pruned_ghost_table.clear()
+        # Clear crossed_lines on existing tracks so persons crossing after resume count cleanly
+        for trk in getattr(state.worker, "_crowd_tracks", {}).values():
+            trk["crossed_lines"] = set()
+            trk["cooldown_until"] = 0.0
     logger.info(f"[FRS-Engine] Camera {camera_id} counting_active set to {eff_active}")
     telemetry_payload = {
         "camera_id": state.camera_id,

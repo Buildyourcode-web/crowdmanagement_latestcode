@@ -511,10 +511,12 @@ export default function CameraCard({ camera, onSelect, onToggleFrs, onFullscreen
                     e.stopPropagation();
                     const next = !countingActive;
                     setCountingActive(next);
+                    camera.counting_active = next;
                     try {
                       await setCameraCountingActive(camera.camera_code || camera.id, next);
                     } catch (_) {
                       setCountingActive(!next); // revert on error
+                      camera.counting_active = !next;
                     }
                   }}
                 >
